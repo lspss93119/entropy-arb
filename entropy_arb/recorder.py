@@ -37,7 +37,7 @@ from .book import OrderBook
 
 log = logging.getLogger("recorder")
 
-HEADER = ["minute_ts", "time_utc",
+HEADER = ["minute_ts", "time_utc", "symbol", "hedge",
           "entropy_bid", "entropy_ask", "hedge_bid", "hedge_ask",
           "premium_open_bps", "premium_high_bps", "premium_low_bps",
           "premium_close_bps", "premium_mean_bps", "premium_std_bps",
@@ -81,13 +81,14 @@ class _MinuteAgg:
         self.b_max = max(self.b_max, buy_edge)
         self.e_bid, self.e_ask, self.h_bid, self.h_ask = e_bid, e_ask, h_bid, h_ask
 
-    def row(self) -> list:
+    def row(self, symbol: str, hedge: str) -> list:
         mean = self.p_sum / self.n
         var = max(self.p_sumsq / self.n - mean * mean, 0.0)
         ts = self.minute * 60
         return [ts,
                 datetime.fromtimestamp(ts, tz=timezone.utc)
                 .strftime("%Y-%m-%dT%H:%M:%SZ"),
+                symbol, hedge,
                 f"{self.e_bid:.10g}", f"{self.e_ask:.10g}",
                 f"{self.h_bid:.10g}", f"{self.h_ask:.10g}",
                 f"{self.p_open:.3f}", f"{self.p_high:.3f}",
@@ -100,8 +101,11 @@ class _MinuteAgg:
 
 class MinuteRecorder:
     def __init__(self, path: str, entropy_book: OrderBook, hedge_book: OrderBook,
-                 staleness_sec: float, interval_sec: float = 1.0) -> None:
+                 staleness_sec: float, interval_sec: float = 1.0, *,
+                 symbol: str, hedge: str) -> None:
         self.path = path
+        self.symbol = symbol
+        self.hedge = hedge
         self.entropy_book = entropy_book
         self.hedge_book = hedge_book
         self.staleness_sec = staleness_sec
@@ -136,7 +140,7 @@ class MinuteRecorder:
             return
         if self._writer is None:
             self._open()
-        self._writer.writerow(self._agg.row())
+        self._writer.writerow(self._agg.row(self.symbol, self.hedge))
         self._fh.flush()
         self.rows_written += 1
         self._agg = None

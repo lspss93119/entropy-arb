@@ -6,6 +6,8 @@ import os
 import sys
 import tempfile
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from entropy_arb.config import ConfigError, load_config  # noqa: E402
@@ -55,6 +57,33 @@ def test_minimal_defaults():
     assert cfg.hedge.lighter_profile.chain_id == 304
     assert cfg.take_fraction == 0.5          # defaults kick in
     assert cfg.recorder_enabled is True
+    assert cfg.recorder_csv == "logs/minutes-SNDK-lighter.csv"
+
+
+@pytest.mark.parametrize(
+    ("hedge", "expected"),
+    [
+        ("lighter", "logs/minutes-SNDK-lighter.csv"),
+        ("lighter-rh", "logs/minutes-SNDK-lighter-rh.csv"),
+        ("tradexyz", "logs/minutes-SNDK-tradexyz.csv"),
+    ],
+)
+def test_default_recorder_csv_is_scoped_to_symbol_and_hedge(hedge, expected):
+    cfg = load(
+        MINIMAL + "\nrecorder:\n  csv: logs/minutes.csv\n",
+        symbol="SNDK",
+        hedge=hedge,
+    )
+    assert cfg.recorder_csv == expected
+
+
+def test_custom_recorder_csv_is_preserved():
+    cfg = load(
+        MINIMAL + "\nrecorder:\n  csv: archive/custom-minutes.csv\n",
+        symbol="SNDK",
+        hedge="lighter-rh",
+    )
+    assert cfg.recorder_csv == "archive/custom-minutes.csv"
 
 
 def test_tradexyz_hedge():

@@ -32,6 +32,7 @@ HL_API_URL = "https://api.hyperliquid.xyz"
 HL_WS_URL = "wss://api.hyperliquid.xyz/ws"   # official ws — the only HL feed used
 
 HEDGE_VENUES = ("lighter", "lighter-rh", "tradexyz")
+DEFAULT_RECORDER_CSV = "logs/minutes.csv"
 
 
 @dataclass(frozen=True)
@@ -238,6 +239,13 @@ def _get(d: dict, section: str, key: str, default):
     return (d.get(section) or {}).get(key, default)
 
 
+def _resolve_recorder_csv(path: str, symbol: str, hedge_venue: str) -> str:
+    if path != DEFAULT_RECORDER_CSV:
+        return path
+    stem, ext = os.path.splitext(path)
+    return f"{stem}-{symbol}-{hedge_venue}{ext}"
+
+
 # ------------------------------------------------------------------ env layer
 
 def _env_s(name: str) -> Optional[str]:
@@ -360,7 +368,11 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         venue_probe_sec=float(_get(raw, "execution", "venue_probe_sec", 30.0)),
         http_keepalive_sec=float(_get(raw, "execution", "http_keepalive_sec", 10.0)),
         recorder_enabled=bool(_get(raw, "recorder", "enabled", True)),
-        recorder_csv=_get(raw, "recorder", "csv", "logs/minutes.csv"),
+        recorder_csv=_resolve_recorder_csv(
+            _get(raw, "recorder", "csv", DEFAULT_RECORDER_CSV),
+            symbol,
+            hedge_venue,
+        ),
         log_level=str(_get(raw, "logging", "level", "INFO")).upper(),
         status_interval_sec=float(_get(raw, "logging", "status_interval_sec", 30.0)),
         trades_csv=_get(raw, "logging", "trades_csv", "logs/trades.csv"),

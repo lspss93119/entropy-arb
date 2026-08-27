@@ -21,7 +21,8 @@ def set_book(book, bid, ask):
 def test_minute_aggregation_and_rollover():
     e_book, h_book = OrderBook(), OrderBook()
     path = os.path.join(tempfile.mkdtemp(), "minutes.csv")
-    rec = MinuteRecorder(path, e_book, h_book, staleness_sec=1e9)
+    rec = MinuteRecorder(path, e_book, h_book, staleness_sec=1e9,
+                         symbol="SNDK", hedge="lighter-rh")
 
     t0 = 1_700_000_000.0            # 20s into a minute (boundary at ...020)
     # minute 1: entropy 10 bps rich, then 20 bps rich
@@ -38,8 +39,11 @@ def test_minute_aggregation_and_rollover():
     with open(path, newline="") as fh:
         rows = list(csv.DictReader(fh))
     assert [*rows[0]] == HEADER
+    assert HEADER[:4] == ["minute_ts", "time_utc", "symbol", "hedge"]
     assert len(rows) == 2
     m1, m2 = rows
+    assert (m1["symbol"], m1["hedge"]) == ("SNDK", "lighter-rh")
+    assert (m2["symbol"], m2["hedge"]) == ("SNDK", "lighter-rh")
     assert int(m1["samples"]) == 2 and int(m2["samples"]) == 1
     assert abs(float(m1["premium_open_bps"]) - 10.0) < 0.2
     assert abs(float(m1["premium_high_bps"]) - 20.0) < 0.2
@@ -58,7 +62,8 @@ def test_minute_aggregation_and_rollover():
 def test_stale_books_are_skipped():
     e_book, h_book = OrderBook(), OrderBook()
     path = os.path.join(tempfile.mkdtemp(), "minutes.csv")
-    rec = MinuteRecorder(path, e_book, h_book, staleness_sec=1e9)
+    rec = MinuteRecorder(path, e_book, h_book, staleness_sec=1e9,
+                         symbol="SNDK", hedge="lighter-rh")
     rec.sample(1_700_000_000.0)        # both books empty -> nothing recorded
     set_book(e_book, 100.0, 100.02)    # only one side fresh
     rec.sample(1_700_000_001.0)
@@ -73,7 +78,8 @@ def test_append_keeps_single_header():
     set_book(e_book, 100.0, 100.02)
     set_book(h_book, 100.0, 100.02)
     for start in (1_700_000_000.0, 1_700_000_060.0):
-        rec = MinuteRecorder(path, e_book, h_book, staleness_sec=1e9)
+        rec = MinuteRecorder(path, e_book, h_book, staleness_sec=1e9,
+                             symbol="SNDK", hedge="lighter-rh")
         rec.sample(start)
         rec.close()
     with open(path) as fh:
