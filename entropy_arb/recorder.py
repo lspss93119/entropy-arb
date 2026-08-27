@@ -45,7 +45,9 @@ HEADER = ["minute_ts", "time_utc", "symbol", "hedge",
           "sell_edge_mean_bps", "sell_edge_max_bps",
           "buy_edge_mean_bps", "buy_edge_max_bps", "samples"]
 SAMPLE_HEADER = ["timestamp_ms", "premium_bps",
-                 "sell_edge_bps", "buy_edge_bps"]
+                 "sell_edge_bps", "buy_edge_bps",
+                 "entropy_bid", "entropy_ask", "hedge_bid", "hedge_ask",
+                 "entropy_book_update_ms", "hedge_book_update_ms"]
 SAMPLE_FLUSH_ROWS = 10
 
 
@@ -53,11 +55,11 @@ def _samples_path(minutes_path: str) -> str:
     directory, filename = os.path.split(minutes_path)
     stem, ext = os.path.splitext(filename)
     if stem == "minutes":
-        sample_stem = "samples"
+        sample_stem = "samples-v2"
     elif stem.startswith("minutes-"):
-        sample_stem = f"samples-{stem[len('minutes-'):]}"
+        sample_stem = f"samples-v2-{stem[len('minutes-'):]}"
     else:
-        sample_stem = f"{stem}-samples"
+        sample_stem = f"{stem}-samples-v2"
     return os.path.join(directory, sample_stem + ext)
 
 
@@ -177,11 +179,14 @@ class MinuteRecorder:
         log.info("recording 1-second edge data -> %s", self.samples_path)
 
     def _write_sample(self, timestamp_ms: int, premium_bps: float,
-                      sell_edge_bps: float, buy_edge_bps: float) -> None:
+                      sell_edge_bps: float, buy_edge_bps: float,
+                      e_bid: float, e_ask: float, h_bid: float, h_ask: float,
+                      e_update_ms: int, h_update_ms: int) -> None:
         if self._samples_writer is None:
             self._open_samples()
         self._samples_writer.writerow([
             timestamp_ms, premium_bps, sell_edge_bps, buy_edge_bps,
+            e_bid, e_ask, h_bid, h_ask, e_update_ms, h_update_ms,
         ])
         self._samples_pending += 1
         if self._samples_pending >= SAMPLE_FLUSH_ROWS:
@@ -216,7 +221,12 @@ class MinuteRecorder:
             self._agg = _MinuteAgg(minute)
         premium, sell_edge, buy_edge = self._agg.add(
             e_bid, e_ask, h_bid, h_ask)
-        self._write_sample(int(now * 1000), premium, sell_edge, buy_edge)
+        self._write_sample(
+            int(now * 1000), premium, sell_edge, buy_edge,
+            e_bid, e_ask, h_bid, h_ask,
+            int(self.entropy_book.last_update_ts * 1000),
+            int(self.hedge_book.last_update_ts * 1000),
+        )
 
     def close(self) -> None:
         """Flush the partial minute and close the file (call on shutdown)."""

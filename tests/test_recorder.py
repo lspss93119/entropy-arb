@@ -25,6 +25,8 @@ MINUTE_HEADER = [
 ]
 SAMPLE_HEADER = [
     "timestamp_ms", "premium_bps", "sell_edge_bps", "buy_edge_bps",
+    "entropy_bid", "entropy_ask", "hedge_bid", "hedge_ask",
+    "entropy_book_update_ms", "hedge_book_update_ms",
 ]
 
 
@@ -77,15 +79,18 @@ def test_sample_rows_match_minute_bbo_math_and_timestamp():
     e_book, h_book = OrderBook(), OrderBook()
     directory = tempfile.mkdtemp()
     minute_path = os.path.join(directory, "minutes-SNDK-lighter-rh.csv")
-    sample_path = os.path.join(directory, "samples-SNDK-lighter-rh.csv")
+    sample_path = os.path.join(directory, "samples-v2-SNDK-lighter-rh.csv")
     rec = MinuteRecorder(minute_path, e_book, h_book, staleness_sec=1e9,
                          symbol="SNDK", hedge="lighter-rh")
 
     t0 = 1_700_000_020.123
     set_book(e_book, 100.09, 100.11)
     set_book(h_book, 99.99, 100.01)
+    e_book.last_update_ts = 1_700_000_019.456
+    h_book.last_update_ts = 1_700_000_019.789
     rec.sample(t0)
     set_book(e_book, 100.19, 100.21)
+    e_book.last_update_ts = 1_700_000_020.987
     rec.sample(t0 + 1.0)
     rec.close()
 
@@ -110,16 +115,25 @@ def test_sample_rows_match_minute_bbo_math_and_timestamp():
     )
     assert float(first["sell_edge_bps"]) == ((100.09 / 100.01) - 1) * 1e4
     assert float(first["buy_edge_bps"]) == ((99.99 / 100.11) - 1) * 1e4
+    assert float(first["entropy_bid"]) == 100.09
+    assert float(first["entropy_ask"]) == 100.11
+    assert float(first["hedge_bid"]) == 99.99
+    assert float(first["hedge_ask"]) == 100.01
+    assert int(first["entropy_book_update_ms"]) == 1_700_000_019_456
+    assert int(first["hedge_book_update_ms"]) == 1_700_000_019_789
 
 
 @pytest.mark.parametrize(
     ("hedge", "minute_name", "sample_name"),
     [
-        ("lighter", "minutes-SNDK-lighter.csv", "samples-SNDK-lighter.csv"),
+        ("lighter", "minutes-SNDK-lighter.csv",
+         "samples-v2-SNDK-lighter.csv"),
         ("lighter-rh", "minutes-SNDK-lighter-rh.csv",
-         "samples-SNDK-lighter-rh.csv"),
+         "samples-v2-SNDK-lighter-rh.csv"),
         ("tradexyz", "minutes-SNDK-tradexyz.csv",
-         "samples-SNDK-tradexyz.csv"),
+         "samples-v2-SNDK-tradexyz.csv"),
+        ("lighter", "minutes.csv", "samples-v2.csv"),
+        ("lighter", "foo.csv", "foo-samples-v2.csv"),
     ],
 )
 def test_sample_file_is_sibling_of_venue_minute_file(
@@ -138,11 +152,37 @@ def test_sample_file_is_sibling_of_venue_minute_file(
     assert os.path.exists(sample_path)
 
 
+def test_legacy_sample_file_is_untouched_when_v2_is_written():
+    e_book, h_book = OrderBook(), OrderBook()
+    directory = tempfile.mkdtemp()
+    minute_path = os.path.join(directory, "minutes-SNDK-lighter.csv")
+    legacy_path = os.path.join(directory, "samples-SNDK-lighter.csv")
+    v2_path = os.path.join(directory, "samples-v2-SNDK-lighter.csv")
+    legacy_content = b"legacy-header\nlegacy-row\n"
+    with open(legacy_path, "wb") as fh:
+        fh.write(legacy_content)
+    legacy_before = os.stat(legacy_path)
+
+    rec = MinuteRecorder(minute_path, e_book, h_book, staleness_sec=1e9,
+                         symbol="SNDK", hedge="lighter")
+    set_book(e_book, 100.0, 100.02)
+    set_book(h_book, 100.0, 100.02)
+    rec.sample(1_700_000_000.0)
+    rec.close()
+
+    legacy_after = os.stat(legacy_path)
+    with open(legacy_path, "rb") as fh:
+        assert fh.read() == legacy_content
+    assert legacy_after.st_size == legacy_before.st_size
+    assert legacy_after.st_mtime_ns == legacy_before.st_mtime_ns
+    assert os.path.exists(v2_path)
+
+
 def test_sample_rows_flush_every_ten_and_close_flushes_remainder():
     e_book, h_book = OrderBook(), OrderBook()
     directory = tempfile.mkdtemp()
     minute_path = os.path.join(directory, "minutes-SNDK-lighter.csv")
-    sample_path = os.path.join(directory, "samples-SNDK-lighter.csv")
+    sample_path = os.path.join(directory, "samples-v2-SNDK-lighter.csv")
     rec = MinuteRecorder(minute_path, e_book, h_book, staleness_sec=1e9,
                          symbol="SNDK", hedge="lighter")
     set_book(e_book, 100.0, 100.02)
@@ -181,7 +221,7 @@ def test_stale_books_are_skipped():
     assert rec.rows_written == 0
     assert not os.path.exists(path)    # no row, no file
     assert not os.path.exists(os.path.join(os.path.dirname(path),
-                                           "samples.csv"))
+                                           "samples-v2.csv"))
 
 
 def test_append_keeps_single_header():
