@@ -6,6 +6,7 @@ and prints:
 
   * the premium distribution (midline candidates),
   * how often each candidate upper/lower band would have fired,
+  * optional second-level persistence event counts,
   * a ready-to-paste `thresholds:` snippet.
 
 分析机器人自动采集的分钟级盘口数据，输出溢价分布、各档阈值的触发频率，
@@ -14,6 +15,7 @@ and prints:
 Usage:
     python3 tools/analyze.py                    # logs/minutes.csv
     python3 tools/analyze.py --csv path.csv --hours 24 --min-samples 10
+    python3 tools/analyze.py --csv minutes.csv --samples samples.csv
 """
 from __future__ import annotations
 
@@ -24,6 +26,8 @@ import sys
 import time
 
 CANDIDATES = [1.0, 1.5, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 15.0, 20.0]
+PERSISTENCE_SECONDS = [0, 1, 2, 3, 5, 10]
+MAX_SAMPLE_GAP_MS = 1_500
 
 
 def pctl(sorted_vals: list, q: float) -> float:
@@ -60,6 +64,133 @@ def load_rows(path: str, hours: float, min_samples: int) -> list:
     return rows
 
 
+def load_sample_rows(path: str, hours: float) -> list:
+    cutoff_ms = ((time.time() - hours * 3600) * 1000
+                 if hours > 0 else 0.0)
+    rows = []
+    with open(path, newline="") as fh:
+        for r in csv.DictReader(fh):
+            try:
+                timestamp_ms = int(r["timestamp_ms"])
+                if timestamp_ms < cutoff_ms:
+                    continue
+                rows.append({
+                    "timestamp_ms": timestamp_ms,
+                    "premium_bps": float(r["premium_bps"]),
+                    "sell_edge_bps": float(r["sell_edge_bps"]),
+                    "buy_edge_bps": float(r["buy_edge_bps"]),
+                })
+            except (KeyError, ValueError):
+                continue
+    return sorted(rows, key=lambda r: r["timestamp_ms"])
+
+
+def _event_durations_ms(rows: list, qualifies, max_gap_ms: int) -> list[int]:
+    durations = []
+    start_ms = None
+    last_qualifying_ms = None
+    previous_ms = None
+
+    for row in rows:
+        timestamp_ms = row["timestamp_ms"]
+        if (previous_ms is not None
+                and timestamp_ms - previous_ms > max_gap_ms):
+            if start_ms is not None:
+                durations.append(last_qualifying_ms - start_ms)
+            start_ms = last_qualifying_ms = None
+
+        if qualifies(row):
+            if start_ms is None:
+                start_ms = timestamp_ms
+            last_qualifying_ms = timestamp_ms
+        elif start_ms is not None:
+            durations.append(last_qualifying_ms - start_ms)
+            start_ms = last_qualifying_ms = None
+        previous_ms = timestamp_ms
+
+    if start_ms is not None:
+        durations.append(last_qualifying_ms - start_ms)
+    return durations
+
+
+def count_persistence_events(rows: list, *, midline_bps: float,
+                             fees_bps: float, bands=CANDIDATES,
+                             durations_sec=PERSISTENCE_SECONDS,
+                             max_gap_ms: int = MAX_SAMPLE_GAP_MS) -> dict:
+    ordered = sorted(rows, key=lambda r: r["timestamp_ms"])
+    result = {}
+    for band in bands:
+        sell_durations = _event_durations_ms(
+            ordered,
+            lambda r, band=band: (
+                r["sell_edge_bps"] - midline_bps - fees_bps >= band),
+            max_gap_ms,
+        )
+        buy_durations = _event_durations_ms(
+            ordered,
+            lambda r, band=band: (
+                r["buy_edge_bps"] + midline_bps - fees_bps >= band),
+            max_gap_ms,
+        )
+        result[band] = {
+            "sell": {
+                duration: sum(1 for value in sell_durations
+                              if value >= duration * 1000)
+                for duration in durations_sec
+            },
+            "buy": {
+                duration: sum(1 for value in buy_durations
+                              if value >= duration * 1000)
+                for duration in durations_sec
+            },
+        }
+    return result
+
+
+def print_persistence_analysis(path: str, rows: list, midline_bps: float,
+                               fees_bps: float) -> None:
+    if not rows:
+        print(f"\n=== {path}: persistence research ===")
+        print("sample-data span: 0.0s")
+        print("observed coverage: 0.0s")
+        print("usable samples: 0")
+        print("coverage source: samples CSV "
+              "(independent of minute-data coverage)")
+        return
+
+    span_sec = (rows[-1]["timestamp_ms"] - rows[0]["timestamp_ms"]) / 1000.0
+    observed_coverage_sec = sum(
+        current["timestamp_ms"] - previous["timestamp_ms"]
+        for previous, current in zip(rows, rows[1:])
+        if current["timestamp_ms"] - previous["timestamp_ms"]
+        <= MAX_SAMPLE_GAP_MS
+    ) / 1000.0
+    print(f"\n=== {path}: persistence research ===")
+    print(f"sample-data span: {span_sec:.1f}s")
+    print(f"observed coverage: {observed_coverage_sec:.1f}s")
+    print(f"usable samples: {len(rows)}")
+    print("coverage source: samples CSV "
+          "(independent of minute-data coverage)")
+    print(f"gap rule: a gap > {MAX_SAMPLE_GAP_MS} ms ends the current event")
+    print("Persistence event counts (not minute counts), by minimum duration:")
+    labels = " ".join(f">={duration}s" for duration in PERSISTENCE_SECONDS)
+    print(f"  {'band bps':>9} | {'direction':>13} | {labels}")
+
+    counts = count_persistence_events(
+        rows,
+        midline_bps=midline_bps,
+        fees_bps=fees_bps,
+    )
+    for band in CANDIDATES:
+        for direction, label in (("sell", "SELL entropy"),
+                                 ("buy", "BUY entropy")):
+            values = " ".join(
+                f"{counts[band][direction][duration]:>4}"
+                for duration in PERSISTENCE_SECONDS
+            )
+            print(f"  {band:>9.1f} | {label:>13} | {values}")
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description="suggest thresholds from recorded "
                                             "minute data")
@@ -73,6 +204,9 @@ def main() -> None:
                         "pays both legs); recorded edges are pre-fee, so this "
                         "is subtracted before counting firings (default 0.0 — "
                         "pass ~1.0 with a tradexyz hedge)")
+    p.add_argument("--samples",
+                   help="optional second-level samples CSV for persistence "
+                        "event analysis")
     args = p.parse_args()
 
     try:
@@ -145,6 +279,15 @@ thresholds:
 Re-run with --hours to focus on recent regimes; premiums drift, so refresh
 these numbers regularly. / 溢价中枢会漂移，请定期重新分析并更新配置。
 """)
+
+    if args.samples:
+        try:
+            sample_rows = load_sample_rows(args.samples, args.hours)
+        except FileNotFoundError:
+            print(f"{args.samples} not found — collect second-level sample "
+                  f"data first", file=sys.stderr)
+            sys.exit(1)
+        print_persistence_analysis(args.samples, sample_rows, midline, fees)
 
 
 if __name__ == "__main__":

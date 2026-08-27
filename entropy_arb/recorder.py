@@ -1,9 +1,10 @@
 """Automatic 1-minute orderbook data recorder.
 
 While the bot runs (live or --record-only), both venues' actual order books
-are sampled once per second and aggregated into one CSV row per minute.
-This is the dataset users analyze (tools/analyze.py) to choose
-thresholds.midline_bps / upper_bps / lower_bps for config.yaml.
+are sampled once per second. Each valid BBO sample is persisted for persistence
+research and aggregated into one CSV row per minute. These are the datasets
+users analyze (tools/analyze.py) to choose thresholds.midline_bps /
+upper_bps / lower_bps and execution.premium_persist_sec for config.yaml.
 
 Definitions (all in bps, fees NOT included — the engine adds fees on top):
 
@@ -43,6 +44,21 @@ HEADER = ["minute_ts", "time_utc", "symbol", "hedge",
           "premium_close_bps", "premium_mean_bps", "premium_std_bps",
           "sell_edge_mean_bps", "sell_edge_max_bps",
           "buy_edge_mean_bps", "buy_edge_max_bps", "samples"]
+SAMPLE_HEADER = ["timestamp_ms", "premium_bps",
+                 "sell_edge_bps", "buy_edge_bps"]
+SAMPLE_FLUSH_ROWS = 10
+
+
+def _samples_path(minutes_path: str) -> str:
+    directory, filename = os.path.split(minutes_path)
+    stem, ext = os.path.splitext(filename)
+    if stem == "minutes":
+        sample_stem = "samples"
+    elif stem.startswith("minutes-"):
+        sample_stem = f"samples-{stem[len('minutes-'):]}"
+    else:
+        sample_stem = f"{stem}-samples"
+    return os.path.join(directory, sample_stem + ext)
 
 
 class _MinuteAgg:
@@ -61,7 +77,8 @@ class _MinuteAgg:
         self.b_max = -math.inf
         self.e_bid = self.e_ask = self.h_bid = self.h_ask = 0.0
 
-    def add(self, e_bid: float, e_ask: float, h_bid: float, h_ask: float) -> None:
+    def add(self, e_bid: float, e_ask: float, h_bid: float,
+            h_ask: float) -> tuple[float, float, float]:
         e_mid = (e_bid + e_ask) / 2.0
         h_mid = (h_bid + h_ask) / 2.0
         prem = (e_mid / h_mid - 1.0) * 1e4
@@ -80,6 +97,7 @@ class _MinuteAgg:
         self.b_sum += buy_edge
         self.b_max = max(self.b_max, buy_edge)
         self.e_bid, self.e_ask, self.h_bid, self.h_ask = e_bid, e_ask, h_bid, h_ask
+        return prem, sell_edge, buy_edge
 
     def row(self, symbol: str, hedge: str) -> list:
         mean = self.p_sum / self.n
@@ -104,6 +122,7 @@ class MinuteRecorder:
                  staleness_sec: float, interval_sec: float = 1.0, *,
                  symbol: str, hedge: str) -> None:
         self.path = path
+        self.samples_path = _samples_path(path)
         self.symbol = symbol
         self.hedge = hedge
         self.entropy_book = entropy_book
@@ -114,6 +133,9 @@ class MinuteRecorder:
         self._agg: Optional[_MinuteAgg] = None
         self._fh = None
         self._writer = None
+        self._samples_fh = None
+        self._samples_writer = None
+        self._samples_pending = 0
 
     def _open(self) -> None:
         d = os.path.dirname(self.path)
@@ -133,6 +155,38 @@ class MinuteRecorder:
             self._writer.writerow(HEADER)
             self._fh.flush()
         log.info("recording 1-minute orderbook data -> %s", self.path)
+
+    def _open_samples(self) -> None:
+        d = os.path.dirname(self.samples_path)
+        if d:
+            os.makedirs(d, exist_ok=True)
+        if (os.path.exists(self.samples_path)
+                and os.path.getsize(self.samples_path) > 0):
+            with open(self.samples_path) as fh0:
+                if fh0.readline().strip() != ",".join(SAMPLE_HEADER):
+                    log.warning("%s has an old header — rotated to %s.old",
+                                self.samples_path, self.samples_path)
+                    os.replace(self.samples_path, self.samples_path + ".old")
+        new = (not os.path.exists(self.samples_path)
+               or os.path.getsize(self.samples_path) == 0)
+        self._samples_fh = open(self.samples_path, "a", newline="")
+        self._samples_writer = csv.writer(self._samples_fh)
+        if new:
+            self._samples_writer.writerow(SAMPLE_HEADER)
+            self._samples_fh.flush()
+        log.info("recording 1-second edge data -> %s", self.samples_path)
+
+    def _write_sample(self, timestamp_ms: int, premium_bps: float,
+                      sell_edge_bps: float, buy_edge_bps: float) -> None:
+        if self._samples_writer is None:
+            self._open_samples()
+        self._samples_writer.writerow([
+            timestamp_ms, premium_bps, sell_edge_bps, buy_edge_bps,
+        ])
+        self._samples_pending += 1
+        if self._samples_pending >= SAMPLE_FLUSH_ROWS:
+            self._samples_fh.flush()
+            self._samples_pending = 0
 
     def _flush_agg(self) -> None:
         if self._agg is None or self._agg.n == 0:
@@ -160,7 +214,9 @@ class MinuteRecorder:
             return
         if self._agg is None:
             self._agg = _MinuteAgg(minute)
-        self._agg.add(e_bid, e_ask, h_bid, h_ask)
+        premium, sell_edge, buy_edge = self._agg.add(
+            e_bid, e_ask, h_bid, h_ask)
+        self._write_sample(int(now * 1000), premium, sell_edge, buy_edge)
 
     def close(self) -> None:
         """Flush the partial minute and close the file (call on shutdown)."""
@@ -168,6 +224,11 @@ class MinuteRecorder:
         if self._fh is not None:
             self._fh.close()
             self._fh = self._writer = None
+        if self._samples_fh is not None:
+            self._samples_fh.flush()
+            self._samples_fh.close()
+            self._samples_fh = self._samples_writer = None
+            self._samples_pending = 0
 
     async def run(self, stop: asyncio.Event) -> None:
         try:
