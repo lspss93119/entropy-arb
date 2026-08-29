@@ -20,6 +20,7 @@ ENTROPY_REFERENCE_HEADER: tuple[str, ...] = ("recv_ms", "oracle_px", "mark_px")
 LIGHTER_REFERENCE_HEADER: tuple[str, ...] = (
     "recv_ms", "server_ms", "index_px", "mark_px"
 )
+REFERENCE_FEED_STOP_TIMEOUT_SEC = 5.0
 
 
 class ReferenceParseError(ValueError):
@@ -455,3 +456,72 @@ class LighterReferenceFeed:
                 break
             await self._sleep(backoff)
             backoff = min(backoff * 2, 30.0)
+
+
+class ReferenceRecorder:
+    def __init__(
+        self,
+        *,
+        symbol: str,
+        hedge_key: str,
+        entropy_ws_url: str,
+        entropy_coin: str,
+        hedge_ws_url: str,
+        hedge_market_id: int,
+        directory: str = "logs",
+        feed_stop_timeout_sec: float = REFERENCE_FEED_STOP_TIMEOUT_SEC,
+    ) -> None:
+        entropy_path, hedge_path = reference_paths(
+            symbol,
+            hedge_key,
+            directory,
+        )
+        self.entropy_writer = ReferenceCsvWriter(
+            entropy_path,
+            ENTROPY_REFERENCE_HEADER,
+        )
+        self.hedge_writer = ReferenceCsvWriter(
+            hedge_path,
+            LIGHTER_REFERENCE_HEADER,
+        )
+        self.entropy_feed = HLReferenceFeed(
+            "entropy-reference",
+            entropy_ws_url,
+            entropy_coin,
+            self.entropy_writer,
+        )
+        self.hedge_feed = LighterReferenceFeed(
+            "hedge-reference",
+            hedge_ws_url,
+            hedge_market_id,
+            self.hedge_writer,
+        )
+        self.feed_stop_timeout_sec = feed_stop_timeout_sec
+
+    async def run(self, stop: asyncio.Event) -> None:
+        feed_stop = asyncio.Event()
+        feed_tasks = [
+            asyncio.create_task(
+                self.entropy_feed.run(feed_stop),
+                name="reference-entropy",
+            ),
+            asyncio.create_task(
+                self.hedge_feed.run(feed_stop),
+                name="reference-hedge",
+            ),
+        ]
+        try:
+            await stop.wait()
+        finally:
+            self.entropy_writer.stop_accepting()
+            self.hedge_writer.stop_accepting()
+            feed_stop.set()
+            _, pending = await asyncio.wait(
+                feed_tasks,
+                timeout=self.feed_stop_timeout_sec,
+            )
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*feed_tasks, return_exceptions=True)
+            self.entropy_writer.close()
+            self.hedge_writer.close()

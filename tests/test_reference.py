@@ -15,6 +15,7 @@ from entropy_arb.reference import (
     LighterReferenceFeed,
     ReferenceCsvWriter,
     ReferenceParseError,
+    ReferenceRecorder,
     parse_hl_reference,
     parse_lighter_reference,
     reference_paths,
@@ -771,3 +772,390 @@ def test_close_is_idempotent(tmp_path):
     writer.close()
     writer.write((2, 102.0, 103.0))
     assert path.read_bytes() == before
+
+
+def test_reference_recorder_shutdown_flushes_both_final_buffers(
+    tmp_path, monkeypatch
+):
+    async def scenario():
+        from entropy_arb import reference
+
+        feeds_started = 0
+        both_started = asyncio.Event()
+
+        class EntropyFeed:
+            def __init__(self, name, ws_url, coin, writer, **kwargs):
+                self.writer = writer
+
+            async def run(self, stop):
+                nonlocal feeds_started
+                self.writer.write((1, 100.0, 101.0))
+                feeds_started += 1
+                if feeds_started == 2:
+                    both_started.set()
+                await stop.wait()
+
+        class HedgeFeed:
+            def __init__(self, name, ws_url, market_id, writer, **kwargs):
+                self.writer = writer
+
+            async def run(self, stop):
+                nonlocal feeds_started
+                self.writer.write((1, 2, 100.0, 101.0))
+                feeds_started += 1
+                if feeds_started == 2:
+                    both_started.set()
+                await stop.wait()
+
+        monkeypatch.setattr(reference, "HLReferenceFeed", EntropyFeed)
+        monkeypatch.setattr(reference, "LighterReferenceFeed", HedgeFeed)
+        recorder = ReferenceRecorder(
+            symbol="SNDK",
+            hedge_key="lighter",
+            entropy_ws_url="wss://hl.invalid/ws",
+            entropy_coin="io:SNDK",
+            hedge_ws_url="wss://lighter.invalid/ws",
+            hedge_market_id=139,
+            directory=str(tmp_path),
+        )
+        stop = asyncio.Event()
+        task = asyncio.create_task(recorder.run(stop))
+        await both_started.wait()
+        stop.set()
+        await task
+        entropy_path, hedge_path = reference_paths(
+            "SNDK", "lighter", str(tmp_path)
+        )
+        assert len(read_rows(entropy_path)) == 2
+        assert len(read_rows(hedge_path)) == 2
+
+    asyncio.run(scenario())
+
+
+def test_shutdown_stops_feeds_before_idempotent_writer_close(monkeypatch):
+    async def scenario():
+        from entropy_arb import reference
+
+        events = []
+        feed_count = 0
+        feeds_started = asyncio.Event()
+
+        class OrderedWriter:
+            enabled = True
+
+            def __init__(self, path, header, flush_rows=10):
+                self.path = path
+                self.closed = False
+
+            def write(self, row):
+                assert not self.closed
+
+            def stop_accepting(self):
+                events.append(f"stop-accepting:{self.path}")
+
+            def close(self):
+                if not self.closed:
+                    assert events.count("feed-stopped") == 2
+                    events.append(f"close:{self.path}")
+                    self.closed = True
+
+        class OrderedFeed:
+            def __init__(self, name, ws_url, identity, writer, **kwargs):
+                self.writer = writer
+
+            async def run(self, stop):
+                nonlocal feed_count
+                feed_count += 1
+                if feed_count == 2:
+                    feeds_started.set()
+                await stop.wait()
+                events.append("feed-stopped")
+
+        monkeypatch.setattr(reference, "ReferenceCsvWriter", OrderedWriter)
+        monkeypatch.setattr(reference, "HLReferenceFeed", OrderedFeed)
+        monkeypatch.setattr(reference, "LighterReferenceFeed", OrderedFeed)
+        recorder = ReferenceRecorder(
+            symbol="SNDK",
+            hedge_key="lighter-rh",
+            entropy_ws_url="wss://hl.invalid/ws",
+            entropy_coin="io:SNDK",
+            hedge_ws_url="wss://rh.invalid/ws",
+            hedge_market_id=32,
+        )
+        stop = asyncio.Event()
+        task = asyncio.create_task(recorder.run(stop))
+        await feeds_started.wait()
+        stop.set()
+        await task
+        first_close = min(
+            index for index, event in enumerate(events)
+            if event.startswith("close:")
+        )
+        last_feed_stop = max(
+            index for index, event in enumerate(events)
+            if event == "feed-stopped"
+        )
+        assert last_feed_stop < first_close
+        recorder.entropy_writer.close()
+        recorder.hedge_writer.close()
+
+    asyncio.run(scenario())
+
+
+def test_stuck_feed_is_cancelled_and_awaited_before_close(monkeypatch):
+    async def scenario():
+        from entropy_arb import reference
+
+        events = []
+        started_count = 0
+        both_started = asyncio.Event()
+
+        class OrderedWriter:
+            def __init__(self, path, header, flush_rows=10):
+                self.path = path
+                self.enabled = True
+                self.closed = False
+
+            def write(self, row):
+                if self.closed:
+                    raise AssertionError("write after close")
+
+            def stop_accepting(self):
+                self.enabled = False
+
+            def close(self):
+                if not self.closed:
+                    self.closed = True
+                    events.append(f"close:{self.path}")
+
+        class StuckFeed:
+            def __init__(self, name, ws_url, identity, writer, **kwargs):
+                self.name = name
+
+            async def run(self, stop):
+                nonlocal started_count
+                started_count += 1
+                if started_count == 2:
+                    both_started.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    events.append(f"feed-cancelled:{self.name}")
+                    raise
+
+        monkeypatch.setattr(reference, "ReferenceCsvWriter", OrderedWriter)
+        monkeypatch.setattr(reference, "HLReferenceFeed", StuckFeed)
+        monkeypatch.setattr(reference, "LighterReferenceFeed", StuckFeed)
+        recorder = ReferenceRecorder(
+            symbol="SNDK",
+            hedge_key="lighter",
+            entropy_ws_url="wss://hl.invalid/ws",
+            entropy_coin="io:SNDK",
+            hedge_ws_url="wss://lighter.invalid/ws",
+            hedge_market_id=139,
+            feed_stop_timeout_sec=0.01,
+        )
+        stop = asyncio.Event()
+        task = asyncio.create_task(recorder.run(stop))
+        await both_started.wait()
+        stop.set()
+        await task
+
+        cancel_positions = [
+            index for index, event in enumerate(events)
+            if event.startswith("feed-cancelled:")
+        ]
+        close_positions = [
+            index for index, event in enumerate(events)
+            if event.startswith("close:")
+        ]
+        assert len(cancel_positions) == 2
+        assert len(close_positions) == 2
+        assert max(cancel_positions) < min(close_positions)
+
+    asyncio.run(scenario())
+
+
+def test_feed_failure_preserves_sibling_writer(tmp_path, monkeypatch):
+    async def scenario():
+        from entropy_arb import reference
+
+        sibling_started = asyncio.Event()
+
+        class FailedFeed:
+            def __init__(self, name, ws_url, coin, writer, **kwargs):
+                pass
+
+            async def run(self, stop):
+                raise RuntimeError("feed failed")
+
+        class SiblingFeed:
+            def __init__(self, name, ws_url, market_id, writer, **kwargs):
+                self.writer = writer
+
+            async def run(self, stop):
+                self.writer.write((1, 2, 100.0, 101.0))
+                sibling_started.set()
+                await stop.wait()
+
+        monkeypatch.setattr(reference, "HLReferenceFeed", FailedFeed)
+        monkeypatch.setattr(reference, "LighterReferenceFeed", SiblingFeed)
+        recorder = ReferenceRecorder(
+            symbol="SNDK",
+            hedge_key="lighter",
+            entropy_ws_url="wss://hl.invalid/ws",
+            entropy_coin="io:SNDK",
+            hedge_ws_url="wss://lighter.invalid/ws",
+            hedge_market_id=139,
+            directory=str(tmp_path),
+        )
+        stop = asyncio.Event()
+        task = asyncio.create_task(recorder.run(stop))
+        await sibling_started.wait()
+        stop.set()
+        await task
+        _, hedge_path = reference_paths(
+            "SNDK", "lighter", str(tmp_path)
+        )
+        assert len(read_rows(hedge_path)) == 2
+
+    asyncio.run(scenario())
+
+
+def test_bad_header_disables_only_one_sibling_writer(tmp_path, monkeypatch):
+    async def scenario():
+        from entropy_arb import reference
+
+        entropy_path, hedge_path = reference_paths(
+            "SNDK", "lighter", str(tmp_path)
+        )
+        original = b"wrong,header\n1,2\n"
+        with open(entropy_path, "wb") as fh:
+            fh.write(original)
+        both_started = asyncio.Event()
+        started_count = 0
+
+        class Feed:
+            def __init__(self, name, ws_url, identity, writer, **kwargs):
+                self.writer = writer
+
+            async def run(self, stop):
+                nonlocal started_count
+                self.writer.write((1, 100.0, 101.0))
+                started_count += 1
+                if started_count == 2:
+                    both_started.set()
+                await stop.wait()
+
+        class HedgeFeed:
+            def __init__(self, name, ws_url, market_id, writer, **kwargs):
+                self.writer = writer
+
+            async def run(self, stop):
+                self.writer.write((1, 2, 100.0, 101.0))
+                nonlocal started_count
+                started_count += 1
+                if started_count == 2:
+                    both_started.set()
+                await stop.wait()
+
+        monkeypatch.setattr(reference, "HLReferenceFeed", Feed)
+        monkeypatch.setattr(reference, "LighterReferenceFeed", HedgeFeed)
+        recorder = ReferenceRecorder(
+            symbol="SNDK",
+            hedge_key="lighter",
+            entropy_ws_url="wss://hl.invalid/ws",
+            entropy_coin="io:SNDK",
+            hedge_ws_url="wss://lighter.invalid/ws",
+            hedge_market_id=139,
+            directory=str(tmp_path),
+        )
+        stop = asyncio.Event()
+        task = asyncio.create_task(recorder.run(stop))
+        await both_started.wait()
+        stop.set()
+        await task
+        assert open(entropy_path, "rb").read() == original
+        assert len(read_rows(hedge_path)) == 2
+
+    asyncio.run(scenario())
+
+
+def test_sibling_isolation_prevents_write_after_stop_accepting(
+    tmp_path, monkeypatch
+):
+    async def scenario():
+        from entropy_arb import reference
+
+        events = []
+        both_started = asyncio.Event()
+        started_count = 0
+
+        class TrackingWriter:
+            def __init__(self, path, header, flush_rows=10):
+                self.path = path
+                self.accepting = True
+                self.closed = False
+
+            @property
+            def enabled(self):
+                return self.accepting and not self.closed
+
+            def write(self, row):
+                assert not self.closed
+                if self.accepting:
+                    events.append(f"write:{self.path}")
+
+            def stop_accepting(self):
+                self.accepting = False
+                events.append(f"stop-accepting:{self.path}")
+
+            def close(self):
+                if not self.closed:
+                    self.closed = True
+                    events.append(f"close:{self.path}")
+
+        class Feed:
+            def __init__(self, name, ws_url, identity, writer, **kwargs):
+                self.writer = writer
+
+            async def run(self, stop):
+                nonlocal started_count
+                self.writer.write((1, 100.0, 101.0))
+                started_count += 1
+                if started_count == 2:
+                    both_started.set()
+                await stop.wait()
+
+        monkeypatch.setattr(reference, "ReferenceCsvWriter", TrackingWriter)
+        monkeypatch.setattr(reference, "HLReferenceFeed", Feed)
+        monkeypatch.setattr(reference, "LighterReferenceFeed", Feed)
+        recorder = ReferenceRecorder(
+            symbol="SNDK",
+            hedge_key="lighter",
+            entropy_ws_url="wss://hl.invalid/ws",
+            entropy_coin="io:SNDK",
+            hedge_ws_url="wss://lighter.invalid/ws",
+            hedge_market_id=139,
+            directory=str(tmp_path),
+        )
+        stop = asyncio.Event()
+        task = asyncio.create_task(recorder.run(stop))
+        await both_started.wait()
+        stop.set()
+        await task
+        first_close = min(
+            index for index, event in enumerate(events)
+            if event.startswith("close:")
+        )
+        assert all(
+            not event.startswith("write:")
+            for event in events[first_close + 1:]
+        )
+        assert all(
+            events.index(event) < first_close
+            for event in events
+            if event.startswith("stop-accepting:")
+        )
+
+    asyncio.run(scenario())
