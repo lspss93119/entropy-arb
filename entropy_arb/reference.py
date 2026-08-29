@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+import asyncio
 import csv
+import json
 import logging
 import math
 import os
+import time
 from typing import Any
+
+try:
+    from websockets.asyncio.client import connect as ws_connect
+except ImportError:
+    from websockets import connect as ws_connect  # type: ignore
 
 log = logging.getLogger("reference")
 
@@ -255,3 +263,198 @@ class ReferenceCsvWriter:
                     handle.close()
                 except OSError as exc:
                     self._disable("close", exc)
+
+
+class HLReferenceFeed:
+    def __init__(
+        self,
+        name: str,
+        ws_url: str,
+        coin: str,
+        writer: ReferenceCsvWriter,
+        *,
+        connect=ws_connect,
+        clock_ns=time.time_ns,
+        sleep=asyncio.sleep,
+    ) -> None:
+        self.name = name
+        self.ws_url = ws_url
+        self.coin = coin
+        self.writer = writer
+        self._connect = connect
+        self._clock_ns = clock_ns
+        self._sleep = sleep
+
+    async def _pinger(self, ws) -> None:
+        """Send reference-connection application pings every five seconds."""
+        while True:
+            await self._sleep(5.0)
+            await ws.send(json.dumps({"method": "ping"}))
+
+    async def run(self, stop: asyncio.Event) -> None:
+        """Consume activeAssetCtx frames with isolated reconnect handling."""
+        backoff = 1.0
+        while not stop.is_set():
+            pinger = None
+            try:
+                async with self._connect(
+                    self.ws_url,
+                    max_size=2**23,
+                    open_timeout=10,
+                    ping_interval=15,
+                    ping_timeout=15,
+                ) as ws:
+                    backoff = 1.0
+                    await ws.send(
+                        json.dumps(
+                            {
+                                "method": "subscribe",
+                                "subscription": {
+                                    "type": "activeAssetCtx",
+                                    "coin": self.coin,
+                                },
+                            }
+                        )
+                    )
+                    pinger = asyncio.create_task(self._pinger(ws))
+                    async for raw in ws:
+                        recv_ms = self._clock_ns() // 1_000_000
+                        backoff = 1.0
+                        try:
+                            msg = json.loads(raw)
+                        except (json.JSONDecodeError, TypeError) as exc:
+                            log.warning(
+                                "[%s] malformed reference JSON: %s",
+                                self.name,
+                                exc,
+                            )
+                            continue
+                        try:
+                            parsed = parse_hl_reference(msg, coin=self.coin)
+                        except Exception as exc:
+                            log.warning(
+                                "[%s] malformed relevant reference frame: %s",
+                                self.name,
+                                exc,
+                            )
+                            continue
+                        if parsed is not None and self.writer.enabled:
+                            self.writer.write((recv_ms, *parsed))
+                        if stop.is_set():
+                            break
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.warning(
+                    "[%s] reference ws error: %s — reconnect in %.0fs",
+                    self.name,
+                    exc,
+                    backoff,
+                )
+            finally:
+                if pinger is not None:
+                    pinger.cancel()
+                    await asyncio.gather(pinger, return_exceptions=True)
+            if stop.is_set():
+                break
+            await self._sleep(backoff)
+            backoff = min(backoff * 2, 30.0)
+
+
+class LighterReferenceFeed:
+    def __init__(
+        self,
+        name: str,
+        ws_url: str,
+        market_id: int,
+        writer: ReferenceCsvWriter,
+        *,
+        connect=ws_connect,
+        clock_ns=time.time_ns,
+        sleep=asyncio.sleep,
+    ) -> None:
+        self.name = name
+        self.ws_url = ws_url
+        self.market_id = market_id
+        self.writer = writer
+        self._connect = connect
+        self._clock_ns = clock_ns
+        self._sleep = sleep
+
+    async def _subscribe(self, ws) -> None:
+        """Subscribe to the runtime market_stats channel."""
+        await ws.send(
+            json.dumps(
+                {
+                    "type": "subscribe",
+                    "channel": f"market_stats/{self.market_id}",
+                }
+            )
+        )
+
+    async def run(self, stop: asyncio.Event) -> None:
+        """Consume market_stats frames with isolated reconnect handling."""
+        backoff = 1.0
+        while not stop.is_set():
+            try:
+                async with self._connect(
+                    self.ws_url,
+                    max_size=2**23,
+                    open_timeout=10,
+                    ping_interval=15,
+                    ping_timeout=15,
+                ) as ws:
+                    backoff = 1.0
+                    async for raw in ws:
+                        recv_ms = self._clock_ns() // 1_000_000
+                        backoff = 1.0
+                        try:
+                            msg = json.loads(raw)
+                        except (json.JSONDecodeError, TypeError) as exc:
+                            log.warning(
+                                "[%s] malformed reference JSON: %s",
+                                self.name,
+                                exc,
+                            )
+                            continue
+                        if not isinstance(msg, dict):
+                            log.warning(
+                                "[%s] malformed relevant reference frame: "
+                                "expected an object",
+                                self.name,
+                            )
+                            continue
+                        message_type = msg.get("type")
+                        if message_type == "connected":
+                            await self._subscribe(ws)
+                        elif message_type == "ping":
+                            await ws.send(json.dumps({"type": "pong"}))
+                        try:
+                            parsed = parse_lighter_reference(
+                                msg,
+                                market_id=self.market_id,
+                            )
+                        except Exception as exc:
+                            log.warning(
+                                "[%s] malformed relevant reference frame: %s",
+                                self.name,
+                                exc,
+                            )
+                            continue
+                        if parsed is not None and self.writer.enabled:
+                            self.writer.write((recv_ms, *parsed))
+                        if stop.is_set():
+                            break
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.warning(
+                    "[%s] reference ws error: %s — reconnect in %.0fs",
+                    self.name,
+                    exc,
+                    backoff,
+                )
+            if stop.is_set():
+                break
+            await self._sleep(backoff)
+            backoff = min(backoff * 2, 30.0)

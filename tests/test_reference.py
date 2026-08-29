@@ -1,5 +1,8 @@
+import asyncio
 import copy
 import csv
+import inspect
+import json
 import logging
 import os
 
@@ -7,13 +10,61 @@ import pytest
 
 from entropy_arb.reference import (
     ENTROPY_REFERENCE_HEADER,
+    HLReferenceFeed,
     LIGHTER_REFERENCE_HEADER,
-    ReferenceParseError,
+    LighterReferenceFeed,
     ReferenceCsvWriter,
+    ReferenceParseError,
     parse_hl_reference,
     parse_lighter_reference,
     reference_paths,
 )
+
+
+class StubReferenceWriter:
+    def __init__(self):
+        self.enabled = True
+        self.rows = []
+
+    def write(self, row):
+        if self.enabled:
+            self.rows.append(row)
+
+
+class FakeWebSocket:
+    def __init__(self, frames, stop):
+        self.frames = list(frames)
+        self.stop = stop
+        self.sent = []
+        self.decode_sent = json.loads
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if self.frames:
+            return self.frames.pop(0)
+        self.stop.set()
+        raise StopAsyncIteration
+
+    async def send(self, raw):
+        self.sent.append(self.decode_sent(raw))
+
+
+class FakeConnect:
+    def __init__(self, websocket):
+        self.websocket = websocket
+        self.calls = []
+
+    def __call__(self, url, **kwargs):
+        self.calls.append((url, kwargs))
+        return self.websocket
 
 
 HL_REFERENCE_FRAME = {
@@ -44,6 +95,336 @@ LIGHTER_REFERENCE_FRAME = {
     "timestamp": 1_787_993_704_054,
     "type": "subscribed/market_stats",
 }
+
+
+def test_hl_feed_subscribes_and_persists_identical_frames():
+    async def scenario():
+        stop = asyncio.Event()
+        frames = [
+            json.dumps(HL_REFERENCE_FRAME),
+            json.dumps(HL_REFERENCE_FRAME),
+        ]
+        ws = FakeWebSocket(frames, stop)
+        writer = StubReferenceWriter()
+        feed = HLReferenceFeed(
+            "ENTROPY",
+            "wss://api.hyperliquid.xyz/ws",
+            "io:SNDK",
+            writer,
+            connect=FakeConnect(ws),
+            clock_ns=lambda: 1_700_000_000_123_456_789,
+        )
+        await feed.run(stop)
+        assert ws.sent[0] == {
+            "method": "subscribe",
+            "subscription": {
+                "type": "activeAssetCtx",
+                "coin": "io:SNDK",
+            },
+        }
+        assert writer.rows == [
+            (1_700_000_000_123, 1485.0, 1485.0),
+            (1_700_000_000_123, 1485.0, 1485.0),
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_lighter_feed_subscribes_after_connected_frame():
+    async def scenario():
+        stop = asyncio.Event()
+        ws = FakeWebSocket(
+            [
+                json.dumps({"type": "connected"}),
+                json.dumps(LIGHTER_REFERENCE_FRAME),
+            ],
+            stop,
+        )
+        writer = StubReferenceWriter()
+        feed = LighterReferenceFeed(
+            "LIGHTER",
+            "wss://mainnet.zklighter.elliot.ai/stream",
+            139,
+            writer,
+            connect=FakeConnect(ws),
+            clock_ns=lambda: 1_700_000_000_999_000_000,
+        )
+        await feed.run(stop)
+        assert ws.sent[0] == {
+            "type": "subscribe",
+            "channel": "market_stats/139",
+        }
+        assert writer.rows == [
+            (
+                1_700_000_000_999,
+                1_787_993_704_054,
+                1488.07,
+                1483.77,
+            ),
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_recv_ms_is_captured_before_json_and_parser(monkeypatch):
+    async def scenario():
+        from entropy_arb import reference
+
+        stop = asyncio.Event()
+        ws = FakeWebSocket([json.dumps(HL_REFERENCE_FRAME)], stop)
+        writer = StubReferenceWriter()
+        calls = []
+        real_loads = json.loads
+        real_parser = reference.parse_hl_reference
+
+        def clock_ns():
+            calls.append("clock")
+            return 1_700_000_000_123_000_000
+
+        def tracked_loads(raw):
+            calls.append("json")
+            return real_loads(raw)
+
+        def tracked_parser(msg, *, coin):
+            calls.append("parser")
+            return real_parser(msg, coin=coin)
+
+        monkeypatch.setattr(reference.json, "loads", tracked_loads)
+        monkeypatch.setattr(reference, "parse_hl_reference", tracked_parser)
+        original_write = writer.write
+
+        def tracked_write(row):
+            calls.append("write")
+            original_write(row)
+
+        writer.write = tracked_write
+        feed = HLReferenceFeed(
+            "ENTROPY",
+            "wss://example.invalid/ws",
+            "io:SNDK",
+            writer,
+            connect=FakeConnect(ws),
+            clock_ns=clock_ns,
+        )
+        await feed.run(stop)
+        assert calls[:4] == ["clock", "json", "parser", "write"]
+
+    asyncio.run(scenario())
+
+
+def test_reference_feeds_have_no_trading_notify_dependency():
+    assert "notify" not in inspect.signature(HLReferenceFeed).parameters
+    assert "notify" not in inspect.signature(LighterReferenceFeed).parameters
+    assert "book" not in inspect.signature(HLReferenceFeed).parameters
+    assert "book" not in inspect.signature(LighterReferenceFeed).parameters
+
+
+def test_malformed_relevant_frame_is_skipped_without_ending_loop(caplog):
+    async def scenario():
+        stop = asyncio.Event()
+        invalid = copy.deepcopy(HL_REFERENCE_FRAME)
+        invalid["data"]["ctx"]["oraclePx"] = None
+        ws = FakeWebSocket(
+            [json.dumps(invalid), json.dumps(HL_REFERENCE_FRAME)],
+            stop,
+        )
+        writer = StubReferenceWriter()
+        feed = HLReferenceFeed(
+            "ENTROPY",
+            "wss://example.invalid/ws",
+            "io:SNDK",
+            writer,
+            connect=FakeConnect(ws),
+        )
+        await feed.run(stop)
+        assert len(writer.rows) == 1
+
+    with caplog.at_level(logging.WARNING, logger="reference"):
+        asyncio.run(scenario())
+    assert "malformed relevant reference frame" in caplog.text
+
+
+def test_parser_failure_is_skipped_without_reconnecting(monkeypatch, caplog):
+    async def scenario():
+        from entropy_arb import reference
+
+        stop = asyncio.Event()
+        ws = FakeWebSocket(
+            [json.dumps(HL_REFERENCE_FRAME), json.dumps(HL_REFERENCE_FRAME)],
+            stop,
+        )
+        connector = FakeConnect(ws)
+        writer = StubReferenceWriter()
+        real_parser = reference.parse_hl_reference
+        calls = 0
+
+        def flaky_parser(msg, *, coin):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("parser unavailable")
+            return real_parser(msg, coin=coin)
+
+        monkeypatch.setattr(reference, "parse_hl_reference", flaky_parser)
+        feed = HLReferenceFeed(
+            "ENTROPY",
+            "wss://example.invalid/ws",
+            "io:SNDK",
+            writer,
+            connect=connector,
+            sleep=lambda _: asyncio.sleep(0),
+        )
+        await feed.run(stop)
+        assert connector.calls == [
+            (
+                "wss://example.invalid/ws",
+                {
+                    "max_size": 2**23,
+                    "open_timeout": 10,
+                    "ping_interval": 15,
+                    "ping_timeout": 15,
+                },
+            )
+        ]
+        assert len(writer.rows) == 1
+
+    with caplog.at_level(logging.WARNING, logger="reference"):
+        asyncio.run(scenario())
+    assert "malformed relevant reference frame" in caplog.text
+
+
+def test_irrelevant_frames_do_not_write(caplog):
+    async def scenario():
+        stop = asyncio.Event()
+        ws = FakeWebSocket(
+            [
+                json.dumps({"channel": "pong"}),
+                json.dumps(
+                    {
+                        **LIGHTER_REFERENCE_FRAME,
+                        "channel": "market_stats:32",
+                        "market_stats": {
+                            **LIGHTER_REFERENCE_FRAME["market_stats"],
+                            "market_id": 32,
+                        },
+                    }
+                ),
+            ],
+            stop,
+        )
+        writer = StubReferenceWriter()
+        feed = LighterReferenceFeed(
+            "LIGHTER",
+            "wss://example.invalid/ws",
+            139,
+            writer,
+            connect=FakeConnect(ws),
+        )
+        await feed.run(stop)
+        assert writer.rows == []
+
+    with caplog.at_level(logging.WARNING, logger="reference"):
+        asyncio.run(scenario())
+    assert caplog.records == []
+
+
+def test_reference_feed_reconnect_backoff_caps_at_thirty_seconds():
+    class FailedConnection:
+        async def __aenter__(self):
+            raise OSError("disconnected")
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class AlwaysFailConnect:
+        def __call__(self, url, **kwargs):
+            return FailedConnection()
+
+    async def scenario():
+        stop = asyncio.Event()
+        delays = []
+
+        async def fake_sleep(delay):
+            delays.append(delay)
+            if len(delays) == 7:
+                stop.set()
+
+        feed = LighterReferenceFeed(
+            "LIGHTER",
+            "wss://example.invalid/ws",
+            139,
+            StubReferenceWriter(),
+            connect=AlwaysFailConnect(),
+            sleep=fake_sleep,
+        )
+        await feed.run(stop)
+        assert delays == [1.0, 2.0, 4.0, 8.0, 16.0, 30.0, 30.0]
+
+    asyncio.run(scenario())
+
+
+def test_reference_feed_reconnect_backoff_resets_after_successful_connection():
+    class FailedConnection:
+        async def __aenter__(self):
+            raise OSError("disconnected")
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class OneFrameThenDrop:
+        def __init__(self):
+            self.sent = []
+            self.yielded = False
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if not self.yielded:
+                self.yielded = True
+                return json.dumps({"type": "connected"})
+            raise OSError("dropped after connect")
+
+        async def send(self, raw):
+            self.sent.append(json.loads(raw))
+
+    class ConnectSequence:
+        def __init__(self):
+            self.attempt = 0
+
+        def __call__(self, url, **kwargs):
+            self.attempt += 1
+            if self.attempt == 1:
+                return FailedConnection()
+            return OneFrameThenDrop()
+
+    async def scenario():
+        stop = asyncio.Event()
+        delays = []
+
+        async def fake_sleep(delay):
+            delays.append(delay)
+            if len(delays) == 2:
+                stop.set()
+
+        feed = LighterReferenceFeed(
+            "LIGHTER",
+            "wss://example.invalid/ws",
+            139,
+            StubReferenceWriter(),
+            connect=ConnectSequence(),
+            sleep=fake_sleep,
+        )
+        await feed.run(stop)
+        assert delays == [1.0, 1.0]
+
+    asyncio.run(scenario())
 
 
 def test_parse_hl_reference_from_probe_shape():
