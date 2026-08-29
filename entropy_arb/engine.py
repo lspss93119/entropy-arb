@@ -27,6 +27,7 @@ import aiohttp
 from .book import ArbPlan, floor_step, plan_arb
 from .config import Config
 from .recorder import MinuteRecorder
+from .reference import ReferenceRecorder
 from .venue_hl import HLVenue
 from .venue_lighter import LighterVenue
 
@@ -38,6 +39,7 @@ CSV_HEADER = ["ts", "direction", "buy_venue", "sell_venue", "qty",
               "midline_bps", "inv_add_bps", "ok", "buy_fill", "sell_fill",
               "buy_status", "sell_status", "fill_edge_usd"]
 BALANCE_POLL_SEC = 30.0
+REFERENCE_HEDGE_KEYS = frozenset(("lighter", "lighter-rh"))
 
 
 class Engine:
@@ -49,6 +51,7 @@ class Engine:
         self.hedge = None
         self.venues: Dict[str, object] = {}
         self.recorder: Optional[MinuteRecorder] = None
+        self.reference: Optional[ReferenceRecorder] = None
         self.markets_ready = False
         self.stop = asyncio.Event()
         self._update_evt = asyncio.Event()
@@ -136,6 +139,30 @@ class Engine:
         return HLVenue(vc, self.cfg.hl_api_url, self.cfg.hl_ws_url,
                        self.session, self.cfg.settle_timeout_sec)
 
+    def _build_reference_recorder(self) -> Optional[ReferenceRecorder]:
+        if self.cfg.hedge_venue not in REFERENCE_HEDGE_KEYS:
+            return None
+        if not (self.record_only or self.cfg.recorder_enabled):
+            return None
+        return ReferenceRecorder(
+            symbol=self.cfg.symbol,
+            hedge_key=self.cfg.hedge_venue,
+            entropy_ws_url=self.entropy.ws_url,
+            entropy_coin=self.entropy.coin,
+            hedge_ws_url=self.hedge.profile.ws_url,
+            hedge_market_id=self.hedge.market_id,
+        )
+
+    async def _run_reference(self) -> None:
+        if self.reference is None:
+            return
+        try:
+            await self.reference.run(self.stop)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("reference recorder failed")
+
     async def _run_inner(self) -> None:
         cfg = self.cfg
         self.entropy = self._make_venue(cfg.entropy)
@@ -186,6 +213,14 @@ class Engine:
                               for v in self.venues.values()),
                      sum(v.position for v in self.venues.values()))
 
+        reference_task = None
+        self.reference = self._build_reference_recorder()
+        if self.reference is not None:
+            reference_task = asyncio.create_task(
+                self._run_reference(),
+                name="reference",
+            )
+
         tasks: List[asyncio.Task] = []
         for v in self.venues.values():
             tasks += v.start_tasks(self.stop, self._update_evt.set, live)
@@ -217,6 +252,8 @@ class Engine:
         for t in tasks:
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        if reference_task is not None:
+            await asyncio.gather(reference_task, return_exceptions=True)
         for v in self.venues.values():
             await v.close()
         log.info("shutdown — %d trades, %d hedges, exp edge $%.4f, "

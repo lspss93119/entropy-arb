@@ -6,6 +6,9 @@ import asyncio
 import os
 import sys
 import tempfile
+from types import SimpleNamespace
+
+import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -16,7 +19,14 @@ from entropy_arb.engine import Engine  # noqa: E402
 NO_ENV = os.path.join(tempfile.gettempdir(), "entropy-arb-no-such.env")
 
 
-def make_cfg(midline=5.0, upper=4.0, lower=3.0):
+def make_cfg(
+    midline=5.0,
+    upper=4.0,
+    lower=3.0,
+    *,
+    hedge_venue="lighter-rh",
+    recorder_enabled=True,
+):
     f = tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False)
     f.write(f"""
 thresholds:
@@ -25,10 +35,13 @@ thresholds:
   lower_bps: {lower}
 execution:
   premium_persist_sec: 0.0
+recorder:
+  enabled: {str(recorder_enabled).lower()}
+  csv: {os.path.join(tempfile.gettempdir(), "engine-minutes.csv")}
 """)
     f.close()
     return load_config(f.name, NO_ENV,
-                       symbol="SNDK", hedge_venue="lighter-rh")
+                       symbol="SNDK", hedge_venue=hedge_venue)
 
 
 class StubVenue:
@@ -143,6 +156,269 @@ def test_scan_respects_position_caps():
     eng.hedge.position = 100.0
     eng.hedge.cap_usd = 10000.0
     assert run_scan(eng) is None
+
+
+def attach_reference_venues(
+    eng,
+    *,
+    market_id=32,
+    hedge_ws_url="wss://api.rh.lighter.xyz/stream",
+):
+    eng.entropy = StubVenue("entropy", "ENTROPY")
+    eng.entropy.ws_url = "wss://api.hyperliquid.xyz/ws"
+    eng.entropy.coin = "io:SNDK"
+    eng.hedge = StubVenue("hedge", "RH")
+    eng.hedge.kind = "lighter"
+    eng.hedge.profile = SimpleNamespace(ws_url=hedge_ws_url)
+    eng.hedge.market_id = market_id
+
+
+@pytest.mark.parametrize(
+    ("record_only", "recorder_enabled", "expected"),
+    [
+        (True, False, True),
+        (False, True, True),
+        (False, False, False),
+    ],
+)
+def test_reference_lifecycle_matrix(
+        monkeypatch, record_only, recorder_enabled, expected):
+    from entropy_arb import engine as engine_module
+
+    captured = []
+
+    class SpyReferenceRecorder:
+        def __init__(self, **kwargs):
+            captured.append(kwargs)
+
+    monkeypatch.setattr(
+        engine_module, "ReferenceRecorder", SpyReferenceRecorder
+    )
+    eng = Engine(
+        make_cfg(recorder_enabled=recorder_enabled),
+        record_only=record_only,
+    )
+    attach_reference_venues(eng)
+    recorder = eng._build_reference_recorder()
+    assert (recorder is not None) is expected
+    if expected:
+        assert captured == [{
+            "symbol": "SNDK",
+            "hedge_key": "lighter-rh",
+            "entropy_ws_url": "wss://api.hyperliquid.xyz/ws",
+            "entropy_coin": "io:SNDK",
+            "hedge_ws_url": "wss://api.rh.lighter.xyz/stream",
+            "hedge_market_id": 32,
+        }]
+
+
+@pytest.mark.parametrize(
+    ("hedge_key", "hedge_ws_url", "market_id"),
+    [
+        (
+            "lighter",
+            "wss://mainnet.zklighter.elliot.ai/stream",
+            139,
+        ),
+        (
+            "lighter-rh",
+            "wss://api.rh.lighter.xyz/stream",
+            32,
+        ),
+    ],
+)
+def test_reference_factory_uses_runtime_resolved_metadata(
+        monkeypatch, hedge_key, hedge_ws_url, market_id):
+    from entropy_arb import engine as engine_module
+
+    captured = []
+
+    class SpyReferenceRecorder:
+        def __init__(self, **kwargs):
+            captured.append(kwargs)
+
+    monkeypatch.setattr(
+        engine_module, "ReferenceRecorder", SpyReferenceRecorder
+    )
+    eng = Engine(
+        make_cfg(hedge_venue=hedge_key, recorder_enabled=True)
+    )
+    attach_reference_venues(
+        eng,
+        market_id=market_id,
+        hedge_ws_url=hedge_ws_url,
+    )
+    eng._build_reference_recorder()
+    assert captured[0]["entropy_coin"] == "io:SNDK"
+    assert captured[0]["hedge_key"] == hedge_key
+    assert captured[0]["hedge_ws_url"] == hedge_ws_url
+    assert captured[0]["hedge_market_id"] == market_id
+
+
+def test_tradexyz_does_not_build_reference_collector():
+    eng = Engine(
+        make_cfg(hedge_venue="tradexyz", recorder_enabled=True),
+        record_only=True,
+    )
+    eng.entropy = SimpleNamespace(
+        ws_url="wss://api.hyperliquid.xyz/ws",
+        coin="io:SNDK",
+    )
+    eng.hedge = SimpleNamespace(kind="hl")
+    assert eng._build_reference_recorder() is None
+
+
+def test_reference_factory_has_no_strategy_wakeup_dependency(monkeypatch):
+    from entropy_arb import engine as engine_module
+
+    captured = {}
+
+    class SpyReferenceRecorder:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(
+        engine_module, "ReferenceRecorder", SpyReferenceRecorder
+    )
+    eng = Engine(make_cfg(), record_only=True)
+    attach_reference_venues(eng)
+    eng.reference = eng._build_reference_recorder()
+    assert "notify" not in captured
+    assert "update_evt" not in captured
+    assert not eng._update_evt.is_set()
+
+
+def test_reference_failure_is_nonfatal_and_does_not_set_engine_events(caplog):
+    class BrokenReference:
+        async def run(self, stop):
+            raise RuntimeError("reference failed")
+
+    async def scenario():
+        eng = Engine(make_cfg(), record_only=True)
+        eng.reference = BrokenReference()
+        await eng._run_reference()
+        assert not eng.stop.is_set()
+        assert not eng._update_evt.is_set()
+        assert not eng._reconcile_evt.is_set()
+
+    asyncio.run(scenario())
+    assert "reference recorder failed" in caplog.text
+
+
+def test_no_strategy_wakeup_after_successful_reference_run():
+    class SuccessfulReference:
+        async def run(self, stop):
+            return None
+
+    async def scenario():
+        eng = Engine(make_cfg(), record_only=False)
+        evaluations = 0
+
+        async def tracked_evaluate():
+            nonlocal evaluations
+            evaluations += 1
+
+        eng._evaluate = tracked_evaluate
+        eng.reference = SuccessfulReference()
+        strategy_task = asyncio.create_task(eng._strategy_loop())
+        await asyncio.sleep(0)
+        await eng._run_reference()
+        await asyncio.sleep(0)
+        assert not eng._update_evt.is_set()
+        assert evaluations == 0
+        eng.stop.set()
+        eng._update_evt.set()
+        await strategy_task
+
+    asyncio.run(scenario())
+
+
+def test_engine_awaits_reference_shutdown_without_cancelling_it(monkeypatch):
+    from entropy_arb import engine as engine_module
+
+    async def scenario():
+        started = asyncio.Event()
+        closed = asyncio.Event()
+        was_cancelled = False
+
+        class LifecycleVenue:
+            def __init__(self, kind, *, coin=None, market_id=None, ws_url=None):
+                self.kind = kind
+                self.key = "entropy" if coin else "hedge"
+                self.name = self.key.upper()
+                self.conf = SimpleNamespace(symbol="SNDK")
+                self.ws_url = ws_url
+                self.coin = coin
+                self.market_id = market_id
+                self.profile = SimpleNamespace(ws_url=ws_url)
+                self.size_decimals = 4
+                self.min_base = 0.0001
+                self.min_quote = 10.0
+                self.fee_bps = 0.0
+                self.book = OrderBook()
+
+            async def load_market(self):
+                return None
+
+            def start_tasks(self, stop, notify, live):
+                return []
+
+            async def close(self):
+                return None
+
+        class SpyReferenceRecorder:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+            async def run(self, stop):
+                nonlocal was_cancelled
+                started.set()
+                try:
+                    await stop.wait()
+                    await asyncio.sleep(0)
+                    closed.set()
+                except asyncio.CancelledError:
+                    was_cancelled = True
+                    raise
+
+        class QuietMinuteRecorder:
+            rows_written = 0
+
+            def __init__(self, *args, **kwargs):
+                return None
+
+            async def run(self, stop):
+                await stop.wait()
+
+        cfg = make_cfg(recorder_enabled=False)
+        eng = Engine(cfg, record_only=True)
+        venues = iter([
+            LifecycleVenue(
+                "hl",
+                coin="io:SNDK",
+                ws_url="wss://api.hyperliquid.xyz/ws",
+            ),
+            LifecycleVenue(
+                "lighter",
+                market_id=32,
+                ws_url="wss://api.rh.lighter.xyz/stream",
+            ),
+        ])
+        monkeypatch.setattr(eng, "_make_venue", lambda conf: next(venues))
+        monkeypatch.setattr(
+            engine_module, "ReferenceRecorder", SpyReferenceRecorder
+        )
+        monkeypatch.setattr(
+            engine_module, "MinuteRecorder", QuietMinuteRecorder
+        )
+        run_task = asyncio.create_task(eng._run_inner())
+        await asyncio.wait_for(started.wait(), timeout=0.2)
+        eng.request_stop()
+        await asyncio.wait_for(run_task, timeout=1.0)
+        assert closed.is_set()
+        assert was_cancelled is False
+
+    asyncio.run(scenario())
 
 
 if __name__ == "__main__":
