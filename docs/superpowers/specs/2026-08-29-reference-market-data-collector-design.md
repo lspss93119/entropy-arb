@@ -53,8 +53,10 @@ code must obtain market IDs from runtime market metadata.
 - Timestamp behavior: the relevant `activeAssetCtx` payload did not contain a
   server or source timestamp
 
-The local receive time is an observation timestamp. It must never be described
-as an oracle source timestamp.
+The local receive time is captured immediately when the raw WebSocket message
+is yielded by the WebSocket iterator, before JSON parsing or any other
+processing. It is an observation timestamp and must never be described as an
+oracle source timestamp.
 
 ### Lighter mainnet
 
@@ -195,6 +197,13 @@ isolation.
 
 ## CSV schemas and timestamp semantics
 
+For every raw WebSocket message, the feed captures the current Unix epoch time
+in milliseconds immediately when the message is received from the WebSocket
+iterator. This capture happens before JSON parsing, relevance checks, field
+validation, CSV writing, logging, or other processing. If the message is later
+identified as a valid relevant frame, that already-captured value becomes the
+row's `recv_ms`.
+
 ### Entropy reference CSV
 
 The exact header is:
@@ -205,7 +214,7 @@ recv_ms,oracle_px,mark_px
 
 | Column | Semantics |
 |---|---|
-| `recv_ms` | Local Unix epoch milliseconds captured when the relevant frame is received or handled. It is an observation time, not an oracle source time. |
+| `recv_ms` | Local Unix epoch milliseconds captured immediately when the raw message is received from the WebSocket iterator, before parsing or processing. It is an observation time, not an oracle source time. |
 | `oracle_px` | Parsed positive finite numeric value from `oraclePx`. |
 | `mark_px` | Parsed positive finite numeric value from `markPx`. |
 
@@ -219,8 +228,8 @@ recv_ms,server_ms,index_px,mark_px
 
 | Column | Semantics |
 |---|---|
-| `recv_ms` | Local Unix epoch milliseconds captured when the relevant frame is received or handled. |
-| `server_ms` | The raw top-level `market_stats` timestamp, validated as a positive Unix epoch millisecond integer. The payload does not establish a more specific event-time meaning. |
+| `recv_ms` | Local Unix epoch milliseconds captured immediately when the raw message is received from the WebSocket iterator, before parsing or processing. |
+| `server_ms` | The raw top-level `market_stats` timestamp. Its Unix epoch millisecond semantics are part of the verified feed contract, while the payload does not establish a more specific event-time meaning. |
 | `index_px` | Parsed positive finite numeric value from `index_price`. |
 | `mark_px` | Parsed positive finite numeric value from `mark_price`. |
 
@@ -252,8 +261,11 @@ For every relevant frame, all required prices must be:
 - Finite.
 
 For Lighter and Lighter-RH, the top-level timestamp must also be present,
-non-null, parseable as a positive integer, and consistent with Unix epoch
-milliseconds. This is required to populate the exact `server_ms` schema.
+non-null, parseable as an integer, and positive. The writer persists the raw
+value unchanged as `server_ms`. Runtime validation must not compare it with
+`recv_ms` or the local wall clock and must not reject it based on a plausibility
+window. Its Unix epoch millisecond semantics are part of the verified feed
+contract.
 
 If any required field is missing, null, invalid, non-positive, or non-finite:
 
@@ -351,17 +363,31 @@ If opening or writing a reference CSV fails:
 
 ## Shutdown contract
 
-A normal shutdown must give both reference writers an opportunity to flush
-their remaining buffers. The coordinator must stop accepting new reference
-rows, close the writers, and await the close operation before reference tasks
-are finally discarded.
+A normal shutdown follows this exact order:
 
-Direct task cancellation must not be the only shutdown mechanism because it
-could silently discard fewer than 10 flushable rows. If a feed task must be
-cancelled, writer close and its flush attempt remain part of the coordinator's
-graceful shutdown path.
+1. Signal the reference subsystem to stop and stop accepting new rows.
+2. Ask both reference feed tasks to stop and await their completion. Cancel a
+   feed task only if graceful stopping is insufficient, and await completion of
+   any cancellation.
+3. Only after no reference feed task can submit another row, flush and close
+   both writers.
+4. Treat writer `close()` as an idempotent operation, including for an already
+   disabled or previously closed writer.
+5. Return from the coordinator only after both writer close operations have
+   completed.
+
+Closing writers only after feed termination prevents write-after-close races.
+Awaiting both closes preserves the final flushable buffers containing fewer
+than 10 rows. Direct task cancellation must never bypass writer close.
 
 ## Hot-path isolation
+
+Reference WebSocket traffic is invisible to strategy event scheduling.
+Reference feeds:
+
+- MUST NOT call the trading order-book `notify` callback.
+- MUST NOT set `Engine._update_evt`.
+- MUST NOT otherwise wake `_strategy_loop`.
 
 Reference state must never enter or influence:
 
@@ -419,12 +445,14 @@ must cover at least:
 12. Malformed relevant-frame isolation.
 13. Writer failure disabling only the affected writer.
 14. Reference feed failure remaining non-fatal to Engine.
-15. `--record-only` enabling the reference subsystem.
-16. Live mode with `recorder_enabled=true` enabling the subsystem.
-17. Live mode with `recorder_enabled=false` leaving the subsystem off.
-18. Existing minute-recorder tests remaining green.
-19. Existing samples-v2 tests remaining green.
-20. Existing strategy and execution regressions remaining green.
+15. Reference frames never call the trading order-book notify callback, never
+    set `Engine._update_evt`, and never otherwise wake `_strategy_loop`.
+16. `--record-only` enabling the reference subsystem.
+17. Live mode with `recorder_enabled=true` enabling the subsystem.
+18. Live mode with `recorder_enabled=false` leaving the subsystem off.
+19. Existing minute-recorder tests remaining green.
+20. Existing samples-v2 tests remaining green.
+21. Existing strategy and execution regressions remaining green.
 
 The public-network smoke test is separate from deterministic pytest. It must be
 credential-free, must not submit orders, and must confirm that the real public
@@ -476,9 +504,12 @@ The feature is accepted only when:
   relevant frame is persisted, including unchanged values.
 - Each writer flushes every 10 rows.
 - Graceful close flushes the final buffer.
+- Shutdown awaits feed termination before closing writers, writer close is
+  idempotent, and the coordinator does not return before both closes complete.
 - Restart appends without duplicating the header.
 - Recorder processes for different hedge keys never share reference files.
 - Reference WebSocket and writer failures do not halt the bot.
+- Reference WebSocket traffic never wakes the strategy event loop.
 - Samples-v2 behavior and schema remain unchanged.
 - Minute-recorder behavior and schema remain unchanged.
 - Strategy and execution behavior remain unchanged.
