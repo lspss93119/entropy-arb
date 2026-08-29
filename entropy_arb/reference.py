@@ -329,6 +329,8 @@ class HLReferenceFeed:
                                 exc,
                             )
                             continue
+                        if not isinstance(msg, dict):
+                            continue
                         try:
                             parsed = parse_hl_reference(msg, coin=self.coin)
                         except Exception as exc:
@@ -418,11 +420,6 @@ class LighterReferenceFeed:
                             )
                             continue
                         if not isinstance(msg, dict):
-                            log.warning(
-                                "[%s] malformed relevant reference frame: "
-                                "expected an object",
-                                self.name,
-                            )
                             continue
                         message_type = msg.get("type")
                         if message_type == "connected":

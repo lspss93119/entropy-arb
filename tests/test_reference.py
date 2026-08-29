@@ -293,6 +293,68 @@ def test_parser_failure_is_skipped_without_reconnecting(monkeypatch, caplog):
     assert "malformed relevant reference frame" in caplog.text
 
 
+@pytest.mark.parametrize("raw", [json.dumps([]), json.dumps("noise")])
+def test_hl_non_object_frames_are_silent_and_connection_continues(raw, caplog):
+    async def scenario():
+        stop = asyncio.Event()
+        ws = FakeWebSocket([raw, json.dumps(HL_REFERENCE_FRAME)], stop)
+        connector = FakeConnect(ws)
+        writer = StubReferenceWriter()
+        feed = HLReferenceFeed(
+            "ENTROPY",
+            "wss://example.invalid/ws",
+            "io:SNDK",
+            writer,
+            connect=connector,
+            sleep=lambda _: asyncio.sleep(0),
+        )
+        await feed.run(stop)
+        assert connector.calls == [
+            (
+                "wss://example.invalid/ws",
+                {
+                    "max_size": 2**23,
+                    "open_timeout": 10,
+                    "ping_interval": 15,
+                    "ping_timeout": 15,
+                },
+            )
+        ]
+        assert len(writer.rows) == 1
+
+    with caplog.at_level(logging.WARNING, logger="reference"):
+        asyncio.run(scenario())
+    assert caplog.records == []
+
+
+@pytest.mark.parametrize("raw", [json.dumps([]), json.dumps("noise")])
+def test_lighter_non_object_frames_are_silent_and_connection_continues(
+    raw, caplog
+):
+    async def scenario():
+        stop = asyncio.Event()
+        ws = FakeWebSocket(
+            [raw, json.dumps({"type": "connected"}), json.dumps(LIGHTER_REFERENCE_FRAME)],
+            stop,
+        )
+        connector = FakeConnect(ws)
+        writer = StubReferenceWriter()
+        feed = LighterReferenceFeed(
+            "LIGHTER",
+            "wss://example.invalid/ws",
+            139,
+            writer,
+            connect=connector,
+        )
+        await feed.run(stop)
+        assert len(connector.calls) == 1
+        assert len(writer.rows) == 1
+
+    with caplog.at_level(logging.WARNING, logger="reference"):
+        asyncio.run(scenario())
+    assert caplog.records == []
+
+
 def test_irrelevant_frames_do_not_write(caplog):
     async def scenario():
         stop = asyncio.Event()
