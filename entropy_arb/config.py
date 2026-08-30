@@ -55,6 +55,15 @@ LIGHTER_PROFILES: Dict[str, LighterProfile] = {
         "wss://api.rh.lighter.xyz/stream", 466324),
 }
 
+# Lighter's mainnet market uses ANTHROPIC for the canonical ANTH CLI symbol.
+# Keep the alias venue-scoped so the CLI/config symbol remains canonical and
+# the Robinhood profile is not changed implicitly.
+LIGHTER_SYMBOL_ALIASES: Dict[str, Dict[str, str]] = {
+    "lighter": {
+        "ANTH": "ANTHROPIC",
+    },
+}
+
 
 @dataclass
 class LighterCreds:
@@ -329,10 +338,12 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
                 _env_s("HL_ACCOUNT_ADDRESS_XYZ") or _env_s("HL_ACCOUNT_ADDRESS")),
         )
     else:
+        hedge_symbol = LIGHTER_SYMBOL_ALIASES.get(hedge_venue, {}).get(
+            symbol, symbol)
         hedge = VenueConf(
             key="hedge", kind="lighter",
             label="LIGHTER" if hedge_venue == "lighter" else "RH",
-            symbol=symbol,
+            symbol=hedge_symbol,
             fee_bps=float(_get(raw, "hedge", "taker_fee_bps", 0.0)),
             cap_usd=float(_get(raw, "hedge", "max_position_usd", 1000.0)),
             orders_per_min=int(_get(raw, "hedge", "max_orders_per_min", 30)),
