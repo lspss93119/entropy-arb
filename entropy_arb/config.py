@@ -62,6 +62,9 @@ LIGHTER_SYMBOL_ALIASES: Dict[str, Dict[str, str]] = {
     "lighter": {
         "ANTH": "ANTHROPIC",
     },
+    "lighter-rh": {
+        "ANTH": "ANTHROPIC",
+    },
 }
 
 

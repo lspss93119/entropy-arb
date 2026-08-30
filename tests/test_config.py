@@ -69,6 +69,15 @@ def test_lighter_mainnet_anth_symbol_alias_preserves_canonical_symbol():
     assert cfg.recorder_csv == "logs/minutes-ANTH-lighter.csv"
 
 
+def test_lighter_rh_anth_symbol_alias_preserves_canonical_symbol():
+    cfg = load(MINIMAL, symbol="ANTH", hedge="lighter-rh")
+
+    assert cfg.symbol == "ANTH"
+    assert cfg.entropy.symbol == "ANTH"
+    assert cfg.hedge.symbol == "ANTHROPIC"
+    assert cfg.recorder_csv == "logs/minutes-ANTH-lighter-rh.csv"
+
+
 @pytest.mark.parametrize(
     ("hedge", "expected"),
     [
