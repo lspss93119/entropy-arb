@@ -50,6 +50,10 @@ def test_example_config_loads():
     assert cfg.entropy.symbol == "SNDK" and cfg.hedge.symbol == "SNDK"
     assert cfg.recorder_enabled and cfg.recorder_csv
     assert cfg.dashboard and cfg.log_file
+    assert cfg.strategy.name == "stable_basis"
+    assert cfg.strategy.center_bps == 0.0
+    assert cfg.strategy.upper_bps == 4.0
+    assert cfg.strategy.lower_bps == 4.0
 
 
 def test_minimal_defaults():

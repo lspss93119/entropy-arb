@@ -24,46 +24,60 @@ exchange that will fill the order** — Hyperliquid books come from the official
 websocket (`wss://api.hyperliquid.xyz/ws`), Lighter books from Lighter's
 official websocket.
 
-While it runs — even with no credentials and no strategy — it records both
-books to **1-minute CSV bars**, and the bundled analyzer turns that data into
-the three numbers that define the whole strategy.
+While it runs — including `--record-only` without credentials — it records
+both books to **1-minute CSV bars**. Those recordings support offline market
+analysis and human selection of strategy parameters; the recorder and live bot
+do not diagnose markets or choose a strategy for you.
 
 ## The signal
 
-The band is three numbers in `config.yaml`, derived by you from recorded
-data:
+The live bot uses one explicitly selected strategy in `config.yaml`:
+
+- `stable_basis` uses a human-selected fixed `center_bps` and is ready
+  immediately at startup.
+- `drifting_basis` uses a causal, timestamp-based rolling-median center from
+  approximately 1 Hz valid fresh-BBO observations. It requires a full-window
+  warm-up and at least 90% valid coverage. A valid-observation gap longer than
+  30 seconds resets its history and warm-up; a process restart starts empty,
+  with no CSV preload or persisted center.
+
+There is no automatic market diagnosis, strategy selection, or strategy
+switching in the live bot. You review recordings and select the strategy and
+parameters explicitly.
+
+For either strategy, the signal uses the mid-to-mid premium as its center
+reference while entry decisions use executable prices:
 
 ```
 premium_bps = (Entropy price / hedge price − 1) × 10 000
 
                           ┌──────────────  SELL entropy + BUY hedge
-midline + upper  ───────────────────────────────────────────────────
+center + upper   ───────────────────────────────────────────────────
                                        ▲
-midline          ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┼ ─ ─   the premium's usual level
+center           ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┼ ─ ─   the selected center
                                        ▼
-midline − lower  ───────────────────────────────────────────────────
+center − lower   ───────────────────────────────────────────────────
                           └──────────────  BUY entropy + SELL hedge
 ```
 
-- `midline_bps` — where the premium normally sits. Cross-venue premiums are
-  rarely centered at zero (different oracles, different quote assets, listing
-  premia), so a zero-centered band would fire one direction only, cap out and
-  never unwind. Measure where the premium actually sits and type it in.
-- `upper_bps` / `lower_bps` — the entry bands on each side of the midline.
+- `center_bps` (for `stable_basis`) — the human-selected level where the
+  premium normally sits. Cross-venue premiums are rarely centered at zero
+  (different oracles, quote assets, or listing premia).
+- `upper_bps` / `lower_bps` — the entry bands on each side of the selected
+  center. For `drifting_basis`, the center is supplied by the causal rolling
+  median after warm-up.
 
 Both hurdles are applied to **executable** prices (entropy bid vs hedge ask,
 and vice versa) and are **net of both venues' taker fees** — the engine adds
 fees on top before a slice qualifies. A full round trip therefore nets
 **≥ upper + lower bps after fees by construction**.
 
-One consequence worth understanding: with `midline_bps: 5`, the buy-entropy
-hurdle is `lower − midline`, which can be **negative**. That is intentional —
-if entropy is persistently 5 bps rich, buying it at a 0 bps premium is 5 bps
-cheap versus its own equilibrium, and that trade is the profitable unwind of
-an earlier sell at `midline + upper`. It also means a **wrong midline loses
-money**: if you type `midline_bps: 5` while the true premium sits at 0, the
-bot happily buys entropy at fair value all day. Measure first, then trade —
-that is what the recorder and analyzer are for.
+One consequence worth understanding: with a selected center of `5` bps, the
+buy-entropy hurdle is `lower_bps − center_bps`, which can be **negative**.
+That is intentional — if Entropy is persistently 5 bps rich, buying it at a
+0 bps premium is cheap versus its own equilibrium and can unwind an earlier
+sell. A wrong human-selected center can lose money, so measure first and trade
+with small caps.
 
 ## Quick start
 
@@ -72,7 +86,7 @@ git clone https://github.com/your-quantguy/entropy-arb.git && cd entropy-arb
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt          # data collection needs only this
 
-cp config.example.yaml config.yaml       # the strategy (thresholds, sizing, risk)
+cp config.example.yaml config.yaml       # explicit strategy, sizing, and risk
 cp .env.example .env                     # credentials — required to trade
 ```
 
@@ -94,14 +108,16 @@ python3 main.py --record-only --symbol SNDK --hedge lighter-rh
 Let it run for at least a few hours (a day is better — premiums have
 intraday regimes). It writes `logs/minutes.csv`.
 
-**2. Analyze and set your thresholds:**
+**2. Review the market and select strategy parameters:**
 
 ```bash
 python3 tools/analyze.py
 ```
 
-It prints the premium distribution, how often each candidate band would have
-fired, and a ready-to-paste `thresholds:` block for `config.yaml`.
+It prints the premium distribution and how often candidate bands would have
+fired. Use that offline evidence to choose `stable_basis` or
+`drifting_basis` and its parameters explicitly in `config.yaml`; the analyzer
+does not select or switch strategies.
 
 **3. Go live** — fill in `.env`, install the signing SDKs, and start with
 the smallest position caps that clear the venue minimums:
@@ -140,10 +156,10 @@ Once per second it samples both live books; once per minute it writes a row:
 
 Recorded edges are pre-fee; the analyzer subtracts `--fees-bps` (pass the
 **sum** of both venues' taker fees — default 0.0 for the zero-fee venues,
-~1.0 with a `tradexyz` hedge) before counting firings, so its table and
-suggestions translate directly into config values. `--hours 24` restricts to
-recent data; premiums drift, so re-run it regularly and update
-`config.yaml`.
+~1.0 with a `tradexyz` hedge) before counting firings. Its table is evidence
+for selecting `center_bps` / `upper_bps` / `lower_bps` in the explicitly chosen
+strategy. `--hours 24` restricts to recent data; premiums drift, so re-run it
+regularly and update `config.yaml` deliberately.
 
 ## Configuration
 
@@ -154,8 +170,10 @@ errors), credentials in `.env`, and the markets on the command line
 
 | key | meaning | default |
 |---|---|---|
-| `thresholds.midline_bps` | premium center (measure it!) | — |
-| `thresholds.upper_bps` / `lower_bps` | entry bands (> 0) | — |
+| `strategy.name` | explicitly selected `stable_basis` or `drifting_basis` | `stable_basis` |
+| `strategy.params.center_bps` | human-selected fixed center for `stable_basis` | `0.0` in example |
+| `strategy.params.upper_bps` / `lower_bps` | entry bands (> 0) | `4.0` in example |
+| `strategy.params.window_minutes` | timestamp-based rolling window for `drifting_basis` | `60` in alternate example |
 | `entropy.dex` | Entropy's dex name on Hyperliquid | `io` |
 | `*.taker_fee_bps` | per-venue taker fee | 0.0 (tradexyz hedge: 1.0) |
 | `*.max_position_usd` | per-venue position cap | 1000 |
@@ -212,17 +230,18 @@ entropy_arb/venue_hl.py  Hyperliquid dex adapter (Entropy, tradexyz)
 entropy_arb/venue_lighter.py  zkLighter adapter (mainnet, Robinhood chain)
 entropy_arb/engine.py    the two-venue strategy loop
 entropy_arb/dashboard.py Rich terminal dashboard
-entropy_arb/recorder.py  1-minute orderbook bars
-tools/analyze.py         minutes.csv -> suggested thresholds
+entropy_arb/recorder.py  1-minute orderbook bars for offline analysis
+tools/analyze.py         minutes.csv -> strategy parameter evidence
 tests/                   python3 -m pytest tests/
 ```
 
 ## Known risks
 
-- **A wrong midline is a losing strategy.** The premium center drifts;
-  re-measure regularly and keep `config.yaml` current.
+- **A wrong center is a losing strategy.** Premiums drift; re-measure regularly
+  and keep the explicitly selected strategy parameters in `config.yaml`
+  current.
 - **USDG basis** (`lighter-rh`): the hedge quotes in USDG. Part of any
-  persistent premium is the stablecoin itself; your midline absorbs the
+  persistent premium is the stablecoin itself; your selected center absorbs the
   level, but a USDG *move* is real PnL.
 - **Funding**: two venues, two independent funding rates; carry is not
   modeled. Position caps bound it — keep them modest.

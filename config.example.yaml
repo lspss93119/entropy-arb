@@ -2,11 +2,14 @@
 #
 #   cp config.example.yaml config.yaml     then edit / 复制后修改
 #
-# This file IS the strategy. Credentials never live here — they go in .env
-# (see .env.example). Every key is validated: a typo is a startup error, not
-# a setting that silently does nothing.
-# 本文件就是策略本身。密钥绝不放在这里（见 .env.example）。所有键名都会被校验：
-# 拼写错误会直接报错，而不是静默失效。
+# You explicitly select one strategy and its parameters here. This file does
+# not diagnose markets, select a strategy, or switch strategies for you.
+# Credentials never live here — they go in .env (see .env.example). Every key
+# is validated: a typo is a startup error, not a setting that silently does
+# nothing.
+# 请在此处明确选择一种策略及其参数。本文件不会自动诊断市场、选择策略或切换策略。
+# 密钥绝不放在这里（见 .env.example）。所有键名都会被校验：拼写错误会直接报错，
+# 而不是静默失效。
 #
 # WHICH MARKETS to trade is NOT in this file — you state it explicitly on
 # every start with command-line flags:
@@ -20,27 +23,39 @@
 # Entropy 永远是其中一条腿；--hedge 选择对冲腿（三选一，见上表）。
 
 # ============================ THE SIGNAL / 信号 ============================
-# premium_bps = (Entropy price / hedge price - 1) * 10000
+# premium_bps = (Entropy mid / hedge mid - 1) * 10000
 #
-#   SELL entropy + BUY hedge   when executable premium >= midline + upper
-#   BUY entropy + SELL hedge   when executable premium <= midline - lower
+# stable_basis uses a human-selected fixed center_bps. The active example
+# below is immediately ready because its center is known at startup.
+# drifting_basis uses a causal rolling-median center from approximately 1 Hz
+# valid fresh-BBO observations; it warms up over the full timestamp window.
+# The live bot never performs automatic market diagnosis, strategy selection,
+# or strategy switching.
 #
-# Both hurdles are net of taker fees (the engine adds fees on top), so one
-# full round trip nets >= upper + lower bps after fees by construction.
+# Both executable hurdles are net of taker fees (the engine adds fees on top),
+# so one full round trip nets >= upper_bps + lower_bps after fees by design.
 #
-# midline_bps is a number YOU derive from recorded data. Run the bot
-# (--record-only) to collect logs/minutes.csv, then:  python3 tools/analyze.py
+# Use --record-only and tools/analyze.py for offline market analysis and to
+# choose strategy parameters. The recorder does not choose a strategy.
 #
-# midline_bps 是你根据采集数据设定的值。先运行机器人（--record-only）采集
-# logs/minutes.csv，再运行 python3 tools/analyze.py 获取建议值。
-# 两个方向的门槛都已扣除手续费（引擎会在此之上另加手续费），因此一次完整往返
-# 扣费后净赚 >= upper + lower bps。
+# stable_basis (active default): fixed center, ready immediately.
+# drifting_basis (alternate): causal rolling median, full-window warm-up,
+# 90% valid coverage, and a >30s valid-observation gap resets its history.
+# A process restart starts drifting_basis empty; it never preloads CSV data.
 strategy:
   name: stable_basis
   params:
     center_bps: 0.0
     upper_bps: 4.0
     lower_bps: 4.0
+
+# Alternate (choose this block instead of the active strategy above):
+# strategy:
+#   name: drifting_basis
+#   params:
+#     window_minutes: 60
+#     upper_bps: 3.0
+#     lower_bps: 3.5
 
 # ======================== VENUES / 交易所参数 ==============================
 entropy:
@@ -87,9 +102,10 @@ execution:
 
 # ================== DATA RECORDER / 数据采集 ===============================
 # Always-on while the bot runs: samples both real order books 1/sec and
-# writes one CSV row per minute. This is the input for tools/analyze.py.
+# writes one CSV row per minute. This supports offline market analysis and
+# explicit strategy parameter selection; the recorder never selects a strategy.
 # 机器人运行期间自动开启：每秒采样两边真实盘口，每分钟写一行 CSV，
-# 供 tools/analyze.py 分析并设定上方 thresholds。
+# 用于离线市场分析和明确选择策略参数；采集器不会自动选择策略。
 recorder:
   enabled: true
   csv: logs/minutes.csv

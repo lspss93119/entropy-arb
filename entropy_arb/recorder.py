@@ -2,22 +2,23 @@
 
 While the bot runs (live or --record-only), both venues' actual order books
 are sampled once per second. Each valid BBO sample is persisted for persistence
-research and aggregated into one CSV row per minute. These are the datasets
-users analyze (tools/analyze.py) to choose thresholds.midline_bps /
-upper_bps / lower_bps and execution.premium_persist_sec for config.yaml.
+research and aggregated into one CSV row per minute. These datasets support
+offline market analysis and explicit strategy parameter selection in
+config.yaml; the recorder never selects a strategy.
 
 Definitions (all in bps, fees NOT included — the engine adds fees on top):
 
     premium    = (entropy_mid / hedge_mid - 1) * 1e4
                  the mid-to-mid premium of Entropy over the hedge venue;
-                 its long-run center is what midline_bps hardcodes.
+                 its observed center informs a human-selected strategy center.
     sell_edge  = (entropy_bid / hedge_ask - 1) * 1e4
                  the EXECUTABLE premium for SELL-entropy/BUY-hedge; the
-                 engine fires this direction when sell_edge clears
-                 midline_bps + upper_bps (plus fees).
+                 engine fires this direction when sell_edge clears the
+                 selected strategy's center plus upper_bps (plus fees).
     buy_edge   = (hedge_bid / entropy_ask - 1) * 1e4
                  the executable premium for BUY-entropy/SELL-hedge; fires
-                 when buy_edge clears lower_bps - midline_bps (plus fees).
+                 when buy_edge clears lower_bps minus the selected center
+                 (plus fees).
 
 Bid/ask columns are the minute's last fresh sample (close). A row is only
 written for minutes with at least one sample where both books were fresh;

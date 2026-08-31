@@ -22,41 +22,52 @@
 官方 websocket（`wss://api.hyperliquid.xyz/ws`），Lighter 的盘口来自 Lighter
 官方 websocket。
 
-机器人运行期间（即使没有密钥、没有开策略）会自动把两边盘口记录成**分钟级
-CSV 数据**，配套的分析工具可以直接把这些数据变成策略所需的三个核心参数。
+机器人运行期间（包括无需密钥的 `--record-only`）会自动把两边盘口记录成
+**分钟级 CSV 数据**。这些记录用于离线市场分析和人工选择策略参数；采集器和
+实盘机器人都不会自动诊断市场或替你选择策略。
 
 ## 信号逻辑
 
-整个信号就是 `config.yaml` 里三个数字，由你根据采集的数据自己设定：
+实盘机器人使用 `config.yaml` 中由你明确选择的一套策略：
+
+- `stable_basis` 使用人工选择的固定 `center_bps`，启动后立即 READY。
+- `drifting_basis` 使用约 1 Hz、仅取有效且新鲜 BBO 的因果、按时间窗口滚动
+  中位数作为中枢。它需要完整窗口 warm-up，并要求至少 90% 有效覆盖率；有效
+  观测间隔超过 30 秒会清空历史并重新 warm-up；进程重启从空状态开始，不会
+  预加载 CSV 或恢复持久化中枢。
+
+实盘机器人不会自动进行市场诊断、策略选择或策略切换。请先审阅采集数据，
+再在 `config.yaml` 中明确选择策略和参数。
+
+两种策略都以中间价溢价作为中枢参考，但入场判断使用可实际成交的价格：
 
 ```
 premium_bps =（Entropy 价格 / 对冲腿价格 − 1）× 10 000
 
                           ┌──────────────  卖出 Entropy + 买入对冲腿
-midline + upper  ───────────────────────────────────────────────────
+center + upper   ───────────────────────────────────────────────────
                                        ▲
-midline          ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┼ ─ ─   溢价的长期中枢
+center           ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┼ ─ ─   人工选择的中枢
                                        ▼
-midline − lower  ───────────────────────────────────────────────────
+center − lower   ───────────────────────────────────────────────────
                           └──────────────  买入 Entropy + 卖出对冲腿
 ```
 
-- `midline_bps` —— 溢价的常态水平。跨所溢价几乎从不以零为中心（预言机不同、
-  计价货币不同、新上市溢价等），零中心的带只会朝一个方向开仓、打满仓位上限、
-  永远无法平仓。请实际测量溢价所在的位置，然后填入。
-- `upper_bps` / `lower_bps` —— 中枢上下两侧的入场带宽。
+- `center_bps`（用于 `stable_basis`）—— 人工选择的溢价常态水平。跨所溢价几乎
+  从不以零为中心（预言机、计价货币或新上市溢价不同）。
+- `upper_bps` / `lower_bps` —— 选定中枢上下两侧的入场带宽；`drifting_basis`
+  在 warm-up 后由因果滚动中位数提供中枢。
 
 两个方向的门槛都作用于**可实际成交的价格**（Entropy 买一 对 对冲腿卖一，
 反之亦然），并且是**扣除双边吃单手续费之后的净门槛**——引擎会在阈值之上
 另行叠加手续费。因此一次完整往返扣费后**净赚 ≥ upper + lower bps**，这是
 结构上保证的。
 
-有一点必须理解：当 `midline_bps: 5` 时，买入 Entropy 的门槛是
-`lower − midline`，可能为**负数**。这是有意为之——如果 Entropy 长期贵 5 bps，
-那么在溢价为 0 时买入它，相对其自身均衡水平就是便宜了 5 bps，这笔交易正是
-此前在 `midline + upper` 处卖出的获利平仓。这同时意味着**中枢填错就是亏钱
-策略**：若真实溢价中枢是 0 而你填了 5，机器人会整天以公允价买入 Entropy。
-先测量、再交易——数据采集器和分析工具就是为此而生。
+有一点必须理解：当人工选择的中枢为 5 bps 时，买入 Entropy 的门槛是
+`lower_bps − center_bps`，可能为**负数**。这是有意为之——如果 Entropy 长期贵
+5 bps，那么在溢价为 0 时买入它，相对自身均衡水平就是便宜了 5 bps，可以平掉
+此前在 `center + upper` 处的卖出。中枢选错可能亏损，因此应先用数据测量，再
+以小仓位运行。
 
 ## 快速开始
 
@@ -65,7 +76,7 @@ git clone https://github.com/your-quantguy/entropy-arb.git && cd entropy-arb
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt          # 数据采集只需要这些
 
-cp config.example.yaml config.yaml       # 策略配置（阈值、规模、风控）
+cp config.example.yaml config.yaml       # 明确策略、规模与风控配置
 cp .env.example .env                     # 密钥——交易必填
 ```
 
@@ -86,14 +97,15 @@ python3 main.py --record-only --symbol SNDK --hedge lighter-rh
 至少运行几个小时（最好一整天——溢价存在日内规律），数据写入
 `logs/minutes.csv`。
 
-**第二步：分析数据、设定阈值：**
+**第二步：审阅市场、选择策略参数：**
 
 ```bash
 python3 tools/analyze.py
 ```
 
-它会输出溢价分布、各档带宽的历史触发频率，以及可直接粘贴进
-`config.yaml` 的 `thresholds:` 配置块。
+它会输出溢价分布和各档带宽的历史触发频率。请根据这些离线证据，在
+`config.yaml` 中明确选择 `stable_basis` 或 `drifting_basis` 及其参数；分析工具
+不会自动选择或切换策略。
 
 **第三步：实盘** —— 填写 `.env`，安装签名 SDK，仓位上限从刚好满足
 交易所最小名义的水平开始：
@@ -130,8 +142,9 @@ python3 main.py --symbol SNDK --hedge lighter-rh
 
 采集的 edge 为费前口径；分析工具在统计触发频率前会先扣除 `--fees-bps`
 （请传入**两边吃单费之和**——零费交易所默认 0.0，对冲腿为 `tradexyz` 时
-约为 1.0），因此其表格与建议值可直接填入配置。`--hours 24`
-可只分析最近数据；溢价中枢会漂移，请定期重新分析并更新 `config.yaml`。
+约为 1.0）。这些结果用于选择明确策略中的 `center_bps`、`upper_bps` 和
+`lower_bps`；不会替你做策略选择。`--hours 24` 可只分析最近数据；溢价中枢会
+漂移，请定期重新分析并有意更新 `config.yaml`。
 
 ## 配置说明
 
@@ -141,8 +154,10 @@ python3 main.py --symbol SNDK --hedge lighter-rh
 
 | 键 | 含义 | 默认值 |
 |---|---|---|
-| `thresholds.midline_bps` | 溢价中枢（必须实测！） | — |
-| `thresholds.upper_bps` / `lower_bps` | 入场带宽（> 0） | — |
+| `strategy.name` | 明确选择 `stable_basis` 或 `drifting_basis` | `stable_basis` |
+| `strategy.params.center_bps` | `stable_basis` 的人工固定中枢 | 示例为 `0.0` |
+| `strategy.params.upper_bps` / `lower_bps` | 入场带宽（> 0） | 示例为 `4.0` |
+| `strategy.params.window_minutes` | `drifting_basis` 的按时间滚动窗口 | 备用示例为 `60` |
 | `entropy.dex` | Entropy 在 Hyperliquid 上的 dex 名 | `io` |
 | `*.taker_fee_bps` | 各所吃单费 | 0.0（tradexyz 对冲腿：1.0） |
 | `*.max_position_usd` | 各所持仓上限 | 1000 |
@@ -196,17 +211,17 @@ entropy_arb/venue_hl.py  Hyperliquid dex 适配器（Entropy、tradexyz）
 entropy_arb/venue_lighter.py  zkLighter 适配器（主网、Robinhood 链）
 entropy_arb/engine.py    双交易所策略主循环
 entropy_arb/dashboard.py Rich 终端仪表盘
-entropy_arb/recorder.py  分钟级盘口数据采集
-tools/analyze.py         minutes.csv -> 阈值建议
+entropy_arb/recorder.py  用于离线分析的分钟级盘口数据采集
+tools/analyze.py         minutes.csv -> 策略参数分析证据
 tests/                   python3 -m pytest tests/
 ```
 
 ## 已知风险
 
-- **中枢填错就是亏钱策略。** 溢价中枢会漂移，请定期重新测量并保持
-  `config.yaml` 与市场同步。
+- **中枢填错就是亏钱策略。** 溢价中枢会漂移，请定期重新测量，并保持
+  `config.yaml` 中人工选择的策略参数与市场同步。
 - **USDG 基差**（`lighter-rh`）：对冲腿以 USDG 计价，持续溢价中有
-  一部分是稳定币本身的基差；midline 吸收其水平，但 USDG 的*变动*是真实盈亏。
+  一部分是稳定币本身的基差；选定的中枢吸收其水平，但 USDG 的*变动*是真实盈亏。
 - **资金费**：两个交易所、两套独立的资金费率，持仓成本未建模——仓位上限
   请设小一些。
 - **薄盘口**：Entropy 深度可能很小；`take_fraction` 与名义上限控制单笔规模，

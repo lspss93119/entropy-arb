@@ -9,9 +9,9 @@
 
 --symbol and --hedge are required on every start: the markets you trade are
 an explicit decision, not a config default. Add --cn for a Chinese-language
-dashboard. There is no paper mode. Collect data with --record-only, set
-your thresholds with tools/analyze.py, then go live with small position
-caps.
+dashboard. There is no paper mode. Collect data with --record-only, review
+the market, select a strategy and parameters in config.yaml, then go live
+with small position caps.
 
 On a terminal the bot shows a live Rich dashboard (books, signal, positions,
 PnL, last executions) and writes log lines to logging.file; use
