@@ -7,6 +7,7 @@ import logging
 import os
 import sys
 import tempfile
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -16,6 +17,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from entropy_arb.book import OrderBook  # noqa: E402
 from entropy_arb.config import load_config  # noqa: E402
 from entropy_arb.engine import Engine  # noqa: E402
+from entropy_arb.premium import calculate_premiums  # noqa: E402
 
 NO_ENV = os.path.join(tempfile.gettempdir(), "entropy-arb-no-such.env")
 
@@ -149,8 +151,8 @@ def run_scan(eng):
     async def go():
         # first pass arms the direction, second passes the persistence gate
         # (premium_persist_sec is 0 in the test config)
-        eng._scan(__import__("time").time())
-        return eng._scan(__import__("time").time())
+        eng._scan(time.time())
+        return eng._scan(time.time())
     return asyncio.run(go())
 
 
@@ -206,21 +208,121 @@ def test_scan_respects_position_caps():
     assert run_scan(eng) is None
 
 
-def test_scan_clears_persistence_arming_when_strategy_not_ready():
+def test_unready_drifting_strategy_blocks_scan_and_clears_arming():
     eng = make_engine(
         upper=4.0,
         lower=3.0,
         strategy_name="drifting_basis",
         window_minutes=60,
     )
+    eng.entropy.set_book(100.14, 100.16)
+    eng.hedge.set_book(99.99, 100.01)
     eng._armed["sell_entropy"] = 111.0
     eng._armed["buy_entropy"] = 222.0
 
-    assert eng._scan(__import__("time").time()) is None
+    assert eng._scan(time.time()) is None
     assert eng._armed == {
         "sell_entropy": None,
         "buy_entropy": None,
     }
+
+
+def test_stable_strategy_observer_helper_is_noop():
+    eng = make_engine(strategy_name="stable_basis")
+    assert eng.strategy.requires_observations is False
+    eng.entropy.set_book(100.10, 100.20)
+    eng.hedge.set_book(99.90, 100.00)
+
+    before = eng.strategy.state()
+    assert eng._sample_strategy_observation(now=1000.0) is False
+    assert eng.strategy.state() == before
+    assert not eng._update_evt.is_set()
+
+
+def test_drifting_observation_uses_mid_premium_and_fresh_books():
+    eng = make_engine(strategy_name="drifting_basis", window_minutes=1)
+    eng.entropy.set_book(100.10, 100.20)
+    eng.hedge.set_book(99.90, 100.00)
+
+    assert eng._sample_strategy_observation(now=1000.0) is True
+    state = eng.strategy.state()
+    assert state.ready is False
+    assert state.center_bps is None
+    assert state.coverage_ratio > 0
+    assert eng._update_evt.is_set()
+
+
+def test_drifting_observation_rejects_unready_empty_and_stale_books():
+    eng = make_engine(strategy_name="drifting_basis", window_minutes=1)
+    before = eng.strategy.state()
+
+    assert eng._sample_strategy_observation(now=1000.0) is False
+
+    eng.entropy.set_book(100.10, 100.20)
+    eng.hedge.book.ready = True
+    eng.hedge.book.touch()
+    assert eng._sample_strategy_observation(now=1001.0) is False
+
+    eng.hedge.set_book(99.90, 100.00)
+    eng.entropy.book.alive_ts = time.time() - eng.cfg.staleness_sec - 1.0
+    assert eng._sample_strategy_observation(now=1002.0) is False
+
+    assert eng.strategy.state() == before
+    assert not eng._update_evt.is_set()
+
+
+def test_engine_premium_bps_matches_shared_helper():
+    eng = make_engine()
+    eng.entropy.set_book(100.10, 100.20)
+    eng.hedge.set_book(99.90, 100.00)
+
+    values = calculate_premiums(
+        entropy_bid=100.10,
+        entropy_ask=100.20,
+        hedge_bid=99.90,
+        hedge_ask=100.00,
+    )
+    assert eng.premium_bps() == pytest.approx(values.premium_bps)
+
+
+def test_drifting_observations_reach_ready_from_live_books():
+    eng = make_engine(strategy_name="drifting_basis", window_minutes=1)
+    eng.entropy.set_book(100.10, 100.20)
+    eng.hedge.set_book(99.90, 100.00)
+
+    for offset in range(61):
+        assert eng._sample_strategy_observation(now=1000.0 + offset) is True
+
+    state = eng.strategy.state()
+    values = calculate_premiums(
+        entropy_bid=100.10,
+        entropy_ask=100.20,
+        hedge_bid=99.90,
+        hedge_ask=100.00,
+    )
+    assert state.ready is True
+    assert state.center_bps == pytest.approx(values.premium_bps)
+
+
+def test_strategy_observation_loop_cancels_cleanly():
+    async def scenario():
+        eng = make_engine(strategy_name="drifting_basis", window_minutes=1)
+        samples = 0
+
+        def fake_sample(now=None):
+            nonlocal samples
+            samples += 1
+            return True
+
+        eng._sample_strategy_observation = fake_sample
+        task = asyncio.create_task(eng._strategy_observation_loop())
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert samples == 1
+
+    asyncio.run(scenario())
 
 
 def test_status_reports_stable_strategy(caplog):
@@ -424,6 +526,148 @@ def test_run_inner_logs_drifting_warmup_strategy_and_no_auto_selection(
     assert ("strategy=drifting_basis window=60m center=WARMING_UP "
             "band-offset=[-3.50,+3.00]") in caplog.text
     assert "No automatic strategy selection." in caplog.text
+
+
+class LifecycleVenue:
+    def __init__(self, key, name, *, kind="hl"):
+        self.kind = kind
+        self.key = key
+        self.name = name
+        self.conf = SimpleNamespace(symbol="SNDK")
+        self.size_decimals = 4
+        self.min_base = 0.0001
+        self.min_quote = 10.0
+        self.fee_bps = 0.0
+        self.book = OrderBook()
+        self.position = 0.0
+        self.orders_per_min = 30
+
+    async def load_market(self):
+        return None
+
+    def start_tasks(self, stop, notify, live):
+        return []
+
+    async def close(self):
+        return None
+
+    def _query_address(self):
+        return None
+
+    def init_signer(self):
+        return None
+
+    def share_nonces_with(self, other):
+        return None
+
+
+async def run_strategy_wiring_scenario(
+    monkeypatch,
+    *,
+    strategy_name,
+    record_only,
+):
+    cfg = make_cfg(
+        strategy_name=strategy_name,
+        window_minutes=1,
+        hedge_venue="tradexyz",
+        recorder_enabled=False,
+    )
+    if not record_only:
+        monkeypatch.setattr(type(cfg), "creds_complete", property(lambda self: True))
+    eng = Engine(cfg, record_only=record_only)
+    venues = iter([
+        LifecycleVenue("entropy", "ENTROPY"),
+        LifecycleVenue("hedge", "XYZ"),
+    ])
+    monkeypatch.setattr(eng, "_make_venue", lambda conf: next(venues))
+
+    started = {
+        "strategy": asyncio.Event(),
+        "observer": asyncio.Event(),
+    }
+
+    async def strategy_loop():
+        started["strategy"].set()
+        await eng.stop.wait()
+
+    async def observer_loop():
+        started["observer"].set()
+        await eng.stop.wait()
+
+    async def idle_loop():
+        await eng.stop.wait()
+
+    async def fake_reconcile_positions(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(eng, "_strategy_loop", strategy_loop)
+    monkeypatch.setattr(
+        eng,
+        "_strategy_observation_loop",
+        observer_loop,
+        raising=False,
+    )
+    monkeypatch.setattr(eng, "_balance_loop", idle_loop)
+    monkeypatch.setattr(eng, "_http_keepalive_loop", idle_loop)
+    monkeypatch.setattr(eng, "_status_loop", idle_loop)
+    monkeypatch.setattr(eng, "_reconcile_loop", idle_loop)
+    monkeypatch.setattr(eng, "_reconcile_positions", fake_reconcile_positions)
+
+    run_task = asyncio.create_task(eng._run_inner())
+    for _ in range(20):
+        await asyncio.sleep(0.01)
+        if run_task.done() or started["strategy"].is_set() or started["observer"].is_set():
+            break
+    snapshot = {
+        "strategy": started["strategy"].is_set(),
+        "observer": started["observer"].is_set(),
+    }
+    eng.request_stop()
+    await asyncio.wait_for(run_task, timeout=1.0)
+    return snapshot
+
+
+def test_live_stable_run_inner_starts_strategy_without_observer(monkeypatch):
+    started = asyncio.run(
+        run_strategy_wiring_scenario(
+            monkeypatch,
+            strategy_name="stable_basis",
+            record_only=False,
+        )
+    )
+    assert started == {
+        "strategy": True,
+        "observer": False,
+    }
+
+
+def test_live_drifting_run_inner_starts_strategy_and_observer(monkeypatch):
+    started = asyncio.run(
+        run_strategy_wiring_scenario(
+            monkeypatch,
+            strategy_name="drifting_basis",
+            record_only=False,
+        )
+    )
+    assert started == {
+        "strategy": True,
+        "observer": True,
+    }
+
+
+def test_record_only_drifting_run_inner_skips_strategy_and_observer(monkeypatch):
+    started = asyncio.run(
+        run_strategy_wiring_scenario(
+            monkeypatch,
+            strategy_name="drifting_basis",
+            record_only=True,
+        )
+    )
+    assert started == {
+        "strategy": False,
+        "observer": False,
+    }
 
 
 def attach_reference_venues(

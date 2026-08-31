@@ -26,6 +26,7 @@ import aiohttp
 
 from .book import ArbPlan, floor_step, plan_arb
 from .config import Config
+from .premium import calculate_premiums
 from .recorder import MinuteRecorder
 from .reference import ReferenceRecorder
 from .strategy import StrategyState, build_strategy
@@ -234,6 +235,11 @@ class Engine:
             tasks.append(asyncio.create_task(self.recorder.run(self.stop),
                                              name="recorder"))
         if not self.record_only:
+            if self.strategy.requires_observations:
+                tasks.append(asyncio.create_task(
+                    self._strategy_observation_loop(),
+                    name="strategy-observer",
+                ))
             tasks.append(asyncio.create_task(self._strategy_loop(),
                                              name="strategy"))
             tasks.append(asyncio.create_task(self._balance_loop(),
@@ -331,6 +337,43 @@ class Engine:
                 raise
             except Exception:
                 log.exception("evaluate failed")
+
+    def _sample_strategy_observation(self, now: float | None = None) -> bool:
+        if not self.strategy.requires_observations:
+            return False
+        now = time.time() if now is None else now
+        cfg = self.cfg
+        if not (
+            self.entropy.book.is_fresh(cfg.staleness_sec)
+            and self.hedge.book.is_fresh(cfg.staleness_sec)
+        ):
+            return False
+        e_bid = self.entropy.book.best_bid()
+        e_ask = self.entropy.book.best_ask()
+        h_bid = self.hedge.book.best_bid()
+        h_ask = self.hedge.book.best_ask()
+        if None in (e_bid, e_ask, h_bid, h_ask):
+            return False
+        before = self.strategy.state()
+        values = calculate_premiums(e_bid, e_ask, h_bid, h_ask)
+        self.strategy.update(now, values.premium_bps)
+        after = self.strategy.state()
+        if after != before:
+            self._update_evt.set()
+        return True
+
+    async def _strategy_observation_loop(self) -> None:
+        while not self.stop.is_set():
+            try:
+                self._sample_strategy_observation()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("strategy observation failed")
+            try:
+                await asyncio.wait_for(self.stop.wait(), timeout=1.0)
+            except asyncio.TimeoutError:
+                pass
 
     def _schedule_poke(self, delay: float) -> None:
         loop = asyncio.get_running_loop()
@@ -768,10 +811,13 @@ class Engine:
         return total - self._mtm_baseline
 
     def premium_bps(self) -> Optional[float]:
-        em, hm = self.entropy.book.mid(), self.hedge.book.mid()
-        if not (em and hm):
+        e_bid = self.entropy.book.best_bid()
+        e_ask = self.entropy.book.best_ask()
+        h_bid = self.hedge.book.best_bid()
+        h_ask = self.hedge.book.best_ask()
+        if None in (e_bid, e_ask, h_bid, h_ask):
             return None
-        return (em / hm - 1.0) * 1e4
+        return calculate_premiums(e_bid, e_ask, h_bid, h_ask).premium_bps
 
     def _strategy_abs_band(self, state: StrategyState) -> tuple[float, float]:
         if state.center_bps is None:
