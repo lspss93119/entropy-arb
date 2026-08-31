@@ -38,7 +38,10 @@ def load(yaml_text: str, symbol="SNDK", hedge="lighter-rh"):
 
 
 def test_example_config_loads():
-    cfg = load(MINIMAL, symbol="SNDK", hedge="lighter-rh")
+    example_file = os.path.join(os.path.dirname(__file__), "..",
+                                "config.example.yaml")
+    cfg = load_config(example_file, NO_ENV,
+                      symbol="SNDK", hedge_venue="lighter-rh")
     assert cfg.symbol == "SNDK"
     assert cfg.entropy.kind == "hl" and cfg.entropy.hl_dex == "io"
     assert cfg.hedge_venue == "lighter-rh"

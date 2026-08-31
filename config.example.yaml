@@ -35,10 +35,12 @@
 # logs/minutes.csv，再运行 python3 tools/analyze.py 获取建议值。
 # 两个方向的门槛都已扣除手续费（引擎会在此之上另加手续费），因此一次完整往返
 # 扣费后净赚 >= upper + lower bps。
-thresholds:
-  midline_bps: 0.0     # persistent premium center / 溢价长期中枢
-  upper_bps: 4.0       # entry above midline: sell entropy / 中枢上方入场带宽
-  lower_bps: 4.0       # entry below midline: buy entropy / 中枢下方入场带宽
+strategy:
+  name: stable_basis
+  params:
+    center_bps: 0.0
+    upper_bps: 4.0
+    lower_bps: 4.0
 
 # ======================== VENUES / 交易所参数 ==============================
 entropy:

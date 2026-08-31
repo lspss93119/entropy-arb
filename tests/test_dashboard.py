@@ -22,10 +22,12 @@ NO_ENV = os.path.join(tempfile.gettempdir(), "entropy-arb-no-such.env")
 def make_cfg():
     f = tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False)
     f.write("""
-thresholds:
-  midline_bps: 2.0
-  upper_bps: 4.0
-  lower_bps: 3.0
+strategy:
+  name: stable_basis
+  params:
+    center_bps: 2.0
+    upper_bps: 4.0
+    lower_bps: 3.0
 """)
     f.close()
     return load_config(f.name, NO_ENV,
