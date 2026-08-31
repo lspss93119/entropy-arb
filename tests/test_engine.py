@@ -26,13 +26,32 @@ def make_cfg(
     *,
     hedge_venue="lighter-rh",
     recorder_enabled=True,
+    strategy_name="stable_basis",
+    window_minutes=60,
 ):
+    if strategy_name == "stable_basis":
+        strategy_yaml = f"""
+strategy:
+  name: stable_basis
+  params:
+    center_bps: {midline}
+    upper_bps: {upper}
+    lower_bps: {lower}
+"""
+    elif strategy_name == "drifting_basis":
+        strategy_yaml = f"""
+strategy:
+  name: drifting_basis
+  params:
+    window_minutes: {window_minutes}
+    upper_bps: {upper}
+    lower_bps: {lower}
+"""
+    else:
+        raise ValueError(strategy_name)
+
     f = tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False)
-    f.write(f"""
-thresholds:
-  midline_bps: {midline}
-  upper_bps: {upper}
-  lower_bps: {lower}
+    f.write(strategy_yaml + f"""
 execution:
   premium_persist_sec: 0.0
 recorder:
@@ -79,16 +98,34 @@ def approx(a, b, tol=1e-9):
 def test_eff_threshold_directions():
     eng = make_engine(midline=5.0, upper=4.0, lower=3.0)
     e, h = eng.entropy, eng.hedge
+    state = eng.strategy.state()
     # sell entropy: hurdle = midline + upper = 9
-    approx(eng._eff_threshold(buy=h, sell=e), 9.0)
+    approx(eng._eff_threshold(buy=h, sell=e, state=state), 9.0)
     # buy entropy: hurdle = lower - midline = -2 (unwind side of a positive
     # midline is deliberately cheap — that's what completes the round trip)
-    approx(eng._eff_threshold(buy=e, sell=h), -2.0)
+    approx(eng._eff_threshold(buy=e, sell=h, state=state), -2.0)
     # round trip nets upper + lower regardless of midline sign
     for m in (-7.0, 0.0, 12.5):
-        eng.cfg.midline_bps = m
-        total = eng._eff_threshold(buy=h, sell=e) + eng._eff_threshold(buy=e, sell=h)
+        eng = make_engine(midline=m, upper=4.0, lower=3.0)
+        state = eng.strategy.state()
+        total = (
+            eng._eff_threshold(buy=eng.hedge, sell=eng.entropy, state=state)
+            + eng._eff_threshold(buy=eng.entropy, sell=eng.hedge, state=state)
+        )
         approx(total, 7.0)
+
+
+def test_stable_strategy_preserves_legacy_hurdle_math():
+    eng = make_engine(midline=5.0, upper=4.0, lower=3.0)
+    state = eng.strategy.state()
+    e, h = eng.entropy, eng.hedge
+    approx(eng._eff_threshold(h, e, state), 9.0)
+    approx(eng._eff_threshold(e, h, state), -2.0)
+    approx(
+        eng._eff_threshold(h, e, state)
+        + eng._eff_threshold(e, h, state),
+        7.0,
+    )
 
 
 def test_inventory_ladder():
@@ -123,7 +160,8 @@ def test_scan_fires_sell_entropy_above_band():
     eng.hedge.set_book(99.99, 100.01)
     best = run_scan(eng)
     assert best is not None
-    buy, sell, plan = best
+    buy, sell, plan, state = best
+    assert state.center_bps == 5.0
     assert sell.key == "entropy" and buy.key == "hedge"
     assert plan.exp_edge_usd > 0
 
@@ -143,7 +181,8 @@ def test_scan_fires_buy_entropy_below_band():
     eng.hedge.set_book(99.99, 100.01)
     best = run_scan(eng)
     assert best is not None
-    buy, sell, plan = best
+    buy, sell, plan, state = best
+    assert state.center_bps == 5.0
     assert buy.key == "entropy" and sell.key == "hedge"
 
 

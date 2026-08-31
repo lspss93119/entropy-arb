@@ -6,6 +6,8 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Deque
 
+from .config import StrategyConf
+
 OBSERVATION_INTERVAL_SEC = 1.0
 MIN_COVERAGE_RATIO = 0.90
 DISCONTINUITY_RESET_SEC = 30.0
@@ -103,3 +105,23 @@ class DriftingBasisStrategy:
             warmup_span_sec=span,
             coverage_ratio=coverage,
         )
+
+
+def build_strategy(conf: StrategyConf):
+    if conf.name == "stable_basis":
+        if conf.center_bps is None:
+            raise ValueError("stable_basis requires center_bps")
+        return StableBasisStrategy(
+            center_bps=conf.center_bps,
+            upper_bps=conf.upper_bps,
+            lower_bps=conf.lower_bps,
+        )
+    if conf.name == "drifting_basis":
+        if conf.window_minutes is None:
+            raise ValueError("drifting_basis requires window_minutes")
+        return DriftingBasisStrategy(
+            window_minutes=conf.window_minutes,
+            upper_bps=conf.upper_bps,
+            lower_bps=conf.lower_bps,
+        )
+    raise ValueError(f"unknown strategy {conf.name!r}")

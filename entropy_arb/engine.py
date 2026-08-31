@@ -28,6 +28,7 @@ from .book import ArbPlan, floor_step, plan_arb
 from .config import Config
 from .recorder import MinuteRecorder
 from .reference import ReferenceRecorder
+from .strategy import StrategyState, build_strategy
 from .venue_hl import HLVenue
 from .venue_lighter import LighterVenue
 
@@ -45,6 +46,7 @@ REFERENCE_HEDGE_KEYS = frozenset(("lighter", "lighter-rh"))
 class Engine:
     def __init__(self, cfg: Config, record_only: bool = False) -> None:
         self.cfg = cfg
+        self.strategy = build_strategy(cfg.strategy)
         self.record_only = record_only
         self.session: Optional[aiohttp.ClientSession] = None
         self.entropy = None
@@ -285,15 +287,17 @@ class Engine:
 
         return max(ramp(buy, buy.position >= 0), ramp(sell, sell.position <= 0))
 
-    def _eff_threshold(self, buy, sell) -> float:
+    def _eff_threshold(self, buy, sell, state: StrategyState) -> float:
         """Net hurdle (bps, on top of fees) for the direction buy->sell.
 
         selling entropy: executable premium must clear midline + upper;
         buying entropy: the reverse premium must clear lower - midline."""
+        if not state.ready or state.center_bps is None:
+            raise RuntimeError("strategy state is not ready")
         if sell.key == "entropy":
-            base = self.cfg.midline_bps + self.cfg.upper_bps
+            base = state.center_bps + state.upper_bps
         else:
-            base = self.cfg.lower_bps - self.cfg.midline_bps
+            base = state.lower_bps - state.center_bps
         return base + self._inv_add_bps(buy, sell)
 
     def _headroom(self, buy, sell, ref_px: float) -> float:
@@ -301,10 +305,10 @@ class Engine:
         hs = sell.cap_usd + sell.position * ref_px
         return min(hb, hs)
 
-    def _plan(self, buy, sell, cap_notional: float):
+    def _plan(self, buy, sell, cap_notional: float, state: StrategyState):
         return plan_arb(
             buy.book, sell.book,
-            threshold_bps=self._eff_threshold(buy, sell),
+            threshold_bps=self._eff_threshold(buy, sell, state),
             buy_fee_bps=buy.fee_bps, sell_fee_bps=sell.fee_bps,
             take_fraction=self.cfg.take_fraction,
             cap_notional=cap_notional,
@@ -358,26 +362,27 @@ class Engine:
         best = self._scan(now)
         if best is None:
             return
-        buy, sell, plan = best
+        buy, sell, plan, state = best
         # _scan verified both locks free and nothing ran since (no awaits),
         # so these acquires take the no-suspension fast path
         await self._vlock(buy.key).acquire()
         await self._vlock(sell.key).acquire()
         # run as a task so a shutdown cancels the strategy loop's await, never
         # the in-flight execution itself (both legs must settle)
-        t = asyncio.create_task(self._execute_locked(buy, sell, plan))
+        t = asyncio.create_task(self._execute_locked(buy, sell, plan, state))
         self._exec_tasks.add(t)
         t.add_done_callback(self._exec_tasks.discard)
         await asyncio.shield(t)
 
-    async def _execute_locked(self, buy, sell, plan: ArbPlan) -> None:
+    async def _execute_locked(self, buy, sell, plan: ArbPlan,
+                              state: StrategyState) -> None:
         """Run one execution while holding both venue locks (acquired by the
         caller), then release them and settle the aftermath: unresolved
         outcomes escalate to reconcile, everything else gets a net-delta
         check."""
         unresolved = False
         try:
-            unresolved = await self._execute(buy, sell, plan)
+            unresolved = await self._execute(buy, sell, plan, state)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -395,6 +400,9 @@ class Engine:
         """Evaluate both directions; returns the best executable
         (buy, sell, plan), or None."""
         cfg = self.cfg
+        state = self.strategy.state()
+        if not state.ready or state.center_bps is None:
+            return None
         best = None
         for buy, sell, dkey in ((self.hedge, self.entropy, "sell_entropy"),
                                 (self.entropy, self.hedge, "buy_entropy")):
@@ -416,7 +424,7 @@ class Engine:
             if (buy.book.last_update_ts <= buy.last_traded_ts
                     or sell.book.last_update_ts <= sell.last_traded_ts):
                 continue
-            plan, reason = self._plan(buy, sell, cfg.max_order_notional)
+            plan, reason = self._plan(buy, sell, cfg.max_order_notional, state)
             edge_present = reason not in ("no_edge", "empty_book")
             if not edge_present:
                 self._armed[dkey] = None
@@ -435,19 +443,24 @@ class Engine:
                 continue
             headroom = self._headroom(buy, sell, plan.buy_limit)
             if headroom < plan.buy_notional:
-                plan, _ = self._plan(buy, sell,
-                                     min(cfg.max_order_notional, headroom))
+                plan, _ = self._plan(
+                    buy,
+                    sell,
+                    min(cfg.max_order_notional, headroom),
+                    state,
+                )
                 if plan is None:
                     self._skiplog("%s blocked by position caps (headroom $%.0f)",
                                   dkey, max(headroom, 0.0))
                     continue
             if best is None or plan.exp_edge_usd > best[2].exp_edge_usd:
-                best = (buy, sell, plan)
+                best = (buy, sell, plan, state)
         return best
 
     # ------------------------------------------------------------- execution
 
-    async def _execute(self, buy, sell, plan: ArbPlan) -> bool:
+    async def _execute(self, buy, sell, plan: ArbPlan,
+                       state: StrategyState) -> bool:
         """Send both legs and settle the fills. Both venue locks are held by
         the caller. Returns True when an outcome is unresolved and the caller
         must escalate to reconcile."""
@@ -531,7 +544,7 @@ class Engine:
         self._record_trade(direction, plan,
                            None if unresolved else fill_edge,
                            f"{binfo['status']}/{sinfo['status']}", sent_ok)
-        self._log_csv(direction, buy, sell, plan, sent_ok, bfill, sfill,
+        self._log_csv(direction, buy, sell, plan, state, sent_ok, bfill, sfill,
                       binfo["status"], sinfo["status"], fill_edge, inv_bps)
         self.last_trade_ts = time.time()
         return bool(unresolved)
@@ -788,8 +801,9 @@ class Engine:
                      self.total_exp_edge, self.total_fill_edge, rec,
                      " *** HALTED ***" if self.halted else "")
 
-    def _log_csv(self, direction, buy, sell, plan: ArbPlan, ok: bool, bfill,
-                 sfill, bstatus, sstatus, fill_edge, inv_bps) -> None:
+    def _log_csv(self, direction, buy, sell, plan: ArbPlan,
+                 state: StrategyState, ok: bool, bfill, sfill,
+                 bstatus, sstatus, fill_edge, inv_bps) -> None:
         try:
             path = self.cfg.trades_csv
             d = os.path.dirname(path)
@@ -810,7 +824,7 @@ class Engine:
                             f"{plan.buy_notional:.2f}", f"{plan.sell_notional:.2f}",
                             f"{plan.exp_edge_usd:.4f}", f"{plan.gross_edge_usd:.4f}",
                             f"{plan.marginal_premium_bps:.3f}",
-                            f"{self.cfg.midline_bps:.3f}",
+                            f"{state.center_bps:.3f}",
                             f"{inv_bps:.3f}", int(ok), f"{bfill:.8g}",
                             f"{sfill:.8g}", bstatus, sstatus, f"{fill_edge:.4f}"])
         except Exception:

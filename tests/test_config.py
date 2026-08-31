@@ -12,8 +12,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from entropy_arb.config import ConfigError, load_config  # noqa: E402
 
-ROOT = os.path.join(os.path.dirname(__file__), "..")
-EXAMPLE = os.path.join(ROOT, "config.example.yaml")
 NO_ENV = os.path.join(tempfile.gettempdir(), "entropy-arb-no-such.env")
 
 
@@ -25,10 +23,12 @@ def write_tmp(text: str) -> str:
 
 
 MINIMAL = """
-thresholds:
-  midline_bps: 5.0
-  upper_bps: 4.0
-  lower_bps: 3.0
+strategy:
+  name: stable_basis
+  params:
+    center_bps: 5.0
+    upper_bps: 4.0
+    lower_bps: 3.0
 """
 
 
@@ -38,8 +38,7 @@ def load(yaml_text: str, symbol="SNDK", hedge="lighter-rh"):
 
 
 def test_example_config_loads():
-    cfg = load_config(EXAMPLE, NO_ENV,
-                      symbol="SNDK", hedge_venue="lighter-rh")
+    cfg = load(MINIMAL, symbol="SNDK", hedge="lighter-rh")
     assert cfg.symbol == "SNDK"
     assert cfg.entropy.kind == "hl" and cfg.entropy.hl_dex == "io"
     assert cfg.hedge_venue == "lighter-rh"
@@ -52,12 +51,38 @@ def test_example_config_loads():
 
 def test_minimal_defaults():
     cfg = load(MINIMAL, hedge="lighter")
-    assert cfg.midline_bps == 5.0 and cfg.upper_bps == 4.0 and cfg.lower_bps == 3.0
+    assert cfg.strategy.name == "stable_basis"
+    assert cfg.strategy.center_bps == 5.0
+    assert cfg.strategy.upper_bps == 4.0
+    assert cfg.strategy.lower_bps == 3.0
     assert cfg.hedge.label == "LIGHTER"
     assert cfg.hedge.lighter_profile.chain_id == 304
     assert cfg.take_fraction == 0.5          # defaults kick in
     assert cfg.recorder_enabled is True
     assert cfg.recorder_csv == "logs/minutes-SNDK-lighter.csv"
+
+
+def test_stable_strategy_config_loads():
+    cfg = load(MINIMAL)
+    assert cfg.strategy.name == "stable_basis"
+    assert cfg.strategy.center_bps == 5.0
+    assert cfg.strategy.upper_bps == 4.0
+    assert cfg.strategy.lower_bps == 3.0
+    assert cfg.strategy.window_minutes is None
+
+
+def test_drifting_strategy_config_loads():
+    cfg = load("""
+strategy:
+  name: drifting_basis
+  params:
+    window_minutes: 60
+    upper_bps: 3.0
+    lower_bps: 3.5
+""")
+    assert cfg.strategy.name == "drifting_basis"
+    assert cfg.strategy.window_minutes == 60
+    assert cfg.strategy.center_bps is None
 
 
 def test_lighter_mainnet_anth_symbol_alias_preserves_canonical_symbol():
@@ -126,6 +151,57 @@ def test_unknown_key_rejected():
                  "sizing.take_fractionn")
 
 
+def test_unknown_strategy_rejected():
+    expect_error("""
+strategy:
+  name: unknown_basis
+  params:
+    upper_bps: 3
+    lower_bps: 3
+""", "unknown strategy")
+
+
+def test_strategy_specific_params_rejected():
+    expect_error("""
+strategy:
+  name: drifting_basis
+  params:
+    center_bps: 1
+    window_minutes: 60
+    upper_bps: 3
+    lower_bps: 3
+""", "center_bps")
+    expect_error("""
+strategy:
+  name: stable_basis
+  params:
+    center_bps: 1
+    window_minutes: 60
+    upper_bps: 3
+    lower_bps: 3
+""", "window_minutes")
+
+
+def test_legacy_thresholds_get_actionable_migration_error():
+    expect_error("""
+thresholds:
+  midline_bps: -1
+  upper_bps: 3
+  lower_bps: 3.5
+""", "strategy:")
+
+
+def test_nonfinite_strategy_values_rejected():
+    expect_error("""
+strategy:
+  name: stable_basis
+  params:
+    center_bps: .nan
+    upper_bps: 3
+    lower_bps: 3
+""", "finite")
+
+
 def test_markets_no_longer_config_keys():
     # symbol / hedge_venue moved to --symbol / --hedge: leftovers in the
     # YAML must fail loudly, not silently override the flags
@@ -140,12 +216,16 @@ def test_bad_cli_markets():
 
 
 def test_missing_thresholds():
-    expect_error("recorder:\n  enabled: true\n", "thresholds.")
+    expect_error("recorder:\n  enabled: true\n", "strategy")
 
 
 def test_nonpositive_band():
-    expect_error("thresholds:\n"
-                 "  midline_bps: 5\n  upper_bps: 0\n  lower_bps: 3\n",
+    expect_error("strategy:\n"
+                 "  name: stable_basis\n"
+                 "  params:\n"
+                 "    center_bps: 5\n"
+                 "    upper_bps: 0\n"
+                 "    lower_bps: 3\n",
                  "must be > 0")
 
 

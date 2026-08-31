@@ -7,20 +7,22 @@ which markets to trade is stated explicitly on every start (--symbol,
 --hedge). Every YAML key is validated against the schema below, so a typo
 is an error rather than a setting that silently does nothing.
 
-Threshold model (fixed numbers the user derives from recorded minute data):
+Strategy model:
 
     premium_bps = (entropy_price / hedge_price - 1) * 10_000
 
-    SELL entropy / BUY hedge  fires when the executable premium
-        (entropy bid over hedge ask) >= midline_bps + upper_bps
-    BUY entropy / SELL hedge  fires when the executable premium
-        (entropy ask under hedge bid) <= midline_bps - lower_bps
+    stable_basis:
+        SELL entropy / BUY hedge fires when executable premium
+            >= center_bps + upper_bps
+        BUY entropy / SELL hedge fires when executable premium
+            <= center_bps - lower_bps
 
     Both hurdles are net of both venues' taker fees, so a full round trip
     nets >= (upper_bps + lower_bps) after fees by construction.
 """
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
@@ -107,16 +109,22 @@ class VenueConf:
     lighter_creds: Optional[LighterCreds] = None
 
 
+@dataclass(frozen=True)
+class StrategyConf:
+    name: str
+    upper_bps: float
+    lower_bps: float
+    center_bps: Optional[float] = None
+    window_minutes: Optional[int] = None
+
+
 @dataclass
 class Config:
     symbol: str
     hedge_venue: str
     entropy: VenueConf
     hedge: VenueConf
-    # thresholds (the whole signal)
-    midline_bps: float
-    upper_bps: float
-    lower_bps: float
+    strategy: StrategyConf
     # sizing
     take_fraction: float
     max_order_notional: float
@@ -160,15 +168,26 @@ class Config:
                 return False
         return True
 
+    @property
+    def midline_bps(self) -> float:
+        return 0.0 if self.strategy.center_bps is None else self.strategy.center_bps
+
+    @property
+    def upper_bps(self) -> float:
+        return self.strategy.upper_bps
+
+    @property
+    def lower_bps(self) -> float:
+        return self.strategy.lower_bps
+
 
 # ----------------------------------------------------------------- YAML layer
 
 # Schema: nested dict of key -> type (or nested dict). Unknown keys are errors.
 _SCHEMA: Dict[str, Any] = {
-    "thresholds": {
-        "midline_bps": float,
-        "upper_bps": float,
-        "lower_bps": float,
+    "strategy": {
+        "name": str,
+        "params": dict,
     },
     "entropy": {
         "dex": str,
@@ -245,6 +264,9 @@ def _validate(node: Any, schema: Dict[str, Any], path: str = "") -> None:
         elif want is str:
             if not isinstance(val, str):
                 raise ConfigError(f"'{here}' must be a string, got {val!r}")
+        elif want is dict:
+            if not isinstance(val, dict):
+                raise ConfigError(f"'{here}' must be a mapping")
 
 
 def _get(d: dict, section: str, key: str, default):
@@ -256,6 +278,69 @@ def _resolve_recorder_csv(path: str, symbol: str, hedge_venue: str) -> str:
         return path
     stem, ext = os.path.splitext(path)
     return f"{stem}-{symbol}-{hedge_venue}{ext}"
+
+
+def _finite_number(params: dict, key: str, path: str) -> float:
+    if key not in params:
+        raise ConfigError(f"'{path}.{key}' is required")
+    value = params[key]
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise ConfigError(f"'{path}.{key}' must be a number")
+    value = float(value)
+    if not math.isfinite(value):
+        raise ConfigError(f"'{path}.{key}' must be finite")
+    return value
+
+
+def _parse_strategy(raw: dict) -> StrategyConf:
+    node = raw.get("strategy")
+    if not isinstance(node, dict):
+        raise ConfigError("'strategy' is required and must be a mapping")
+
+    name = node.get("name")
+    params = node.get("params")
+    if name not in ("stable_basis", "drifting_basis"):
+        raise ConfigError(f"unknown strategy {name!r}")
+    if not isinstance(params, dict):
+        raise ConfigError("'strategy.params' must be a mapping")
+
+    if name == "stable_basis":
+        allowed = {"center_bps", "upper_bps", "lower_bps"}
+    else:
+        allowed = {"window_minutes", "upper_bps", "lower_bps"}
+
+    unknown = set(params) - allowed
+    if unknown:
+        key = sorted(unknown)[0]
+        raise ConfigError(
+            f"unknown/forbidden strategy parameter 'strategy.params.{key}'"
+        )
+
+    upper = _finite_number(params, "upper_bps", "strategy.params")
+    lower = _finite_number(params, "lower_bps", "strategy.params")
+    if upper <= 0 or lower <= 0:
+        raise ConfigError("strategy upper_bps and lower_bps must be > 0")
+
+    if name == "stable_basis":
+        center = _finite_number(params, "center_bps", "strategy.params")
+        return StrategyConf(
+            name=name,
+            center_bps=center,
+            upper_bps=upper,
+            lower_bps=lower,
+        )
+
+    if "window_minutes" not in params:
+        raise ConfigError("'strategy.params.window_minutes' is required")
+    window = params["window_minutes"]
+    if not isinstance(window, int) or isinstance(window, bool) or window <= 0:
+        raise ConfigError("strategy.params.window_minutes must be a positive integer")
+    return StrategyConf(
+        name=name,
+        window_minutes=window,
+        upper_bps=upper,
+        lower_bps=lower,
+    )
 
 
 # ------------------------------------------------------------------ env layer
@@ -283,6 +368,16 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
             f"config file '{config_file}' not found — copy config.example.yaml "
             f"to config.yaml and edit it / 未找到配置文件，请先复制 "
             f"config.example.yaml 为 config.yaml 并修改")
+    if "thresholds" in raw:
+        raise ConfigError(
+            "legacy 'thresholds:' config is no longer supported; use:\n"
+            "strategy:\n"
+            "  name: stable_basis\n"
+            "  params:\n"
+            "    center_bps: <old midline_bps>\n"
+            "    upper_bps: <old upper_bps>\n"
+            "    lower_bps: <old lower_bps>"
+        )
     _validate(raw, _SCHEMA)
 
     symbol = (symbol or "").strip()
@@ -293,17 +388,7 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         raise ConfigError(
             f"--hedge must be one of {list(HEDGE_VENUES)}, got "
             f"{hedge_venue!r} / --hedge 必须是 {list(HEDGE_VENUES)} 之一")
-
-    thr = raw.get("thresholds") or {}
-    for k in ("midline_bps", "upper_bps", "lower_bps"):
-        if k not in thr:
-            raise ConfigError(f"'thresholds.{k}' is required — derive it from "
-                              f"recorded minute data / 必须填写，请用采集的分钟"
-                              f"数据计算后填入")
-    upper, lower = float(thr["upper_bps"]), float(thr["lower_bps"])
-    if upper <= 0 or lower <= 0:
-        raise ConfigError("thresholds.upper_bps and lower_bps must be > 0 "
-                          "(the round trip nets upper+lower bps after fees)")
+    strategy_conf = _parse_strategy(raw)
 
     take_fraction = float(_get(raw, "sizing", "take_fraction", 0.5))
     if not 0.0 < take_fraction <= 1.0:
@@ -361,9 +446,7 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         hedge_venue=hedge_venue,
         entropy=entropy,
         hedge=hedge,
-        midline_bps=float(thr["midline_bps"]),
-        upper_bps=upper,
-        lower_bps=lower,
+        strategy=strategy_conf,
         take_fraction=take_fraction,
         max_order_notional=float(_get(raw, "sizing", "max_order_notional_usd", 500.0)),
         min_order_notional=float(_get(raw, "sizing", "min_order_notional_usd", 10.0)),
