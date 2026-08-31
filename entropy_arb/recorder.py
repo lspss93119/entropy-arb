@@ -35,6 +35,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from .book import OrderBook
+from .premium import calculate_premiums
 
 log = logging.getLogger("recorder")
 
@@ -81,11 +82,10 @@ class _MinuteAgg:
 
     def add(self, e_bid: float, e_ask: float, h_bid: float,
             h_ask: float) -> tuple[float, float, float]:
-        e_mid = (e_bid + e_ask) / 2.0
-        h_mid = (h_bid + h_ask) / 2.0
-        prem = (e_mid / h_mid - 1.0) * 1e4
-        sell_edge = (e_bid / h_ask - 1.0) * 1e4
-        buy_edge = (h_bid / e_ask - 1.0) * 1e4
+        values = calculate_premiums(e_bid, e_ask, h_bid, h_ask)
+        prem = values.premium_bps
+        sell_edge = values.sell_edge_bps
+        buy_edge = values.buy_edge_bps
         if self.n == 0:
             self.p_open = self.p_high = self.p_low = prem
         self.n += 1
