@@ -196,12 +196,26 @@ class Engine:
                              self._step)
         self._min_notional = max(cfg.min_order_notional,
                                  self.entropy.min_quote, self.hedge.min_quote)
-        log.info("pair ENTROPY(%s)-%s(%s): midline=%+.2fbps band=[-%.2f, +%.2f] "
-                 "fees=%.2f+%.2f step=%g min_ntl=$%g",
+        strategy_state = self.strategy.state()
+        if strategy_state.center_bps is not None:
+            strategy_desc = (
+                f"strategy={self.cfg.strategy.name} "
+                f"center={strategy_state.center_bps:+.2f}bps "
+                f"band=[{strategy_state.center_bps - strategy_state.lower_bps:+.2f},"
+                f"{strategy_state.center_bps + strategy_state.upper_bps:+.2f}]"
+            )
+        else:
+            strategy_desc = (
+                f"strategy={self.cfg.strategy.name} "
+                f"window={strategy_state.window_minutes}m "
+                f"upper=+{strategy_state.upper_bps:.2f}bps "
+                f"lower=-{strategy_state.lower_bps:.2f}bps"
+            )
+        log.info("pair ENTROPY(%s)-%s(%s): %s fees=%.2f+%.2f step=%g min_ntl=$%g",
                  self.entropy.conf.symbol, self.hedge.name,
-                 self.hedge.conf.symbol, cfg.midline_bps, cfg.lower_bps,
-                 cfg.upper_bps, self.entropy.fee_bps, self.hedge.fee_bps,
-                 self._step, self._min_notional)
+                 self.hedge.conf.symbol, strategy_desc, self.entropy.fee_bps,
+                 self.hedge.fee_bps, self._step, self._min_notional)
+        log.info("No automatic strategy selection.")
 
         if self.record_only:
             log.warning("RECORD-ONLY — collecting minute data, no strategy, "
@@ -402,6 +416,8 @@ class Engine:
         cfg = self.cfg
         state = self.strategy.state()
         if not state.ready or state.center_bps is None:
+            self._armed["sell_entropy"] = None
+            self._armed["buy_entropy"] = None
             return None
         best = None
         for buy, sell, dkey in ((self.hedge, self.entropy, "sell_entropy"),
@@ -544,8 +560,9 @@ class Engine:
         self._record_trade(direction, plan,
                            None if unresolved else fill_edge,
                            f"{binfo['status']}/{sinfo['status']}", sent_ok)
-        self._log_csv(direction, buy, sell, plan, state, sent_ok, bfill, sfill,
-                      binfo["status"], sinfo["status"], fill_edge, inv_bps)
+        self._log_csv(direction, buy, sell, plan, sent_ok, bfill, sfill,
+                      binfo["status"], sinfo["status"], fill_edge, inv_bps,
+                      state)
         self.last_trade_ts = time.time()
         return bool(unresolved)
 
@@ -802,8 +819,8 @@ class Engine:
                      " *** HALTED ***" if self.halted else "")
 
     def _log_csv(self, direction, buy, sell, plan: ArbPlan,
-                 state: StrategyState, ok: bool, bfill, sfill,
-                 bstatus, sstatus, fill_edge, inv_bps) -> None:
+                 ok: bool, bfill, sfill, bstatus, sstatus, fill_edge,
+                 inv_bps, strategy_state: StrategyState) -> None:
         try:
             path = self.cfg.trades_csv
             d = os.path.dirname(path)
@@ -824,7 +841,7 @@ class Engine:
                             f"{plan.buy_notional:.2f}", f"{plan.sell_notional:.2f}",
                             f"{plan.exp_edge_usd:.4f}", f"{plan.gross_edge_usd:.4f}",
                             f"{plan.marginal_premium_bps:.3f}",
-                            f"{state.center_bps:.3f}",
+                            f"{strategy_state.center_bps:.3f}",
                             f"{inv_bps:.3f}", int(ok), f"{bfill:.8g}",
                             f"{sfill:.8g}", bstatus, sstatus, f"{fill_edge:.4f}"])
         except Exception:

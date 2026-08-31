@@ -3,6 +3,7 @@
 Run:  python3 -m pytest tests/  (or  python3 tests/test_engine.py)
 """
 import asyncio
+import logging
 import os
 import sys
 import tempfile
@@ -195,6 +196,130 @@ def test_scan_respects_position_caps():
     eng.hedge.position = 100.0
     eng.hedge.cap_usd = 10000.0
     assert run_scan(eng) is None
+
+
+def test_scan_clears_persistence_arming_when_strategy_not_ready():
+    eng = make_engine(
+        upper=4.0,
+        lower=3.0,
+        strategy_name="drifting_basis",
+        window_minutes=60,
+    )
+    eng._armed["sell_entropy"] = 111.0
+    eng._armed["buy_entropy"] = 222.0
+
+    assert eng._scan(__import__("time").time()) is None
+    assert eng._armed == {
+        "sell_entropy": None,
+        "buy_entropy": None,
+    }
+
+
+def test_log_csv_records_captured_strategy_center(tmp_path):
+    eng = make_engine(midline=5.0, upper=4.0, lower=3.0)
+    state = eng.strategy.state()
+    trades_csv = tmp_path / "trades.csv"
+    eng.cfg.trades_csv = str(trades_csv)
+    plan = SimpleNamespace(
+        qty=1.25,
+        buy_limit=99.5,
+        sell_limit=100.5,
+        buy_notional=124.38,
+        sell_notional=125.62,
+        exp_edge_usd=1.23,
+        gross_edge_usd=1.56,
+        marginal_premium_bps=12.345,
+    )
+    captured = SimpleNamespace(
+        ready=True,
+        center_bps=7.5,
+        upper_bps=state.upper_bps,
+        lower_bps=state.lower_bps,
+    )
+
+    eng._log_csv(
+        "sell_entropy",
+        eng.hedge,
+        eng.entropy,
+        plan,
+        True,
+        1.25,
+        1.25,
+        "filled",
+        "filled",
+        1.11,
+        0.0,
+        captured,
+    )
+
+    rows = trades_csv.read_text().strip().splitlines()
+    assert rows[0].split(",")[12] == "midline_bps"
+    assert rows[1].split(",")[12] == "7.500"
+
+
+def test_run_inner_logs_selected_stable_strategy_and_no_auto_selection(
+        monkeypatch, caplog):
+    from entropy_arb import engine as engine_module
+
+    class LifecycleVenue:
+        def __init__(self, key, name):
+            self.kind = "hl"
+            self.key = key
+            self.name = name
+            self.conf = SimpleNamespace(symbol="SNDK")
+            self.size_decimals = 4
+            self.min_base = 0.0001
+            self.min_quote = 10.0
+            self.fee_bps = 0.0
+            self.book = OrderBook()
+            self.position = 0.0
+            self.orders_per_min = 30
+
+        async def load_market(self):
+            return None
+
+        def start_tasks(self, stop, notify, live):
+            return []
+
+        async def close(self):
+            return None
+
+        def _query_address(self):
+            return None
+
+    class QuietMinuteRecorder:
+        rows_written = 0
+
+        def __init__(self, *args, **kwargs):
+            return None
+
+        async def run(self, stop):
+            await stop.wait()
+
+    async def scenario():
+        cfg = make_cfg(
+            midline=-1.0,
+            upper=3.0,
+            lower=3.5,
+            hedge_venue="tradexyz",
+            recorder_enabled=False,
+        )
+        eng = Engine(cfg, record_only=True)
+        venues = iter([
+            LifecycleVenue("entropy", "ENTROPY"),
+            LifecycleVenue("hedge", "XYZ"),
+        ])
+        monkeypatch.setattr(eng, "_make_venue", lambda conf: next(venues))
+        monkeypatch.setattr(engine_module, "MinuteRecorder", QuietMinuteRecorder)
+        run_task = asyncio.create_task(eng._run_inner())
+        await asyncio.sleep(0)
+        eng.request_stop()
+        await asyncio.wait_for(run_task, timeout=1.0)
+
+    caplog.set_level(logging.INFO, logger="engine")
+    asyncio.run(scenario())
+    assert "strategy=stable_basis center=-1.00bps band=[-4.50,+2.00]" in caplog.text
+    assert "No automatic strategy selection." in caplog.text
 
 
 def attach_reference_venues(
