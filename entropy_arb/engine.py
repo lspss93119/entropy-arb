@@ -196,21 +196,7 @@ class Engine:
                              self._step)
         self._min_notional = max(cfg.min_order_notional,
                                  self.entropy.min_quote, self.hedge.min_quote)
-        strategy_state = self.strategy.state()
-        if strategy_state.center_bps is not None:
-            strategy_desc = (
-                f"strategy={self.cfg.strategy.name} "
-                f"center={strategy_state.center_bps:+.2f}bps "
-                f"band=[{strategy_state.center_bps - strategy_state.lower_bps:+.2f},"
-                f"{strategy_state.center_bps + strategy_state.upper_bps:+.2f}]"
-            )
-        else:
-            strategy_desc = (
-                f"strategy={self.cfg.strategy.name} "
-                f"window={strategy_state.window_minutes}m "
-                f"upper=+{strategy_state.upper_bps:.2f}bps "
-                f"lower=-{strategy_state.lower_bps:.2f}bps"
-            )
+        strategy_desc = self._startup_strategy_desc(self.strategy.state())
         log.info("pair ENTROPY(%s)-%s(%s): %s fees=%.2f+%.2f step=%g min_ntl=$%g",
                  self.entropy.conf.symbol, self.hedge.name,
                  self.hedge.conf.symbol, strategy_desc, self.entropy.fee_bps,
@@ -787,6 +773,42 @@ class Engine:
             return None
         return (em / hm - 1.0) * 1e4
 
+    def _strategy_abs_band(self, state: StrategyState) -> tuple[float, float]:
+        if state.center_bps is None:
+            raise RuntimeError("strategy state has no center")
+        return state.center_bps - state.lower_bps, state.center_bps + state.upper_bps
+
+    def _startup_strategy_desc(self, state: StrategyState) -> str:
+        if state.ready and state.center_bps is not None:
+            low, high = self._strategy_abs_band(state)
+            return (
+                f"strategy={self.cfg.strategy.name} "
+                f"center={state.center_bps:+.2f}bps "
+                f"band=[{low:+.2f},{high:+.2f}]"
+            )
+        return (
+            f"strategy={self.cfg.strategy.name} "
+            f"window={state.window_minutes}m "
+            f"center=WARMING_UP "
+            f"band-offset=[{-state.lower_bps:+.2f},{state.upper_bps:+.2f}]"
+        )
+
+    def _status_strategy_desc(self, state: StrategyState) -> str:
+        if state.ready and state.center_bps is not None:
+            low, high = self._strategy_abs_band(state)
+            return (
+                f"strategy={self.cfg.strategy.name} "
+                f"center={state.center_bps:+.2f} "
+                f"band={low:+.2f}..{high:+.2f}"
+            )
+        span_min = (state.warmup_span_sec or 0.0) / 60.0
+        coverage = 100.0 * (state.coverage_ratio or 0.0)
+        return (
+            f"strategy={self.cfg.strategy.name} "
+            f"WARMING_UP window={state.window_minutes}m "
+            f"span={span_min:.1f}m valid={coverage:.1f}%"
+        )
+
     async def _status_loop(self) -> None:
         cfg = self.cfg
         while not self.stop.is_set():
@@ -808,11 +830,11 @@ class Engine:
             pnl = self.session_pnl()
             rec = (f" | rec {self.recorder.rows_written} rows"
                    if self.recorder else "")
-            log.info("[status] %s | prem %s bps (band %+.2f..%+.2f) | pos %s "
+            strategy_desc = self._status_strategy_desc(self.strategy.state())
+            log.info("[status] %s | prem %s bps | %s | pos %s "
                      "net %+.6g | trades %d hedges %d | MTM %s expEdge $%.4f "
                      "fillEdge $%.4f%s%s",
-                     books, prem_s, cfg.midline_bps - cfg.lower_bps,
-                     cfg.midline_bps + cfg.upper_bps, pos, net, self.trades,
+                     books, prem_s, strategy_desc, pos, net, self.trades,
                      self.hedges,
                      f"${pnl:+.4f}" if pnl is not None else "—",
                      self.total_exp_edge, self.total_fill_edge, rec,

@@ -154,6 +154,14 @@ def run_scan(eng):
     return asyncio.run(go())
 
 
+async def run_one_status_cycle(eng):
+    eng.cfg.status_interval_sec = 0.01
+    task = asyncio.create_task(eng._status_loop())
+    await asyncio.sleep(0.02)
+    eng.stop.set()
+    await task
+
+
 def test_scan_fires_sell_entropy_above_band():
     eng = make_engine(midline=5.0, upper=4.0, lower=3.0)
     # entropy 15 bps rich vs hedge: above midline+upper=9 -> sell entropy
@@ -213,6 +221,35 @@ def test_scan_clears_persistence_arming_when_strategy_not_ready():
         "sell_entropy": None,
         "buy_entropy": None,
     }
+
+
+def test_status_reports_stable_strategy(caplog):
+    eng = make_engine(strategy_name="stable_basis", midline=-1.0,
+                      upper=3.0, lower=3.5)
+    eng.entropy.set_book(100.0, 100.1)
+    eng.hedge.set_book(100.0, 100.1)
+
+    caplog.set_level(logging.INFO, logger="engine")
+    asyncio.run(run_one_status_cycle(eng))
+
+    assert "strategy=stable_basis" in caplog.text
+    assert "center=-1.00" in caplog.text
+
+
+def test_status_reports_drifting_warmup_without_mutation(caplog):
+    eng = make_engine(strategy_name="drifting_basis", window_minutes=1)
+    eng.entropy.set_book(100.0, 100.1)
+    eng.hedge.set_book(100.0, 100.1)
+    eng.strategy.update(1000.0, 0.0)
+    before = eng.strategy.state()
+
+    caplog.set_level(logging.INFO, logger="engine")
+    asyncio.run(run_one_status_cycle(eng))
+
+    after = eng.strategy.state()
+    assert "strategy=drifting_basis" in caplog.text
+    assert "WARMING_UP" in caplog.text
+    assert before == after
 
 
 def test_log_csv_records_captured_strategy_center(tmp_path):
@@ -319,6 +356,73 @@ def test_run_inner_logs_selected_stable_strategy_and_no_auto_selection(
     caplog.set_level(logging.INFO, logger="engine")
     asyncio.run(scenario())
     assert "strategy=stable_basis center=-1.00bps band=[-4.50,+2.00]" in caplog.text
+    assert "No automatic strategy selection." in caplog.text
+
+
+def test_run_inner_logs_drifting_warmup_strategy_and_no_auto_selection(
+        monkeypatch, caplog):
+    from entropy_arb import engine as engine_module
+
+    class LifecycleVenue:
+        def __init__(self, key, name):
+            self.kind = "hl"
+            self.key = key
+            self.name = name
+            self.conf = SimpleNamespace(symbol="SNDK")
+            self.size_decimals = 4
+            self.min_base = 0.0001
+            self.min_quote = 10.0
+            self.fee_bps = 0.0
+            self.book = OrderBook()
+            self.position = 0.0
+            self.orders_per_min = 30
+
+        async def load_market(self):
+            return None
+
+        def start_tasks(self, stop, notify, live):
+            return []
+
+        async def close(self):
+            return None
+
+        def _query_address(self):
+            return None
+
+    class QuietMinuteRecorder:
+        rows_written = 0
+
+        def __init__(self, *args, **kwargs):
+            return None
+
+        async def run(self, stop):
+            await stop.wait()
+
+    async def scenario():
+        cfg = make_cfg(
+            upper=3.0,
+            lower=3.5,
+            hedge_venue="tradexyz",
+            recorder_enabled=False,
+            strategy_name="drifting_basis",
+            window_minutes=60,
+        )
+        eng = Engine(cfg, record_only=True)
+        venues = iter([
+            LifecycleVenue("entropy", "ENTROPY"),
+            LifecycleVenue("hedge", "XYZ"),
+        ])
+        monkeypatch.setattr(eng, "_make_venue", lambda conf: next(venues))
+        monkeypatch.setattr(engine_module, "MinuteRecorder", QuietMinuteRecorder)
+        run_task = asyncio.create_task(eng._run_inner())
+        await asyncio.sleep(0)
+        eng.request_stop()
+        await asyncio.wait_for(run_task, timeout=1.0)
+
+    caplog.set_level(logging.INFO, logger="engine")
+    asyncio.run(scenario())
+    assert ("strategy=drifting_basis window=60m center=WARMING_UP "
+            "band-offset=[-3.50,+3.00]") in caplog.text
     assert "No automatic strategy selection." in caplog.text
 
 

@@ -75,8 +75,12 @@ _ZH = {
     "signal — executable premium vs full hurdle incl. fees (● = armed)":
         "信号 —— 可成交溢价 vs 完整门槛（含手续费，● = 已武装）",
     "mid premium ": "中间价溢价 ",
+    "   strategy ": "   策略 ",
     "   midline ": "   中枢 ",
     "   band ": "   区间 ",
+    "   window ": "   窗口 ",
+    "   span ": "   覆盖时长 ",
+    "   coverage ": "   覆盖率 ",
     "SELL entropy → buy {h}": "卖出 entropy → 买入 {h}",
     "BUY entropy → sell {h}": "买入 entropy → 卖出 {h}",
     "direction": "方向",
@@ -306,19 +310,27 @@ class Dashboard:
         return Panel(g, title=self._t("session"), box=box.ROUNDED,
                      padding=(0, 1))
 
-    def _dir_row(self, t: Table, label: str, buy, sell, hurdle_bps: float,
-                 armed_key: str) -> None:
+    def _dir_row(self, t: Table, label: str, buy, sell,
+                 hurdle_bps: Optional[float], armed_key: str) -> None:
         """One direction: executable premium vs its full hurdle (fees and
         inventory surcharge included)."""
         eng = self.eng
         ba, sb = buy.book.best_ask(), sell.book.best_bid()
-        hurdle = (hurdle_bps + buy.fee_bps + sell.fee_bps
-                  + eng._inv_add_bps(buy, sell))
+        if hurdle_bps is None:
+            hurdle = None
+        else:
+            hurdle = (hurdle_bps + buy.fee_bps + sell.fee_bps
+                      + eng._inv_add_bps(buy, sell))
         if not (ba and sb):
+            hurdle_text = f"{hurdle:+.1f}" if hurdle is not None else "—"
             t.add_row(label, Text("—", style="dim"),
-                      f"{hurdle:+.1f}", Text("—", style="dim"), "")
+                      hurdle_text, Text("—", style="dim"), "")
             return
         prem = (sb / ba - 1) * 1e4
+        if hurdle is None:
+            t.add_row(label, Text(f"{prem:+.2f}"),
+                      "—", Text("—", style="dim"), "")
+            return
         gap = prem - hurdle
         armed = Text("●", style="green") if eng._armed.get(armed_key) else ""
         t.add_row(label,
@@ -328,17 +340,35 @@ class Dashboard:
                   armed)
 
     def _signal_panel(self):
-        eng, cfg = self.eng, self.eng.cfg
+        eng = self.eng
         prem = eng.premium_bps()
+        state = eng.strategy.state()
         head = Text()
         head.append(self._t("mid premium "), style="dim")
         head.append(f"{prem:+.2f} bps" if prem is not None else "—",
                     style="bold cyan")
+        head.append(self._t("   strategy "), style="dim")
+        head.append(eng.cfg.strategy.name)
         head.append(self._t("   midline "), style="dim")
-        head.append(f"{cfg.midline_bps:+.2f}")
-        head.append(self._t("   band "), style="dim")
-        head.append(f"[{cfg.midline_bps - cfg.lower_bps:+.2f} … "
-                    f"{cfg.midline_bps + cfg.upper_bps:+.2f}]")
+        if state.ready and state.center_bps is not None:
+            head.append(f"{state.center_bps:+.2f}")
+            head.append(self._t("   band "), style="dim")
+            head.append(
+                f"[{state.center_bps - state.lower_bps:+.2f} … "
+                f"{state.center_bps + state.upper_bps:+.2f}]"
+            )
+            sell_hurdle = state.center_bps + state.upper_bps
+            buy_hurdle = state.lower_bps - state.center_bps
+        else:
+            head.append("WARMING_UP", style="bold yellow")
+            head.append(self._t("   window "), style="dim")
+            head.append(f"{state.window_minutes}m")
+            head.append(self._t("   span "), style="dim")
+            head.append(f"{(state.warmup_span_sec or 0.0) / 60:.1f}m")
+            head.append(self._t("   coverage "), style="dim")
+            head.append(f"{100 * (state.coverage_ratio or 0.0):.1f}%")
+            sell_hurdle = None
+            buy_hurdle = None
         t = Table(box=box.SIMPLE_HEAD, expand=True, padding=(0, 1))
         t.add_column(self._t("direction"))
         t.add_column(self._t("exec prem bps"), justify="right")
@@ -346,11 +376,9 @@ class Dashboard:
         t.add_column(self._t("gap bps"), justify="right")
         t.add_column("", justify="left")
         self._dir_row(t, self._t("SELL entropy → buy {h}", h=eng.hedge.name),
-                      eng.hedge, eng.entropy,
-                      cfg.midline_bps + cfg.upper_bps, "sell_entropy")
+                      eng.hedge, eng.entropy, sell_hurdle, "sell_entropy")
         self._dir_row(t, self._t("BUY entropy → sell {h}", h=eng.hedge.name),
-                      eng.entropy, eng.hedge,
-                      cfg.lower_bps - cfg.midline_bps, "buy_entropy")
+                      eng.entropy, eng.hedge, buy_hurdle, "buy_entropy")
         return Panel(Group(head, t),
                      title=self._t("signal — executable premium vs full "
                                    "hurdle incl. fees (● = armed)"),

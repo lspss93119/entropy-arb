@@ -7,6 +7,8 @@ import sys
 import tempfile
 import time
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from rich.console import Console  # noqa: E402
@@ -19,16 +21,35 @@ from entropy_arb.engine import Engine  # noqa: E402
 NO_ENV = os.path.join(tempfile.gettempdir(), "entropy-arb-no-such.env")
 
 
-def make_cfg():
+def make_cfg(
+    strategy_name="stable_basis",
+    center=2.0,
+    upper=4.0,
+    lower=3.0,
+    window_minutes=60,
+):
     f = tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False)
-    f.write("""
+    if strategy_name == "stable_basis":
+        strategy = f"""
 strategy:
   name: stable_basis
   params:
-    center_bps: 2.0
-    upper_bps: 4.0
-    lower_bps: 3.0
-""")
+    center_bps: {center}
+    upper_bps: {upper}
+    lower_bps: {lower}
+"""
+    elif strategy_name == "drifting_basis":
+        strategy = f"""
+strategy:
+  name: drifting_basis
+  params:
+    window_minutes: {window_minutes}
+    upper_bps: {upper}
+    lower_bps: {lower}
+"""
+    else:
+        raise ValueError(strategy_name)
+    f.write(strategy)
     f.close()
     return load_config(f.name, NO_ENV,
                        symbol="SNDK", hedge_venue="lighter-rh")
@@ -57,8 +78,8 @@ def render(eng, lang="en") -> str:
     return console.export_text()
 
 
-def make_engine():
-    eng = Engine(make_cfg())
+def make_engine(**strategy_kw):
+    eng = Engine(make_cfg(**strategy_kw))
     eng.entropy = StubVenue("entropy", "ENTROPY")
     eng.hedge = StubVenue("hedge", "RH")
     eng.venues = {"entropy": eng.entropy, "hedge": eng.hedge}
@@ -98,6 +119,67 @@ def test_renders_key_numbers():
     assert "+6.00" in out
     # buy hurdle = lower - midline = +1
     assert "+1.00" in out
+
+
+def test_render_reads_strategy_state_without_mutation():
+    eng = make_engine(
+        strategy_name="drifting_basis",
+        window_minutes=1,
+        upper=3.0,
+        lower=3.5,
+    )
+    eng.entropy.set_book(100.1, 100.2)
+    eng.hedge.set_book(99.9, 100.0)
+    eng.strategy.update(1000.0, 0.5)
+
+    before = eng.strategy.state()
+
+    render(eng)
+
+    assert eng.strategy.state() == before
+
+
+def test_renders_drifting_warmup_without_fake_center():
+    eng = make_engine(
+        strategy_name="drifting_basis",
+        window_minutes=1,
+        upper=3.0,
+        lower=3.5,
+    )
+    eng.entropy.set_book(100.1, 100.2)
+    eng.hedge.set_book(99.9, 100.0)
+    for i in range(30):
+        eng.strategy.update(1000.0 + i, 1.0)
+    state = eng.strategy.state()
+    assert state.ready is False
+    assert state.coverage_ratio == pytest.approx(0.5)
+
+    out = render(eng)
+    assert "drifting_basis" in out
+    assert "WARMING_UP" in out
+    assert "1m" in out
+    assert "render error" not in out
+    assert "band [—" not in out
+
+
+def test_renders_ready_drifting_center_and_absolute_band():
+    eng = make_engine(
+        strategy_name="drifting_basis",
+        window_minutes=1,
+        upper=3.0,
+        lower=3.5,
+    )
+    eng.entropy.set_book(100.1, 100.2)
+    eng.hedge.set_book(99.9, 100.0)
+    for i in range(61):
+        eng.strategy.update(1000.0 + i, 1.25)
+    assert eng.strategy.state().ready is True
+
+    out = render(eng)
+    assert "1.25" in out
+    assert "-2.25" in out
+    assert "+4.25" in out
+    assert "render error" not in out
 
 
 def test_renders_in_chinese():
