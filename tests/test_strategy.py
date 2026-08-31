@@ -59,6 +59,18 @@ def test_short_gap_does_not_reset_history():
     assert s.state().warmup_span_sec >= 60
 
 
+def test_exactly_30_second_gap_preserves_history_without_reset():
+    s = DriftingBasisStrategy(window_minutes=1, upper_bps=3.0, lower_bps=3.5)
+    feed_seconds(s, 1000.0, 61, lambda i: 1.0)
+    assert s.state().ready is True
+
+    s.update(1090.0, 5.0)  # exactly 30s since the last valid observation
+    state = s.state()
+    assert state.ready is False  # coverage falls, but the segment is retained
+    assert state.warmup_span_sec == pytest.approx(90.0)
+    assert state.coverage_ratio == pytest.approx(31 / 60)
+
+
 def test_gap_over_30_seconds_resets_history():
     s = DriftingBasisStrategy(window_minutes=1, upper_bps=3.0, lower_bps=3.5)
     feed_seconds(s, 1000.0, 61, lambda i: 1.0)

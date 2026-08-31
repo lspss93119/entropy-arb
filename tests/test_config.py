@@ -54,6 +54,9 @@ def test_example_config_loads():
     assert cfg.strategy.center_bps == 0.0
     assert cfg.strategy.upper_bps == 4.0
     assert cfg.strategy.lower_bps == 4.0
+    assert not hasattr(cfg, "midline_bps")
+    assert not hasattr(cfg, "upper_bps")
+    assert not hasattr(cfg, "lower_bps")
 
 
 def test_minimal_defaults():

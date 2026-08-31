@@ -168,19 +168,6 @@ class Config:
                 return False
         return True
 
-    @property
-    def midline_bps(self) -> float:
-        return 0.0 if self.strategy.center_bps is None else self.strategy.center_bps
-
-    @property
-    def upper_bps(self) -> float:
-        return self.strategy.upper_bps
-
-    @property
-    def lower_bps(self) -> float:
-        return self.strategy.lower_bps
-
-
 # ----------------------------------------------------------------- YAML layer
 
 # Schema: nested dict of key -> type (or nested dict). Unknown keys are errors.
