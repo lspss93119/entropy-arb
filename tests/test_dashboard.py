@@ -50,7 +50,7 @@ class StubVenue:
 
 def render(eng, lang="en") -> str:
     dash = Dashboard(eng, BufferLogHandler(), "logs/engine.log", lang=lang)
-    console = Console(record=True, width=120, force_terminal=True)
+    console = Console(record=True, width=200, height=25, force_terminal=True)
     console.print(dash._safe_render())
     return console.export_text()
 
