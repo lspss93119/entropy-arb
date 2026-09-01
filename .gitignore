@@ -4,6 +4,8 @@ config.yaml
 
 # runtime output / 运行时输出
 logs/
+data/
+exports/
 *.log
 
 # python

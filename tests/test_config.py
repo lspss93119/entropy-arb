@@ -48,7 +48,7 @@ def test_example_config_loads():
     assert cfg.hedge.kind == "lighter"
     assert cfg.hedge.lighter_profile.chain_id == 466324
     assert cfg.entropy.symbol == "SNDK" and cfg.hedge.symbol == "SNDK"
-    assert cfg.recorder_enabled and cfg.recorder_csv
+    assert cfg.recorder_enabled and cfg.recorder_database
     assert cfg.dashboard and cfg.log_file
     assert cfg.strategy.name == "stable_basis"
     assert cfg.strategy.center_bps == 0.0
@@ -69,7 +69,7 @@ def test_minimal_defaults():
     assert cfg.hedge.lighter_profile.chain_id == 304
     assert cfg.take_fraction == 0.5          # defaults kick in
     assert cfg.recorder_enabled is True
-    assert cfg.recorder_csv == "logs/minutes-SNDK-lighter.csv"
+    assert cfg.recorder_database == "data/market-history.sqlite"
 
 
 def test_stable_strategy_config_loads():
@@ -101,7 +101,7 @@ def test_lighter_mainnet_anth_symbol_alias_preserves_canonical_symbol():
     assert cfg.symbol == "ANTH"
     assert cfg.entropy.symbol == "ANTH"
     assert cfg.hedge.symbol == "ANTHROPIC"
-    assert cfg.recorder_csv == "logs/minutes-ANTH-lighter.csv"
+    assert cfg.recorder_database == "data/market-history.sqlite"
 
 
 def test_lighter_rh_anth_symbol_alias_preserves_canonical_symbol():
@@ -110,33 +110,31 @@ def test_lighter_rh_anth_symbol_alias_preserves_canonical_symbol():
     assert cfg.symbol == "ANTH"
     assert cfg.entropy.symbol == "ANTH"
     assert cfg.hedge.symbol == "ANTHROPIC"
-    assert cfg.recorder_csv == "logs/minutes-ANTH-lighter-rh.csv"
+    assert cfg.recorder_database == "data/market-history.sqlite"
 
 
-@pytest.mark.parametrize(
-    ("hedge", "expected"),
-    [
-        ("lighter", "logs/minutes-SNDK-lighter.csv"),
-        ("lighter-rh", "logs/minutes-SNDK-lighter-rh.csv"),
-        ("tradexyz", "logs/minutes-SNDK-tradexyz.csv"),
-    ],
-)
-def test_default_recorder_csv_is_scoped_to_symbol_and_hedge(hedge, expected):
+def test_recorder_database_defaults_and_is_shared():
+    cfg_a = load(MINIMAL, symbol="SNDK", hedge="lighter-rh")
+    cfg_b = load(MINIMAL, symbol="ANTH", hedge="lighter")
+    assert cfg_a.recorder_enabled is True
+    assert cfg_a.recorder_database == "data/market-history.sqlite"
+    assert cfg_b.recorder_database == "data/market-history.sqlite"
+
+
+def test_custom_recorder_database_is_preserved():
     cfg = load(
-        MINIMAL + "\nrecorder:\n  csv: logs/minutes.csv\n",
-        symbol="SNDK",
-        hedge=hedge,
-    )
-    assert cfg.recorder_csv == expected
-
-
-def test_custom_recorder_csv_is_preserved():
-    cfg = load(
-        MINIMAL + "\nrecorder:\n  csv: archive/custom-minutes.csv\n",
+        MINIMAL + "\nrecorder:\n  database: archive/history.sqlite\n",
         symbol="SNDK",
         hedge="lighter-rh",
     )
-    assert cfg.recorder_csv == "archive/custom-minutes.csv"
+    assert cfg.recorder_database == "archive/history.sqlite"
+
+
+def test_legacy_recorder_csv_gets_actionable_error():
+    expect_error(
+        MINIMAL + "\nrecorder:\n  csv: logs/minutes.csv\n",
+        "legacy 'recorder.csv' is no longer supported",
+    )
 
 
 def test_tradexyz_hedge():

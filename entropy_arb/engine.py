@@ -10,7 +10,7 @@ per-venue inventory ladder + position caps, per-venue order budgets and
 reactive rate-limit exclusion, net-delta hedging, venue-outage pausing with
 probing, and periodic on-chain reconciliation. There is no paper mode: the
 bot either trades live or runs --record-only (data collection, no strategy).
-Both venues' books are recorded to 1-minute CSV bars throughout.
+Both venues' books and reference prices are persisted to SQLite throughout.
 """
 from __future__ import annotations
 
@@ -29,6 +29,7 @@ from .config import Config
 from .premium import calculate_premiums
 from .recorder import MinuteRecorder
 from .reference import ReferenceRecorder
+from .storage import FLUSH_INTERVAL_SEC, MarketHistoryStore
 from .strategy import StrategyState, build_strategy
 from .venue_hl import HLVenue
 from .venue_lighter import LighterVenue
@@ -55,6 +56,7 @@ class Engine:
         self.venues: Dict[str, object] = {}
         self.recorder: Optional[MinuteRecorder] = None
         self.reference: Optional[ReferenceRecorder] = None
+        self.market_history: Optional[MarketHistoryStore] = None
         self.markets_ready = False
         self.stop = asyncio.Event()
         self._update_evt = asyncio.Event()
@@ -147,6 +149,8 @@ class Engine:
             return None
         if not (self.record_only or self.cfg.recorder_enabled):
             return None
+        if self.market_history is None:
+            raise RuntimeError("market-history store must be initialized first")
         return ReferenceRecorder(
             symbol=self.cfg.symbol,
             hedge_key=self.cfg.hedge_venue,
@@ -154,6 +158,7 @@ class Engine:
             entropy_coin=self.entropy.coin,
             hedge_ws_url=self.hedge.profile.ws_url,
             hedge_market_id=self.hedge.market_id,
+            store=self.market_history,
         )
 
     async def _run_reference(self) -> None:
@@ -166,6 +171,17 @@ class Engine:
         except Exception:
             log.exception("reference recorder failed")
 
+    async def _storage_flush_loop(self) -> None:
+        while not self.stop.is_set():
+            try:
+                await asyncio.wait_for(self.stop.wait(), timeout=FLUSH_INTERVAL_SEC)
+            except asyncio.TimeoutError:
+                pass
+            if self.stop.is_set():
+                break
+            if self.market_history is not None:
+                await asyncio.to_thread(self.market_history.flush)
+
     async def _run_inner(self) -> None:
         cfg = self.cfg
         self.entropy = self._make_venue(cfg.entropy)
@@ -173,6 +189,8 @@ class Engine:
         self.venues = {"entropy": self.entropy, "hedge": self.hedge}
         await asyncio.gather(self.entropy.load_market(), self.hedge.load_market())
         self.markets_ready = True
+        if cfg.recorder_enabled or self.record_only:
+            self.market_history = MarketHistoryStore(cfg.recorder_database)
 
         live = not self.record_only
         if live:
@@ -225,10 +243,12 @@ class Engine:
             )
 
         tasks: List[asyncio.Task] = []
+        if self.market_history is not None:
+            tasks.append(asyncio.create_task(self._storage_flush_loop(), name="storage-flush"))
         for v in self.venues.values():
             tasks += v.start_tasks(self.stop, self._update_evt.set, live)
         if cfg.recorder_enabled or self.record_only:
-            self.recorder = MinuteRecorder(cfg.recorder_csv, self.entropy.book,
+            self.recorder = MinuteRecorder(self.market_history, self.entropy.book,
                                            self.hedge.book, cfg.staleness_sec,
                                            symbol=cfg.symbol,
                                            hedge=cfg.hedge_venue)
@@ -264,6 +284,8 @@ class Engine:
             await asyncio.gather(reference_task, return_exceptions=True)
         for v in self.venues.values():
             await v.close()
+        if self.market_history is not None:
+            await asyncio.to_thread(self.market_history.close)
         log.info("shutdown — %d trades, %d hedges, exp edge $%.4f, "
                  "fill edge $%.4f", self.trades, self.hedges,
                  self.total_exp_edge, self.total_fill_edge)

@@ -1,33 +1,18 @@
-"""Minute recorder: aggregation, rollover, CSV output.
+"""Minute recorder: aggregation and SQLite persistence.
 
 Run:  python3 -m pytest tests/  (or  python3 tests/test_recorder.py)
 """
-import csv
 import os
+import sqlite3
 import sys
 import tempfile
-
-import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from entropy_arb.book import OrderBook  # noqa: E402
+from entropy_arb.premium import calculate_premiums  # noqa: E402
 from entropy_arb.recorder import MinuteRecorder  # noqa: E402
-
-
-MINUTE_HEADER = [
-    "minute_ts", "time_utc", "symbol", "hedge",
-    "entropy_bid", "entropy_ask", "hedge_bid", "hedge_ask",
-    "premium_open_bps", "premium_high_bps", "premium_low_bps",
-    "premium_close_bps", "premium_mean_bps", "premium_std_bps",
-    "sell_edge_mean_bps", "sell_edge_max_bps",
-    "buy_edge_mean_bps", "buy_edge_max_bps", "samples",
-]
-SAMPLE_HEADER = [
-    "timestamp_ms", "premium_bps", "sell_edge_bps", "buy_edge_bps",
-    "entropy_bid", "entropy_ask", "hedge_bid", "hedge_ask",
-    "entropy_book_update_ms", "hedge_book_update_ms",
-]
+from entropy_arb.storage import MarketHistoryStore  # noqa: E402
 
 
 def set_book(book, bid, ask):
@@ -35,10 +20,17 @@ def set_book(book, bid, ask):
                    [{"px": str(ask), "sz": "10"}]])
 
 
+def rows(database, table):
+    with sqlite3.connect(database) as conn:
+        conn.row_factory = sqlite3.Row
+        return conn.execute(f"SELECT * FROM {table} ORDER BY rowid").fetchall()
+
+
 def test_minute_aggregation_and_rollover():
     e_book, h_book = OrderBook(), OrderBook()
-    path = os.path.join(tempfile.mkdtemp(), "minutes.csv")
-    rec = MinuteRecorder(path, e_book, h_book, staleness_sec=1e9,
+    database = os.path.join(tempfile.mkdtemp(), "history.sqlite")
+    store = MarketHistoryStore(database)
+    rec = MinuteRecorder(store, e_book, h_book, staleness_sec=1e9,
                          symbol="SNDK", hedge="lighter-rh")
 
     t0 = 1_700_000_000.0            # 20s into a minute (boundary at ...020)
@@ -53,34 +45,34 @@ def test_minute_aggregation_and_rollover():
     rec.sample(t0 + 45)
     rec.close()                        # flushes the partial minute 2
 
-    with open(path, newline="") as fh:
-        rows = list(csv.DictReader(fh))
-    assert [*rows[0]] == MINUTE_HEADER
-    assert len(rows) == 2
-    m1, m2 = rows
+    store.flush()
+    persisted = rows(database, "minutes")
+    assert len(persisted) == 2
+    m1, m2 = persisted
     assert (m1["symbol"], m1["hedge"]) == ("SNDK", "lighter-rh")
     assert (m2["symbol"], m2["hedge"]) == ("SNDK", "lighter-rh")
-    assert int(m1["samples"]) == 2 and int(m2["samples"]) == 1
-    assert abs(float(m1["premium_open_bps"]) - 10.0) < 0.2
-    assert abs(float(m1["premium_high_bps"]) - 20.0) < 0.2
-    assert abs(float(m1["premium_close_bps"]) - 20.0) < 0.2
-    assert abs(float(m1["premium_mean_bps"]) - 15.0) < 0.2
+    assert m1["samples"] == 2 and m2["samples"] == 1
+    assert abs(m1["premium_open_bps"] - 10.0) < 0.2
+    assert abs(m1["premium_high_bps"] - 20.0) < 0.2
+    assert abs(m1["premium_close_bps"] - 20.0) < 0.2
+    assert abs(m1["premium_mean_bps"] - 15.0) < 0.2
     # executable edges: sell = bid_e/ask_h - 1, buy = bid_h/ask_e - 1
-    assert abs(float(m2["sell_edge_max_bps"])
+    assert abs(m2["sell_edge_max_bps"]
                - ((100.09 / 100.01 - 1) * 1e4)) < 0.05
-    assert abs(float(m2["buy_edge_max_bps"])
+    assert abs(m2["buy_edge_max_bps"]
                - ((99.99 / 100.11 - 1) * 1e4)) < 0.05
     # closes carry the last books
-    assert float(m2["entropy_bid"]) == 100.09
-    assert float(m2["hedge_ask"]) == 100.01
+    assert m2["entropy_bid"] == 100.09
+    assert m2["hedge_ask"] == 100.01
+    store.close()
 
 
 def test_sample_rows_match_minute_bbo_math_and_timestamp():
     e_book, h_book = OrderBook(), OrderBook()
     directory = tempfile.mkdtemp()
-    minute_path = os.path.join(directory, "minutes-SNDK-lighter-rh.csv")
-    sample_path = os.path.join(directory, "samples-v2-SNDK-lighter-rh.csv")
-    rec = MinuteRecorder(minute_path, e_book, h_book, staleness_sec=1e9,
+    database = os.path.join(directory, "history.sqlite")
+    store = MarketHistoryStore(database)
+    rec = MinuteRecorder(store, e_book, h_book, staleness_sec=1e9,
                          symbol="SNDK", hedge="lighter-rh")
 
     t0 = 1_700_000_020.123
@@ -93,77 +85,59 @@ def test_sample_rows_match_minute_bbo_math_and_timestamp():
     e_book.last_update_ts = 1_700_000_020.987
     rec.sample(t0 + 1.0)
     rec.close()
-
-    assert os.path.exists(sample_path)
-    with open(sample_path, newline="") as fh:
-        sample_rows = list(csv.DictReader(fh))
-    with open(minute_path, newline="") as fh:
-        minute_rows = list(csv.DictReader(fh))
-
-    assert [*sample_rows[0]] == SAMPLE_HEADER
+    store.flush()
+    sample_rows = rows(database, "samples")
+    minute_rows = rows(database, "minutes")
     assert len(sample_rows) == 2
-    assert int(minute_rows[0]["samples"]) == len(sample_rows)
-    assert [int(r["timestamp_ms"]) for r in sample_rows] == [
+    assert minute_rows[0]["samples"] == len(sample_rows)
+    assert [r["timestamp_ms"] for r in sample_rows] == [
         int(t0 * 1000), int((t0 + 1.0) * 1000),
     ]
-    assert ((int(sample_rows[0]["timestamp_ms"]) // 60_000) * 60
-            == int(minute_rows[0]["minute_ts"]))
+    assert ((sample_rows[0]["timestamp_ms"] // 60_000) * 60
+            == minute_rows[0]["minute_ts"])
 
     first = sample_rows[0]
-    assert float(first["premium_bps"]) == (
+    assert first["premium_bps"] == (
         (((100.09 + 100.11) / 2) / ((99.99 + 100.01) / 2) - 1) * 1e4
     )
-    assert float(first["sell_edge_bps"]) == ((100.09 / 100.01) - 1) * 1e4
-    assert float(first["buy_edge_bps"]) == ((99.99 / 100.11) - 1) * 1e4
-    assert float(first["entropy_bid"]) == 100.09
-    assert float(first["entropy_ask"]) == 100.11
-    assert float(first["hedge_bid"]) == 99.99
-    assert float(first["hedge_ask"]) == 100.01
-    assert int(first["entropy_book_update_ms"]) == 1_700_000_019_456
-    assert int(first["hedge_book_update_ms"]) == 1_700_000_019_789
+    assert first["sell_edge_bps"] == ((100.09 / 100.01) - 1) * 1e4
+    assert first["buy_edge_bps"] == ((99.99 / 100.11) - 1) * 1e4
+    assert first["entropy_bid"] == 100.09
+    assert first["entropy_ask"] == 100.11
+    assert first["hedge_bid"] == 99.99
+    assert first["hedge_ask"] == 100.01
+    assert first["entropy_book_update_ms"] == 1_700_000_019_456
+    assert first["hedge_book_update_ms"] == 1_700_000_019_789
+    store.close()
 
 
-@pytest.mark.parametrize(
-    ("hedge", "minute_name", "sample_name"),
-    [
-        ("lighter", "minutes-SNDK-lighter.csv",
-         "samples-v2-SNDK-lighter.csv"),
-        ("lighter-rh", "minutes-SNDK-lighter-rh.csv",
-         "samples-v2-SNDK-lighter-rh.csv"),
-        ("tradexyz", "minutes-SNDK-tradexyz.csv",
-         "samples-v2-SNDK-tradexyz.csv"),
-        ("lighter", "minutes.csv", "samples-v2.csv"),
-        ("lighter", "foo.csv", "foo-samples-v2.csv"),
-    ],
-)
-def test_sample_file_is_sibling_of_venue_minute_file(
-        hedge, minute_name, sample_name):
+def test_samples_share_one_store_across_hedges():
     e_book, h_book = OrderBook(), OrderBook()
     directory = tempfile.mkdtemp()
-    minute_path = os.path.join(directory, minute_name)
-    sample_path = os.path.join(directory, sample_name)
-    rec = MinuteRecorder(minute_path, e_book, h_book, staleness_sec=1e9,
-                         symbol="SNDK", hedge=hedge)
+    store = MarketHistoryStore(os.path.join(directory, "history.sqlite"))
+    rec = MinuteRecorder(store, e_book, h_book, staleness_sec=1e9,
+                         symbol="SNDK", hedge="lighter")
     set_book(e_book, 100.0, 100.02)
     set_book(h_book, 100.0, 100.02)
     rec.sample(1_700_000_000.0)
     rec.close()
 
-    assert os.path.exists(sample_path)
+    store.flush()
+    assert len(rows(store.path, "samples")) == 1
+    store.close()
 
 
-def test_legacy_sample_file_is_untouched_when_v2_is_written():
+def test_no_csv_is_created_when_sampling():
     e_book, h_book = OrderBook(), OrderBook()
     directory = tempfile.mkdtemp()
-    minute_path = os.path.join(directory, "minutes-SNDK-lighter.csv")
     legacy_path = os.path.join(directory, "samples-SNDK-lighter.csv")
-    v2_path = os.path.join(directory, "samples-v2-SNDK-lighter.csv")
     legacy_content = b"legacy-header\nlegacy-row\n"
     with open(legacy_path, "wb") as fh:
         fh.write(legacy_content)
     legacy_before = os.stat(legacy_path)
 
-    rec = MinuteRecorder(minute_path, e_book, h_book, staleness_sec=1e9,
+    store = MarketHistoryStore(os.path.join(directory, "history.sqlite"))
+    rec = MinuteRecorder(store, e_book, h_book, staleness_sec=1e9,
                          symbol="SNDK", hedge="lighter")
     set_book(e_book, 100.0, 100.02)
     set_book(h_book, 100.0, 100.02)
@@ -175,69 +149,60 @@ def test_legacy_sample_file_is_untouched_when_v2_is_written():
         assert fh.read() == legacy_content
     assert legacy_after.st_size == legacy_before.st_size
     assert legacy_after.st_mtime_ns == legacy_before.st_mtime_ns
-    assert os.path.exists(v2_path)
+    assert not os.path.exists(os.path.join(directory, "minutes-SNDK-lighter.csv"))
+    store.close()
 
 
-def test_sample_rows_flush_every_ten_and_close_flushes_remainder():
+def test_samples_remain_buffered_until_store_flush():
     e_book, h_book = OrderBook(), OrderBook()
     directory = tempfile.mkdtemp()
-    minute_path = os.path.join(directory, "minutes-SNDK-lighter.csv")
-    sample_path = os.path.join(directory, "samples-v2-SNDK-lighter.csv")
-    rec = MinuteRecorder(minute_path, e_book, h_book, staleness_sec=1e9,
+    database = os.path.join(directory, "history.sqlite")
+    store = MarketHistoryStore(database)
+    rec = MinuteRecorder(store, e_book, h_book, staleness_sec=1e9,
                          symbol="SNDK", hedge="lighter")
     set_book(e_book, 100.0, 100.02)
     set_book(h_book, 100.0, 100.02)
 
-    def persisted_rows():
-        with open(sample_path, newline="") as fh:
-            return list(csv.DictReader(fh))
-
-    try:
-        for offset in range(9):
-            rec.sample(1_700_000_000.0 + offset)
-        assert len(persisted_rows()) == 0
-
-        rec.sample(1_700_000_009.0)
-        assert len(persisted_rows()) == 10
-
-        rec.sample(1_700_000_010.0)
-        rec.sample(1_700_000_011.0)
-        assert len(persisted_rows()) == 10
-    finally:
-        rec.close()
-
-    assert len(persisted_rows()) == 12
+    for offset in range(12):
+        rec.sample(1_700_000_000.0 + offset)
+    assert store.pending_rows["samples"] == 12
+    store.flush()
+    assert len(rows(database, "samples")) == 12
+    rec.close()
+    store.close()
 
 
 def test_stale_books_are_skipped():
     e_book, h_book = OrderBook(), OrderBook()
-    path = os.path.join(tempfile.mkdtemp(), "minutes.csv")
-    rec = MinuteRecorder(path, e_book, h_book, staleness_sec=1e9,
+    database = os.path.join(tempfile.mkdtemp(), "history.sqlite")
+    store = MarketHistoryStore(database)
+    rec = MinuteRecorder(store, e_book, h_book, staleness_sec=1e9,
                          symbol="SNDK", hedge="lighter-rh")
     rec.sample(1_700_000_000.0)        # both books empty -> nothing recorded
     set_book(e_book, 100.0, 100.02)    # only one side fresh
     rec.sample(1_700_000_001.0)
     rec.close()
     assert rec.rows_written == 0
-    assert not os.path.exists(path)    # no row, no file
-    assert not os.path.exists(os.path.join(os.path.dirname(path),
-                                           "samples-v2.csv"))
+    store.flush()
+    assert rows(database, "samples") == []
+    assert rows(database, "minutes") == []
+    store.close()
 
 
-def test_append_keeps_single_header():
+def test_two_recorders_append_to_one_store():
     e_book, h_book = OrderBook(), OrderBook()
-    path = os.path.join(tempfile.mkdtemp(), "minutes.csv")
+    database = os.path.join(tempfile.mkdtemp(), "history.sqlite")
+    store = MarketHistoryStore(database)
     set_book(e_book, 100.0, 100.02)
     set_book(h_book, 100.0, 100.02)
     for start in (1_700_000_000.0, 1_700_000_060.0):
-        rec = MinuteRecorder(path, e_book, h_book, staleness_sec=1e9,
+        rec = MinuteRecorder(store, e_book, h_book, staleness_sec=1e9,
                              symbol="SNDK", hedge="lighter-rh")
         rec.sample(start)
         rec.close()
-    with open(path) as fh:
-        lines = fh.read().strip().splitlines()
-    assert len(lines) == 3             # one header + two rows
-    assert lines[0].startswith("minute_ts,")
+    store.flush()
+    assert len(rows(database, "minutes")) == 2
+    store.close()
 
 
 if __name__ == "__main__":

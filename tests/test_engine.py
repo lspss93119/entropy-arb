@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from entropy_arb.book import OrderBook  # noqa: E402
 from entropy_arb.config import load_config  # noqa: E402
 from entropy_arb.engine import Engine  # noqa: E402
+from entropy_arb.storage import MarketHistoryStore  # noqa: E402
 from entropy_arb.premium import calculate_premiums  # noqa: E402
 
 NO_ENV = os.path.join(tempfile.gettempdir(), "entropy-arb-no-such.env")
@@ -59,7 +60,7 @@ execution:
   premium_persist_sec: 0.0
 recorder:
   enabled: {str(recorder_enabled).lower()}
-  csv: {os.path.join(tempfile.gettempdir(), "engine-minutes.csv")}
+  database: {os.path.join(tempfile.gettempdir(), "engine-market-history.sqlite")}
 """)
     f.close()
     return load_config(f.name, NO_ENV,
@@ -683,6 +684,7 @@ def attach_reference_venues(
     eng.hedge.kind = "lighter"
     eng.hedge.profile = SimpleNamespace(ws_url=hedge_ws_url)
     eng.hedge.market_id = market_id
+    eng.market_history = MarketHistoryStore(":memory:")
 
 
 @pytest.mark.parametrize(
@@ -714,14 +716,13 @@ def test_reference_lifecycle_matrix(
     recorder = eng._build_reference_recorder()
     assert (recorder is not None) is expected
     if expected:
-        assert captured == [{
-            "symbol": "SNDK",
-            "hedge_key": "lighter-rh",
+        assert captured[0] == {
+            "symbol": "SNDK", "hedge_key": "lighter-rh",
             "entropy_ws_url": "wss://api.hyperliquid.xyz/ws",
             "entropy_coin": "io:SNDK",
             "hedge_ws_url": "wss://api.rh.lighter.xyz/stream",
-            "hedge_market_id": 32,
-        }]
+            "hedge_market_id": 32, "store": eng.market_history,
+        }
 
 
 @pytest.mark.parametrize(
@@ -852,6 +853,7 @@ def test_engine_awaits_reference_shutdown_without_cancelling_it(monkeypatch):
         started = asyncio.Event()
         closed = asyncio.Event()
         was_cancelled = False
+        recorder_stores = []
 
         class LifecycleVenue:
             def __init__(self, kind, *, coin=None, market_id=None, ws_url=None):
@@ -897,7 +899,7 @@ def test_engine_awaits_reference_shutdown_without_cancelling_it(monkeypatch):
             rows_written = 0
 
             def __init__(self, *args, **kwargs):
-                return None
+                recorder_stores.append(args[0])
 
             async def run(self, stop):
                 await stop.wait()
@@ -925,6 +927,9 @@ def test_engine_awaits_reference_shutdown_without_cancelling_it(monkeypatch):
         )
         run_task = asyncio.create_task(eng._run_inner())
         await asyncio.wait_for(started.wait(), timeout=0.2)
+        assert eng.market_history is not None
+        assert recorder_stores == [eng.market_history]
+        assert eng.reference.kwargs["store"] is eng.market_history
         eng.request_stop()
         await asyncio.wait_for(run_task, timeout=1.0)
         assert closed.is_set()

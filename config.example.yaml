@@ -102,13 +102,13 @@ execution:
 
 # ================== DATA RECORDER / 数据采集 ===============================
 # Always-on while the bot runs: samples both real order books 1/sec and
-# writes one CSV row per minute. This supports offline market analysis and
-# explicit strategy parameter selection; the recorder never selects a strategy.
-# 机器人运行期间自动开启：每秒采样两边真实盘口，每分钟写一行 CSV，
-# 用于离线市场分析和明确选择策略参数；采集器不会自动选择策略。
+# stores samples, minute bars, and reference prices in one SQLite database.
+# This supports offline market analysis; the recorder never selects a strategy.
+# 机器人运行期间自动开启：每秒采样兩邊真實盘口，並將樣本、分鐘 K 線與參考價格
+# 寫入同一個 SQLite 資料庫；用於離線市場分析，採集器不會自動選擇策略。
 recorder:
   enabled: true
-  csv: logs/minutes.csv
+  database: data/market-history.sqlite
 
 # ==================== LOGGING & DASHBOARD / 日志与仪表盘 ====================
 # On a terminal the bot shows a live Rich dashboard (books, signal, positions,

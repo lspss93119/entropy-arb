@@ -34,7 +34,7 @@ HL_API_URL = "https://api.hyperliquid.xyz"
 HL_WS_URL = "wss://api.hyperliquid.xyz/ws"   # official ws — the only HL feed used
 
 HEDGE_VENUES = ("lighter", "lighter-rh", "tradexyz")
-DEFAULT_RECORDER_CSV = "logs/minutes.csv"
+DEFAULT_RECORDER_DATABASE = "data/market-history.sqlite"
 
 
 @dataclass(frozen=True)
@@ -147,7 +147,7 @@ class Config:
     http_keepalive_sec: float
     # recorder
     recorder_enabled: bool
-    recorder_csv: str
+    recorder_database: str
     # logging
     log_level: str
     status_interval_sec: float
@@ -212,7 +212,7 @@ _SCHEMA: Dict[str, Any] = {
     },
     "recorder": {
         "enabled": bool,
-        "csv": str,
+        "database": str,
     },
     "logging": {
         "level": str,
@@ -258,13 +258,6 @@ def _validate(node: Any, schema: Dict[str, Any], path: str = "") -> None:
 
 def _get(d: dict, section: str, key: str, default):
     return (d.get(section) or {}).get(key, default)
-
-
-def _resolve_recorder_csv(path: str, symbol: str, hedge_venue: str) -> str:
-    if path != DEFAULT_RECORDER_CSV:
-        return path
-    stem, ext = os.path.splitext(path)
-    return f"{stem}-{symbol}-{hedge_venue}{ext}"
 
 
 def _finite_number(params: dict, key: str, path: str) -> float:
@@ -365,6 +358,12 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
             "    upper_bps: <old upper_bps>\n"
             "    lower_bps: <old lower_bps>"
         )
+    recorder = raw.get("recorder")
+    if isinstance(recorder, dict) and "csv" in recorder:
+        raise ConfigError(
+            "legacy 'recorder.csv' is no longer supported; use\n"
+            "recorder.database: data/market-history.sqlite"
+        )
     _validate(raw, _SCHEMA)
 
     symbol = (symbol or "").strip()
@@ -452,11 +451,8 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         venue_probe_sec=float(_get(raw, "execution", "venue_probe_sec", 30.0)),
         http_keepalive_sec=float(_get(raw, "execution", "http_keepalive_sec", 10.0)),
         recorder_enabled=bool(_get(raw, "recorder", "enabled", True)),
-        recorder_csv=_resolve_recorder_csv(
-            _get(raw, "recorder", "csv", DEFAULT_RECORDER_CSV),
-            symbol,
-            hedge_venue,
-        ),
+        recorder_database=str(_get(
+            raw, "recorder", "database", DEFAULT_RECORDER_DATABASE)),
         log_level=str(_get(raw, "logging", "level", "INFO")).upper(),
         status_interval_sec=float(_get(raw, "logging", "status_interval_sec", 30.0)),
         trades_csv=_get(raw, "logging", "trades_csv", "logs/trades.csv"),

@@ -5,6 +5,7 @@ import inspect
 import json
 import logging
 import os
+import sqlite3
 
 import pytest
 
@@ -13,13 +14,15 @@ from entropy_arb.reference import (
     HLReferenceFeed,
     LIGHTER_REFERENCE_HEADER,
     LighterReferenceFeed,
-    ReferenceCsvWriter,
+    EntropyReferenceStoreWriter,
+    HedgeReferenceStoreWriter,
     ReferenceParseError,
     ReferenceRecorder,
     parse_hl_reference,
     parse_lighter_reference,
     reference_paths,
 )
+from entropy_arb.storage import MarketHistoryStore
 
 
 class StubReferenceWriter:
@@ -658,120 +661,42 @@ def read_rows(path):
         return list(csv.reader(fh))
 
 
-def test_writer_persists_identical_rows_independently(tmp_path):
-    path = tmp_path / "reference.csv"
-    writer = ReferenceCsvWriter(str(path), ENTROPY_REFERENCE_HEADER)
+def test_entropy_store_writer_buffers_canonical_rows(tmp_path):
+    store = MarketHistoryStore(tmp_path / "history.sqlite")
+    writer = EntropyReferenceStoreWriter(store, "SNDK", "lighter")
     row = (1_787_993_704_054, 1485.0, 1485.0)
     writer.write(row)
     writer.write(row)
     writer.close()
-    assert read_rows(path) == [
-        list(ENTROPY_REFERENCE_HEADER),
-        [str(value) for value in row],
-        [str(value) for value in row],
-    ]
+    store.flush()
+    with sqlite3.connect(store.path) as conn:
+        assert conn.execute("SELECT symbol, hedge, recv_ms, oracle_px, mark_px FROM entropy_reference").fetchall() == [
+            ("SNDK", "lighter", *row)]
+    store.close()
 
 
-def test_writer_flushes_row_ten_and_close_flushes_remainder(tmp_path):
-    path = tmp_path / "reference.csv"
-    writer = ReferenceCsvWriter(str(path), ENTROPY_REFERENCE_HEADER)
-    for recv_ms in range(1, 10):
-        writer.write((recv_ms, 100.0, 101.0))
-    assert read_rows(path) == [list(ENTROPY_REFERENCE_HEADER)]
-
-    writer.write((10, 100.0, 101.0))
-    assert len(read_rows(path)) == 11
-
-    writer.write((11, 100.0, 101.0))
-    writer.write((12, 100.0, 101.0))
-    assert len(read_rows(path)) == 11
-    writer.close()
-    assert len(read_rows(path)) == 13
-
-
-def test_writer_restart_appends_one_header(tmp_path):
-    path = tmp_path / "reference.csv"
-    for recv_ms in (1, 2):
-        writer = ReferenceCsvWriter(str(path), ENTROPY_REFERENCE_HEADER)
-        writer.write((recv_ms, 100.0, 101.0))
-        writer.close()
-    rows = read_rows(path)
-    assert rows[0] == list(ENTROPY_REFERENCE_HEADER)
-    assert rows.count(list(ENTROPY_REFERENCE_HEADER)) == 1
-    assert len(rows) == 3
+def test_hedge_store_writer_buffers_canonical_rows(tmp_path):
+    store = MarketHistoryStore(tmp_path / "history.sqlite")
+    writer = HedgeReferenceStoreWriter(store, "SNDK", "lighter-rh")
+    writer.write((1, 2, 100.0, 101.0))
+    store.flush()
+    with sqlite3.connect(store.path) as conn:
+        assert conn.execute("SELECT symbol, hedge, recv_ms, server_ms, index_px, mark_px FROM hedge_reference").fetchall() == [
+            ("SNDK", "lighter-rh", 1, 2, 100.0, 101.0)]
+    store.close()
 
 
 def test_stop_accepting_rejects_late_rows_but_close_flushes_prior_rows(tmp_path):
-    path = tmp_path / "reference.csv"
-    writer = ReferenceCsvWriter(str(path), ENTROPY_REFERENCE_HEADER)
+    store = MarketHistoryStore(tmp_path / "history.sqlite")
+    writer = EntropyReferenceStoreWriter(store, "SNDK", "lighter")
     writer.write((1, 100.0, 101.0))
     writer.stop_accepting()
     writer.write((2, 102.0, 103.0))
     writer.close()
-    assert read_rows(path) == [
-        list(ENTROPY_REFERENCE_HEADER),
-        ["1", "100.0", "101.0"],
-    ]
-
-
-def test_bad_header_disables_without_touching_file(tmp_path, caplog):
-    path = tmp_path / "reference.csv"
-    original = b"wrong,header\n1,2\n"
-    path.write_bytes(original)
-    with caplog.at_level(logging.ERROR, logger="reference"):
-        writer = ReferenceCsvWriter(str(path), ENTROPY_REFERENCE_HEADER)
-    assert writer.enabled is False
-    writer.write((3, 100.0, 101.0))
-    writer.close()
-    assert path.read_bytes() == original
-    assert not (tmp_path / "reference.csv.old").exists()
-    assert sum(
-        "header validation" in record.message for record in caplog.records
-    ) == 1
-
-
-def test_write_error_logs_once_and_disables(tmp_path, caplog):
-    class BrokenCsvWriter:
-        def writerow(self, row):
-            raise OSError("disk full")
-
-    path = tmp_path / "reference.csv"
-    writer = ReferenceCsvWriter(str(path), ENTROPY_REFERENCE_HEADER)
-    writer._writer = BrokenCsvWriter()
-    with caplog.at_level(logging.ERROR, logger="reference"):
-        writer.write((1, 100.0, 101.0))
-        writer.write((2, 100.0, 101.0))
-        writer.close()
-    assert writer.enabled is False
-    assert sum("disk full" in record.message for record in caplog.records) == 1
-
-
-def test_open_error_is_contained_and_logged_once(tmp_path, monkeypatch, caplog):
-    target = tmp_path / "blocked" / "reference.csv"
-
-    def fail_makedirs(path, exist_ok):
-        raise OSError("read-only directory")
-
-    monkeypatch.setattr(os, "makedirs", fail_makedirs)
-    with caplog.at_level(logging.ERROR, logger="reference"):
-        writer = ReferenceCsvWriter(str(target), ENTROPY_REFERENCE_HEADER)
-        writer.write((1, 100.0, 101.0))
-        writer.close()
-    assert writer.enabled is False
-    assert sum(
-        "read-only directory" in record.message for record in caplog.records
-    ) == 1
-
-
-def test_close_is_idempotent(tmp_path):
-    path = tmp_path / "reference.csv"
-    writer = ReferenceCsvWriter(str(path), ENTROPY_REFERENCE_HEADER)
-    writer.write((1, 100.0, 101.0))
-    writer.close()
-    before = path.read_bytes()
-    writer.close()
-    writer.write((2, 102.0, 103.0))
-    assert path.read_bytes() == before
+    store.flush()
+    with sqlite3.connect(store.path) as conn:
+        assert conn.execute("SELECT recv_ms FROM entropy_reference").fetchall() == [(1,)]
+    store.close()
 
 
 def test_reference_recorder_shutdown_flushes_both_final_buffers(
@@ -809,6 +734,7 @@ def test_reference_recorder_shutdown_flushes_both_final_buffers(
 
         monkeypatch.setattr(reference, "HLReferenceFeed", EntropyFeed)
         monkeypatch.setattr(reference, "LighterReferenceFeed", HedgeFeed)
+        store = MarketHistoryStore(tmp_path / "history.sqlite")
         recorder = ReferenceRecorder(
             symbol="SNDK",
             hedge_key="lighter",
@@ -816,18 +742,18 @@ def test_reference_recorder_shutdown_flushes_both_final_buffers(
             entropy_coin="io:SNDK",
             hedge_ws_url="wss://lighter.invalid/ws",
             hedge_market_id=139,
-            directory=str(tmp_path),
+            store=store,
         )
         stop = asyncio.Event()
         task = asyncio.create_task(recorder.run(stop))
         await both_started.wait()
         stop.set()
         await task
-        entropy_path, hedge_path = reference_paths(
-            "SNDK", "lighter", str(tmp_path)
-        )
-        assert len(read_rows(entropy_path)) == 2
-        assert len(read_rows(hedge_path)) == 2
+        store.flush()
+        with sqlite3.connect(store.path) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM entropy_reference").fetchone() == (1,)
+            assert conn.execute("SELECT COUNT(*) FROM hedge_reference").fetchone() == (1,)
+        store.close()
 
     asyncio.run(scenario())
 
@@ -843,8 +769,8 @@ def test_shutdown_stops_feeds_before_idempotent_writer_close(monkeypatch):
         class OrderedWriter:
             enabled = True
 
-            def __init__(self, path, header, flush_rows=10):
-                self.path = path
+            def __init__(self, store, symbol, hedge):
+                self.path = f"{symbol}-{hedge}"
                 self.closed = False
 
             def write(self, row):
@@ -871,7 +797,8 @@ def test_shutdown_stops_feeds_before_idempotent_writer_close(monkeypatch):
                 await stop.wait()
                 events.append("feed-stopped")
 
-        monkeypatch.setattr(reference, "ReferenceCsvWriter", OrderedWriter)
+        monkeypatch.setattr(reference, "EntropyReferenceStoreWriter", OrderedWriter)
+        monkeypatch.setattr(reference, "HedgeReferenceStoreWriter", OrderedWriter)
         monkeypatch.setattr(reference, "HLReferenceFeed", OrderedFeed)
         monkeypatch.setattr(reference, "LighterReferenceFeed", OrderedFeed)
         recorder = ReferenceRecorder(
@@ -881,6 +808,7 @@ def test_shutdown_stops_feeds_before_idempotent_writer_close(monkeypatch):
             entropy_coin="io:SNDK",
             hedge_ws_url="wss://rh.invalid/ws",
             hedge_market_id=32,
+            store=MarketHistoryStore(":memory:"),
         )
         stop = asyncio.Event()
         task = asyncio.create_task(recorder.run(stop))
@@ -911,8 +839,8 @@ def test_stuck_feed_is_cancelled_and_awaited_before_close(monkeypatch):
         both_started = asyncio.Event()
 
         class OrderedWriter:
-            def __init__(self, path, header, flush_rows=10):
-                self.path = path
+            def __init__(self, store, symbol, hedge):
+                self.path = f"{symbol}-{hedge}"
                 self.enabled = True
                 self.closed = False
 
@@ -943,7 +871,8 @@ def test_stuck_feed_is_cancelled_and_awaited_before_close(monkeypatch):
                     events.append(f"feed-cancelled:{self.name}")
                     raise
 
-        monkeypatch.setattr(reference, "ReferenceCsvWriter", OrderedWriter)
+        monkeypatch.setattr(reference, "EntropyReferenceStoreWriter", OrderedWriter)
+        monkeypatch.setattr(reference, "HedgeReferenceStoreWriter", OrderedWriter)
         monkeypatch.setattr(reference, "HLReferenceFeed", StuckFeed)
         monkeypatch.setattr(reference, "LighterReferenceFeed", StuckFeed)
         recorder = ReferenceRecorder(
@@ -953,6 +882,7 @@ def test_stuck_feed_is_cancelled_and_awaited_before_close(monkeypatch):
             entropy_coin="io:SNDK",
             hedge_ws_url="wss://lighter.invalid/ws",
             hedge_market_id=139,
+            store=MarketHistoryStore(":memory:"),
             feed_stop_timeout_sec=0.01,
         )
         stop = asyncio.Event()
@@ -1007,17 +937,17 @@ def test_feed_failure_preserves_sibling_writer(tmp_path, monkeypatch):
             entropy_coin="io:SNDK",
             hedge_ws_url="wss://lighter.invalid/ws",
             hedge_market_id=139,
-            directory=str(tmp_path),
+            store=MarketHistoryStore(tmp_path / "history.sqlite"),
         )
         stop = asyncio.Event()
         task = asyncio.create_task(recorder.run(stop))
         await sibling_started.wait()
         stop.set()
         await task
-        _, hedge_path = reference_paths(
-            "SNDK", "lighter", str(tmp_path)
-        )
-        assert len(read_rows(hedge_path)) == 2
+        recorder.hedge_writer.store.flush()
+        with sqlite3.connect(recorder.hedge_writer.store.path) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM hedge_reference").fetchone() == (1,)
+        recorder.hedge_writer.store.close()
 
     asyncio.run(scenario())
 
@@ -1068,7 +998,7 @@ def test_bad_header_disables_only_one_sibling_writer(tmp_path, monkeypatch):
             entropy_coin="io:SNDK",
             hedge_ws_url="wss://lighter.invalid/ws",
             hedge_market_id=139,
-            directory=str(tmp_path),
+            store=MarketHistoryStore(tmp_path / "history.sqlite"),
         )
         stop = asyncio.Event()
         task = asyncio.create_task(recorder.run(stop))
@@ -1076,7 +1006,11 @@ def test_bad_header_disables_only_one_sibling_writer(tmp_path, monkeypatch):
         stop.set()
         await task
         assert open(entropy_path, "rb").read() == original
-        assert len(read_rows(hedge_path)) == 2
+        recorder.hedge_writer.store.flush()
+        with sqlite3.connect(recorder.hedge_writer.store.path) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM entropy_reference").fetchone() == (1,)
+            assert conn.execute("SELECT COUNT(*) FROM hedge_reference").fetchone() == (1,)
+        recorder.hedge_writer.store.close()
 
     asyncio.run(scenario())
 
@@ -1092,8 +1026,8 @@ def test_sibling_isolation_prevents_write_after_stop_accepting(
         started_count = 0
 
         class TrackingWriter:
-            def __init__(self, path, header, flush_rows=10):
-                self.path = path
+            def __init__(self, store, symbol, hedge):
+                self.path = f"{symbol}-{hedge}"
                 self.accepting = True
                 self.closed = False
 
@@ -1127,7 +1061,8 @@ def test_sibling_isolation_prevents_write_after_stop_accepting(
                     both_started.set()
                 await stop.wait()
 
-        monkeypatch.setattr(reference, "ReferenceCsvWriter", TrackingWriter)
+        monkeypatch.setattr(reference, "EntropyReferenceStoreWriter", TrackingWriter)
+        monkeypatch.setattr(reference, "HedgeReferenceStoreWriter", TrackingWriter)
         monkeypatch.setattr(reference, "HLReferenceFeed", Feed)
         monkeypatch.setattr(reference, "LighterReferenceFeed", Feed)
         recorder = ReferenceRecorder(
@@ -1137,7 +1072,7 @@ def test_sibling_isolation_prevents_write_after_stop_accepting(
             entropy_coin="io:SNDK",
             hedge_ws_url="wss://lighter.invalid/ws",
             hedge_market_id=139,
-            directory=str(tmp_path),
+            store=MarketHistoryStore(tmp_path / "history.sqlite"),
         )
         stop = asyncio.Event()
         task = asyncio.create_task(recorder.run(stop))
