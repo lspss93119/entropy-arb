@@ -7,7 +7,7 @@ import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Iterable, Sequence
+from typing import Callable, Iterable
 
 from entropy_arb.storage import (
     EntropyReferenceRow,
