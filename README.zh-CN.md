@@ -22,9 +22,10 @@
 官方 websocket（`wss://api.hyperliquid.xyz/ws`），Lighter 的盘口来自 Lighter
 官方 websocket。
 
-机器人运行期间（包括无需密钥的 `--record-only`）会自动把两边盘口记录成
-**分钟级 CSV 数据**。这些记录用于离线市场分析和人工选择策略参数；采集器和
-实盘机器人都不会自动诊断市场或替你选择策略。
+机器人运行期间（包括无需密钥的 `--record-only`）会把约 1 Hz 的原始 BBO 样本
+与分钟聚合数据写入 SQLite；受支持的 Lighter 参考数据也写入同一数据库。这些
+记录用于离线市场分析和人工选择策略参数；采集器和实盘机器人都不会自动诊断市场、
+选择策略或替你切换策略。
 
 ## 信号逻辑
 
@@ -94,18 +95,19 @@ cp .env.example .env                     # 密钥——交易必填
 python3 main.py --record-only --symbol SNDK --hedge lighter-rh
 ```
 
-至少运行几个小时（最好一整天——溢价存在日内规律），数据写入
-`logs/minutes.csv`。
+至少运行几个小时（最好一整天——溢价存在日内规律），数据写入与实盘模式共用的
+SQLite 数据库；默认路径为 `data/market-history.sqlite`。
 
 **第二步：审阅市场、选择策略参数：**
 
 ```bash
-python3 tools/analyze.py
+python3 tools/analyze.py --csv /path/to/legacy-minutes.csv
 ```
 
-它会输出溢价分布和各档带宽的历史触发频率。请根据这些离线证据，在
-`config.yaml` 中明确选择 `stable_basis` 或 `drifting_basis` 及其参数；分析工具
-不会自动选择或切换策略。
+`tools/analyze.py` 是仅供旧 CSV 使用的临时分析工具：请只对既有 CSV export
+使用它。它不会读取实时 SQLite 数据库，也不会自动选择或切换策略。对于当前市场
+历史，请先建立 SQLite snapshot，再将单一文件交给人工或 ChatGPT 分析，并在
+`config.yaml` 中明确选择 `stable_basis` 或 `drifting_basis` 及其参数。
 
 **第三步：实盘** —— 填写 `.env`，安装签名 SDK，仓位上限从刚好满足
 交易所最小名义的水平开始：
@@ -128,8 +130,13 @@ python3 main.py --symbol SNDK --hedge lighter-rh
 
 ## 数据采集与分析
 
-采集器在所有模式下自动运行（`recorder.enabled: true`）：每秒采样一次两边
-的真实盘口，每分钟写一行：
+采集器在所有模式下自动运行（`recorder.enabled: true`）。它将约 1 Hz 的原始
+BBO 样本与分钟聚合数据写入 `recorder.database`，默认路径为
+`data/market-history.sqlite`；受支持的 Lighter 参考观察也写入同一数据库。多个
+bot process 通过 SQLite WAL 共用该数据库，因此每个 process 都可记录自己的市场
+组合而不需要各自的 CSV。`--record-only` 不需要交易密钥，也会写入同一数据库。
+
+分钟聚合保留以下字段：
 
 | 列 | 含义 |
 |---|---|
@@ -140,11 +147,17 @@ python3 main.py --symbol SNDK --hedge lighter-rh
 | `buy_edge_mean/max_bps` | 买入 Entropy 方向的可成交溢价（对冲腿买一 / Entropy 卖一 − 1） |
 | `samples` | 该分钟约 60 秒中两边盘口同时有效的秒数 |
 
-采集的 edge 为费前口径；分析工具在统计触发频率前会先扣除 `--fees-bps`
-（请传入**两边吃单费之和**——零费交易所默认 0.0，对冲腿为 `tradexyz` 时
-约为 1.0）。这些结果用于选择明确策略中的 `center_bps`、`upper_bps` 和
-`lower_bps`；不会替你做策略选择。`--hours 24` 可只分析最近数据；溢价中枢会
-漂移，请定期重新分析并有意更新 `config.yaml`。
+采集的 edge 为费前口径。目前的数据库工作流如下：
+
+1. 以实盘或 `--record-only` 写入 `recorder.database`。
+2. 可选地使用 `tools/migrate_market_history.py` 非破坏式导入既有 CSV；原始 CSV
+   会保留在原处。
+3. bot 运行期间使用 `tools/snapshot_data.py` 建立一个独立的 SQLite snapshot。
+4. 上传该 snapshot，供人工或 ChatGPT 分析。
+
+`tools/analyze.py` 仅保留为旧 CSV 的临时分析工具。它可检查既有 export，但不是
+SQLite reader，且不会诊断市场、选择策略或切换策略。溢价中枢会漂移，请审阅记录
+的数据，并有意更新 `config.yaml` 中明确选择的策略。
 
 ## 配置说明
 
@@ -167,7 +180,7 @@ python3 main.py --symbol SNDK --hedge lighter-rh
 | `inventory.scale_bps` / `floor_frac` | 库存阶梯（仓位超过上限的 `floor_frac` 后额外加价） | 10 / 0.5 |
 | `execution.premium_persist_sec` | 信号需持续多久才触发 | 0.3 |
 | `execution.*` | 滑点保护、超时、对账周期等 | 见配置文件 |
-| `recorder.*` | 分钟数据采集器 | 开启，`logs/minutes.csv` |
+| `recorder.enabled` / `recorder.database` | 市场历史存储 | true / `data/market-history.sqlite` |
 | `logging.dashboard` / `logging.file` | 终端仪表盘；开启时日志写入文件 | 开启，`logs/engine.log` |
 
 ## 密钥配置（`.env`，仅实盘需要）
@@ -211,8 +224,13 @@ entropy_arb/venue_hl.py  Hyperliquid dex 适配器（Entropy、tradexyz）
 entropy_arb/venue_lighter.py  zkLighter 适配器（主网、Robinhood 链）
 entropy_arb/engine.py    双交易所策略主循环
 entropy_arb/dashboard.py Rich 终端仪表盘
-entropy_arb/recorder.py  用于离线分析的分钟级盘口数据采集
-tools/analyze.py         minutes.csv -> 策略参数分析证据
+entropy_arb/recorder.py  原始 BBO + 分钟聚合市场历史采集器
+entropy_arb/storage.py   SQLite WAL 市场历史存储
+entropy_arb/migration.py 非破坏式旧 CSV 导入
+entropy_arb/snapshot.py  一致性 SQLite backup API snapshot
+tools/migrate_market_history.py  将旧 CSV 导入 SQLite
+tools/snapshot_data.py   建立单一独立 SQLite snapshot
+tools/analyze.py         仅旧 CSV 的临时分析工具
 tests/                   python3 -m pytest tests/
 ```
 

@@ -24,10 +24,12 @@ exchange that will fill the order** — Hyperliquid books come from the official
 websocket (`wss://api.hyperliquid.xyz/ws`), Lighter books from Lighter's
 official websocket.
 
-While it runs — including `--record-only` without credentials — it records
-both books to **1-minute CSV bars**. Those recordings support offline market
-analysis and human selection of strategy parameters; the recorder and live bot
-do not diagnose markets or choose a strategy for you.
+While it runs — including `--record-only` without credentials — the recorder
+stores approximately 1 Hz raw BBO samples and minute aggregates in SQLite.
+Supported Lighter reference data is stored in the same database. Those records
+support offline market analysis and human selection of strategy parameters; the
+recorder and live bot do not diagnose markets, select a strategy, or switch one
+for you.
 
 ## The signal
 
@@ -106,18 +108,21 @@ python3 main.py --record-only --symbol SNDK --hedge lighter-rh
 ```
 
 Let it run for at least a few hours (a day is better — premiums have
-intraday regimes). It writes `logs/minutes.csv`.
+intraday regimes). It writes the same SQLite database used by live mode;
+the default is `data/market-history.sqlite`.
 
 **2. Review the market and select strategy parameters:**
 
 ```bash
-python3 tools/analyze.py
+python3 tools/analyze.py --csv /path/to/legacy-minutes.csv
 ```
 
-It prints the premium distribution and how often candidate bands would have
-fired. Use that offline evidence to choose `stable_basis` or
-`drifting_basis` and its parameters explicitly in `config.yaml`; the analyzer
-does not select or switch strategies.
+`tools/analyze.py` is a legacy CSV ad-hoc tool: use it only with an existing
+CSV export. It does not read the live SQLite database and does not select or
+switch strategies. For current market history, create a SQLite snapshot and
+review or upload that single file for manual/ChatGPT analysis before choosing
+`stable_basis` or `drifting_basis` and its parameters explicitly in
+`config.yaml`.
 
 **3. Go live** — fill in `.env`, install the signing SDKs, and start with
 the smallest position caps that clear the venue minimums:
@@ -142,8 +147,15 @@ logs (nohup/systemd — off-terminal runs fall back automatically), or set
 
 ## Data collection & analysis
 
-The recorder runs automatically in every mode (`recorder.enabled: true`).
-Once per second it samples both live books; once per minute it writes a row:
+The recorder runs automatically in every mode (`recorder.enabled: true`). It
+stores approximately 1 Hz raw BBO samples and minute aggregates in
+`recorder.database`; the default path is `data/market-history.sqlite`.
+Supported Lighter reference observations are stored in the same database. All
+bot processes can share this database through SQLite WAL, so each process can
+record its selected market pair without a separate CSV file. `--record-only`
+writes the same database without trading credentials.
+
+Minute aggregates retain these fields:
 
 | column | meaning |
 |---|---|
@@ -154,12 +166,20 @@ Once per second it samples both live books; once per minute it writes a row:
 | `buy_edge_mean/max_bps` | executable premium for BUY entropy (hedge bid / entropy ask − 1) |
 | `samples` | how many of the ~60 seconds both books were fresh |
 
-Recorded edges are pre-fee; the analyzer subtracts `--fees-bps` (pass the
-**sum** of both venues' taker fees — default 0.0 for the zero-fee venues,
-~1.0 with a `tradexyz` hedge) before counting firings. Its table is evidence
-for selecting `center_bps` / `upper_bps` / `lower_bps` in the explicitly chosen
-strategy. `--hours 24` restricts to recent data; premiums drift, so re-run it
-regularly and update `config.yaml` deliberately.
+Recorded edges are pre-fee. The current database workflow is:
+
+1. Record live or with `--record-only` into `recorder.database`.
+2. Optionally import existing CSV files non-destructively with
+   `tools/migrate_market_history.py`; the original CSV files remain in place.
+3. While bots are active, create one standalone SQLite snapshot with
+   `tools/snapshot_data.py`.
+4. Upload that snapshot for manual or ChatGPT analysis.
+
+`tools/analyze.py` remains a legacy CSV ad-hoc tool only. It can inspect an
+existing export but is not a SQLite reader and never diagnoses a market,
+selects a strategy, or switches strategies. Premiums drift, so review the
+recorded data and update the explicitly selected `config.yaml` strategy
+deliberately.
 
 ## Configuration
 
@@ -183,7 +203,7 @@ errors), credentials in `.env`, and the markets on the command line
 | `inventory.scale_bps` / `floor_frac` | inventory ladder (extra bps past `floor_frac` of the cap) | 10 / 0.5 |
 | `execution.premium_persist_sec` | edge must persist before firing | 0.3 |
 | `execution.*` | slippage bounds, timeouts, reconcile cadence… | see file |
-| `recorder.*` | minute-data recorder | on, `logs/minutes.csv` |
+| `recorder.enabled` / `recorder.database` | market-history storage | true / `data/market-history.sqlite` |
 | `logging.dashboard` / `logging.file` | Rich dashboard on a tty; log file while it runs | on, `logs/engine.log` |
 
 ## Credentials (`.env`, live only)
@@ -230,8 +250,13 @@ entropy_arb/venue_hl.py  Hyperliquid dex adapter (Entropy, tradexyz)
 entropy_arb/venue_lighter.py  zkLighter adapter (mainnet, Robinhood chain)
 entropy_arb/engine.py    the two-venue strategy loop
 entropy_arb/dashboard.py Rich terminal dashboard
-entropy_arb/recorder.py  1-minute orderbook bars for offline analysis
-tools/analyze.py         minutes.csv -> strategy parameter evidence
+entropy_arb/recorder.py  raw BBO + minute market-history recorder
+entropy_arb/storage.py   SQLite WAL market-history store
+entropy_arb/migration.py non-destructive legacy CSV import
+entropy_arb/snapshot.py  consistent SQLite backup API snapshot
+tools/migrate_market_history.py  import legacy CSV into SQLite
+tools/snapshot_data.py   create one standalone SQLite snapshot
+tools/analyze.py         legacy CSV ad-hoc analysis only
 tests/                   python3 -m pytest tests/
 ```
 

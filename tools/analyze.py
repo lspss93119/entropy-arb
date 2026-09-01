@@ -1,19 +1,24 @@
 #!/usr/bin/env python3
-"""Analyze recorded minute data and suggest config.yaml thresholds.
+"""Legacy CSV ad-hoc analyzer for existing minute and sample exports.
 
-Reads the CSV written by the built-in recorder (logs/minutes.csv by default)
-and prints:
+This tool reads user-supplied legacy CSV files. The current live recorder and
+reference collectors persist SQLite market history in `recorder.database`; this
+tool does not query that database and does not diagnose, select, or switch a
+live strategy.
+
+For a legacy CSV, it prints:
 
   * the premium distribution (midline candidates),
   * how often each candidate upper/lower band would have fired,
   * optional second-level persistence event counts,
-  * a ready-to-paste `thresholds:` snippet.
+  * a legacy candidate-band summary for manual review.
 
-分析机器人自动采集的分钟级盘口数据，输出溢价分布、各档阈值的触发频率，
-以及可直接粘贴进 config.yaml 的 thresholds 建议值。
+此工具仅分析既有 CSV export，输出溢价分布和各档候选带宽的触发频率。当前
+recorder/reference 会将市场历史写入 SQLite；本工具不会读取 SQLite，也不会自动
+诊断市场、选择策略或切换策略。
 
 Usage:
-    python3 tools/analyze.py                    # logs/minutes.csv
+    python3 tools/analyze.py                    # legacy logs/minutes.csv
     python3 tools/analyze.py --csv path.csv --hours 24 --min-samples 10
     python3 tools/analyze.py --csv minutes.csv --samples samples.csv
 """
