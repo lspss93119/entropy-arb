@@ -1,3 +1,4 @@
+import multiprocessing as mp
 import sqlite3
 import threading
 from pathlib import Path
@@ -195,3 +196,69 @@ def test_flush_serializes_append_until_prefix_removal(tmp_path: Path):
     assert store.pending_rows["samples"] == 1
     assert store.flush().datasets["samples"].inserted == 1
     store.close()
+
+
+def _write_process(db_path: str, symbol: str, start_ms: int, count: int) -> None:
+    store = MarketHistoryStore(db_path)
+    for i in range(count):
+        row = sample(ts=start_ms + i)
+        row = SampleRow(**{**row.__dict__, "symbol": symbol})
+        store.append_sample(row)
+    report = store.flush()
+    if not report.ok:
+        raise RuntimeError("child flush failed")
+    store.close()
+
+
+def test_two_real_processes_write_same_wal_database(tmp_path: Path):
+    db = tmp_path / "market-history.sqlite"
+    MarketHistoryStore(db).close()
+    ctx = mp.get_context("spawn")
+    p1 = ctx.Process(target=_write_process, args=(str(db), "SNDK", 1_700_000_000_000, 200))
+    p2 = ctx.Process(target=_write_process, args=(str(db), "ANTH", 1_700_001_000_000, 200))
+    p1.start()
+    p2.start()
+    p1.join(20)
+    p2.join(20)
+    assert p1.exitcode == 0
+    assert p2.exitcode == 0
+
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM samples").fetchone() == (400,)
+        assert conn.execute("PRAGMA quick_check").fetchone() == ("ok",)
+
+
+def test_busy_flush_keeps_pending_rows_for_retry(tmp_path: Path):
+    db = tmp_path / "market-history.sqlite"
+    store = MarketHistoryStore(db, busy_timeout_ms=50)
+    blocker = sqlite3.connect(db, timeout=0.05)
+    blocker.execute("PRAGMA journal_mode=WAL")
+    blocker.execute("BEGIN IMMEDIATE")
+    store.append_sample(sample())
+
+    report = store.flush()
+    assert not report.ok
+    assert store.pending_rows["samples"] == 1
+
+    blocker.rollback()
+    blocker.close()
+    retry = store.flush()
+    assert retry.ok
+    assert retry.datasets["samples"].inserted == 1
+    store.close()
+
+
+def test_pending_buffer_cap_counts_drops_without_evicting_old_rows(tmp_path: Path):
+    db = tmp_path / "market-history.sqlite"
+    store = MarketHistoryStore(db, max_pending_rows_per_dataset=2)
+    store.append_sample(sample(ts=1))
+    store.append_sample(sample(ts=2))
+    store.append_sample(sample(ts=3))
+    assert store.pending_rows["samples"] == 2
+    assert store.dropped_rows["samples"] == 1
+    assert store.flush().ok
+    store.close()
+    with sqlite3.connect(db) as conn:
+        assert conn.execute(
+            "SELECT timestamp_ms FROM samples ORDER BY timestamp_ms"
+        ).fetchall() == [(1,), (2,)]
