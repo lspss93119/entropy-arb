@@ -130,6 +130,7 @@ class MarketHistoryStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._max_pending = max_pending_rows_per_dataset
         self._db_lock = threading.Lock()
+        self._flush_lock = threading.Lock()
         self._buffer_lock = threading.Lock()
         self._buffers = {name: [] for name in _SPECS}
         self._dropped_rows = {name: 0 for name in _SPECS}
@@ -204,10 +205,10 @@ class MarketHistoryStore:
         return InsertCounts(*counts)
 
     def flush(self) -> FlushReport:
-        # Keep the buffer lock through commit and prefix removal.  This makes
-        # concurrent flushes and appends observe one linearized operation.
-        with self._buffer_lock:
-            snapshot = {name: tuple(rows) for name, rows in self._buffers.items() if rows}
+        # Serialize flushes, but never hold the buffer lock over SQLite I/O.
+        with self._flush_lock:
+            with self._buffer_lock:
+                snapshot = {name: tuple(rows) for name, rows in self._buffers.items() if rows}
             if not snapshot:
                 return FlushReport(True, {})
             try:
@@ -219,11 +220,19 @@ class MarketHistoryStore:
                     except Exception:
                         self._conn.rollback()
                         raise
-                for name, rows in snapshot.items():
-                    del self._buffers[name][:len(rows)]
+                with self._buffer_lock:
+                    for name, rows in snapshot.items():
+                        current = self._buffers[name]
+                        if tuple(current[:len(rows)]) != rows:
+                            raise RuntimeError(f"pending {name} prefix changed during flush")
+                    for name, rows in snapshot.items():
+                        del self._buffers[name][:len(rows)]
                 return FlushReport(True, results)
             except sqlite3.Error:
                 logger.exception("market-history flush failed")
+                return FlushReport(False, {})
+            except Exception:
+                logger.exception("market-history flush committed but buffer removal failed")
                 return FlushReport(False, {})
 
     def import_rows(self, dataset: str, rows: Sequence[object]) -> InsertCounts:

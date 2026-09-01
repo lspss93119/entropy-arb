@@ -1,6 +1,5 @@
 import sqlite3
 import threading
-from time import sleep
 from pathlib import Path
 
 import pytest
@@ -188,8 +187,8 @@ def test_flush_serializes_append_until_prefix_removal(tmp_path: Path):
     assert entered.wait(timeout=2)
     append_thread = threading.Thread(target=lambda: store.append_sample(sample(ts=2)))
     append_thread.start()
-    sleep(0.05)
-    assert append_thread.is_alive()
+    append_thread.join(timeout=1)
+    assert not append_thread.is_alive()
     release.set()
     thread.join(timeout=2)
     append_thread.join(timeout=2)
