@@ -84,6 +84,8 @@ def _positive_float(value: str) -> float:
 
 
 def _symbol(value: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError("symbol must be text")
     parsed = value.strip()
     if not parsed:
         raise ValueError("symbol must be non-empty")
@@ -91,6 +93,8 @@ def _symbol(value: str) -> str:
 
 
 def _hedge(value: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError("hedge must be text")
     parsed = value.strip()
     if parsed not in SUPPORTED_HEDGES:
         raise ValueError("unsupported hedge")
@@ -239,8 +243,14 @@ def _read_companion_pair(path: Path) -> tuple[str, str] | None:
             reader = csv.DictReader(fh)
             if reader.fieldnames != MINUTE_HEADER:
                 return None
-            pairs = {(row["symbol"].strip(), row["hedge"].strip()) for row in reader}
-    except (OSError, UnicodeError, csv.Error, KeyError):
+            pairs: set[tuple[str, str]] = set()
+            for row in reader:
+                symbol = row.get("symbol")
+                hedge = row.get("hedge")
+                if not isinstance(symbol, str) or not isinstance(hedge, str):
+                    return None
+                pairs.add((symbol.strip(), hedge.strip()))
+    except (OSError, UnicodeError, csv.Error, KeyError, TypeError, ValueError):
         return None
     if len(pairs) != 1:
         return None
@@ -298,17 +308,6 @@ def _migrate_file(
     mappings: dict[str, tuple[str, str]],
 ) -> MigrationFileReport:
     spec = _SPECS[dataset]
-    if dataset == "samples":
-        provenance = _sample_provenance(path, mappings)
-        if provenance is None:
-            return _report(path, dataset, status="NEEDS_MAPPING", message="sample provenance is unresolved")
-    elif dataset in {"entropy_reference", "hedge_reference"}:
-        provenance = _reference_filename_pair(path, dataset)
-        if provenance is None:
-            return _report(path, dataset, status="FAIL", message="reference filename provenance is invalid")
-    else:
-        provenance = ("", "")
-
     source_rows = 0
     valid_rows: list[object] = []
     invalid_rows = 0
@@ -319,6 +318,26 @@ def _migrate_file(
             reader = csv.DictReader(fh)
             if reader.fieldnames != spec.header:
                 return _report(path, dataset, status="FAIL", message="unsupported CSV header")
+            if dataset == "samples":
+                provenance = _sample_provenance(path, mappings)
+                if provenance is None:
+                    return _report(
+                        path,
+                        dataset,
+                        status="NEEDS_MAPPING",
+                        message="sample provenance is unresolved",
+                    )
+            elif dataset in {"entropy_reference", "hedge_reference"}:
+                provenance = _reference_filename_pair(path, dataset)
+                if provenance is None:
+                    return _report(
+                        path,
+                        dataset,
+                        status="FAIL",
+                        message="reference filename provenance is invalid",
+                    )
+            else:
+                provenance = ("", "")
             for values in reader:
                 source_rows += 1
                 try:
@@ -358,8 +377,15 @@ def _migrate_file(
             max_timestamp=max_timestamp,
         )
 
-    status = "PARTIAL" if invalid_rows or counts.conflicts else "PASS"
-    message = "imported" if status == "PASS" else "imported with invalid or conflicting rows"
+    if not valid_rows and invalid_rows:
+        status = "FAIL"
+        message = "no valid rows could be imported"
+    elif invalid_rows or counts.conflicts:
+        status = "PARTIAL"
+        message = "imported with invalid or conflicting rows"
+    else:
+        status = "PASS"
+        message = "imported"
     return _report(
         path,
         dataset,
@@ -393,6 +419,8 @@ def migrate_directory(
     try:
         store = MarketHistoryStore(database)
     except Exception as exc:
+        if not candidates:
+            return [_report(database, None, status="FAIL", message=f"database open failed: {exc}")]
         return [
             _report(path, dataset, status="FAIL", message=f"database open failed: {exc}")
             for path, dataset in candidates

@@ -141,11 +141,40 @@ def test_invalid_numeric_row_is_counted_and_valid_rows_still_import(tmp_path: Pa
     assert report.status == "PARTIAL"
 
 
+def test_all_invalid_rows_fail_without_recording_a_migration_timestamp(tmp_path: Path):
+    src = tmp_path / "logs"
+    src.mkdir()
+    database = tmp_path / "history.sqlite"
+    name = "samples-v2-SNDK-lighter-rh.csv"
+    bad = sample_row()
+    bad[4] = "not-a-price"
+    write_csv(src / name, SAMPLE_HEADER, [bad])
+
+    report = report_for(migrate_directory(src, database, {}), name)
+
+    assert report.status == "FAIL"
+    with sqlite3.connect(database) as conn:
+        assert conn.execute("SELECT value FROM meta WHERE key='last_migration_at_utc'").fetchone() is None
+
+
 def test_unknown_schema_fails_closed(tmp_path: Path):
     src = tmp_path / "logs"
     src.mkdir()
     database = tmp_path / "history.sqlite"
     name = "samples-v2-SNDK-lighter-rh.csv"
+    write_csv(src / name, ["timestamp", "price"], [[1, 100]])
+
+    report = report_for(migrate_directory(src, database, {}), name)
+
+    assert report.status == "FAIL"
+    assert report.inserted_rows == 0
+
+
+def test_unknown_sample_schema_fails_before_provenance_resolution(tmp_path: Path):
+    src = tmp_path / "logs"
+    src.mkdir()
+    database = tmp_path / "history.sqlite"
+    name = "samples-v2.csv"
     write_csv(src / name, ["timestamp", "price"], [[1, 100]])
 
     report = report_for(migrate_directory(src, database, {}), name)
@@ -165,6 +194,32 @@ def test_ambiguous_samples_without_companion_needs_mapping(tmp_path: Path):
 
     assert report.status == "NEEDS_MAPPING"
     assert report.inserted_rows == 0
+
+
+def test_malformed_companion_minutes_is_unresolved_without_crashing(tmp_path: Path):
+    src = tmp_path / "logs"
+    src.mkdir()
+    database = tmp_path / "history.sqlite"
+    name = "samples-v2.csv"
+    write_csv(src / name, SAMPLE_HEADER, [sample_row()])
+    write_csv(src / "minutes.csv", MINUTE_HEADER, [[1_699_999_980]])
+
+    report = report_for(migrate_directory(src, database, {}), name)
+
+    assert report.status == "NEEDS_MAPPING"
+    assert report.inserted_rows == 0
+
+
+def test_database_open_failure_with_no_candidates_reports_fail(tmp_path: Path):
+    source = tmp_path / "empty-logs"
+    source.mkdir()
+    database = tmp_path / "not-a-sqlite-database"
+    database.write_text("not sqlite")
+
+    reports = migrate_directory(source, database, {})
+
+    assert len(reports) == 1
+    assert reports[0].status == "FAIL"
 
 
 def test_explicit_samples_mapping_succeeds(tmp_path: Path):
