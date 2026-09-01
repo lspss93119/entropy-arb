@@ -204,24 +204,27 @@ class MarketHistoryStore:
         return InsertCounts(*counts)
 
     def flush(self) -> FlushReport:
+        # Keep the buffer lock through commit and prefix removal.  This makes
+        # concurrent flushes and appends observe one linearized operation.
         with self._buffer_lock:
             snapshot = {name: tuple(rows) for name, rows in self._buffers.items() if rows}
-        if not snapshot:
-            return FlushReport(True, {})
-        try:
-            with self._db_lock:
-                self._conn.execute("BEGIN")
-                results = {name: self._write(name, rows) for name, rows in snapshot.items()}
-                self._conn.commit()
-            with self._buffer_lock:
+            if not snapshot:
+                return FlushReport(True, {})
+            try:
+                with self._db_lock:
+                    self._conn.execute("BEGIN")
+                    try:
+                        results = {name: self._write(name, rows) for name, rows in snapshot.items()}
+                        self._conn.commit()
+                    except Exception:
+                        self._conn.rollback()
+                        raise
                 for name, rows in snapshot.items():
                     del self._buffers[name][:len(rows)]
-            return FlushReport(True, results)
-        except sqlite3.Error:
-            with self._db_lock:
-                self._conn.rollback()
-            logger.exception("market-history flush failed")
-            return FlushReport(False, {})
+                return FlushReport(True, results)
+            except sqlite3.Error:
+                logger.exception("market-history flush failed")
+                return FlushReport(False, {})
 
     def import_rows(self, dataset: str, rows: Sequence[object]) -> InsertCounts:
         if dataset not in _SPECS:

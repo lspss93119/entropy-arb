@@ -1,7 +1,18 @@
 import sqlite3
+import threading
+from time import sleep
 from pathlib import Path
 
-from entropy_arb.storage import MarketHistoryStore, MinuteRow, SampleRow
+import pytest
+
+from entropy_arb.storage import (
+    EntropyReferenceRow,
+    HedgeReferenceRow,
+    InsertCounts,
+    MarketHistoryStore,
+    MinuteRow,
+    SampleRow,
+)
 
 
 def sample(ts: int = 1_700_000_000_000, premium: float = 10.0) -> SampleRow:
@@ -118,3 +129,70 @@ def test_flush_transaction_rolls_back_all_datasets_and_keeps_buffers(tmp_path: P
     with sqlite3.connect(db) as conn:
         assert conn.execute("SELECT COUNT(*) FROM samples").fetchone() == (1,)
         assert conn.execute("SELECT COUNT(*) FROM minutes").fetchone() == (1,)
+
+
+def test_reference_rows_write_with_full_payload_primary_keys(tmp_path: Path):
+    store = MarketHistoryStore(tmp_path / "history.sqlite")
+    entropy = EntropyReferenceRow("SNDK", "lighter-rh", 10, 100.0, 100.1)
+    hedge = HedgeReferenceRow("SNDK", "lighter-rh", 10, 11, 99.9, 100.0)
+    assert store.import_rows("entropy_reference", [entropy, entropy]) == InsertCounts(
+        inserted=1, duplicates=1, conflicts=0
+    )
+    assert store.import_rows("hedge_reference", [hedge]).inserted == 1
+    store.close()
+    with sqlite3.connect(tmp_path / "history.sqlite") as conn:
+        assert conn.execute("PRAGMA table_info(entropy_reference)").fetchall()
+        assert conn.execute("SELECT COUNT(*) FROM hedge_reference").fetchone() == (1,)
+
+
+def test_import_meta_cap_pragmas_and_unknown_dataset(tmp_path: Path, caplog):
+    store = MarketHistoryStore(tmp_path / "history.sqlite", max_pending_rows_per_dataset=1)
+    assert store._conn.execute("PRAGMA busy_timeout").fetchone() == (10000,)
+    assert store._conn.execute("PRAGMA foreign_keys").fetchone() == (1,)
+    store.set_meta("owner", "research")
+    store.set_meta("owner", "updated")
+    assert store._conn.execute("SELECT value FROM meta WHERE key='owner'").fetchone() == ("updated",)
+    store.append_sample(sample())
+    with caplog.at_level("CRITICAL"):
+        store.append_sample(sample(ts=2))
+    assert store.pending_rows["samples"] == 1
+    assert store.dropped_rows["samples"] == 1
+    assert "dropped 1" in caplog.text
+    with pytest.raises(ValueError):
+        store.import_rows("unknown", [])
+    store._conn.execute(
+        "CREATE TRIGGER fail_import BEFORE INSERT ON samples "
+        "BEGIN SELECT RAISE(ABORT, 'forced import failure'); END"
+    )
+    with pytest.raises(sqlite3.IntegrityError):
+        store.import_rows("samples", [sample(ts=3)])
+    store._conn.execute("DROP TRIGGER fail_import")
+    store.close()
+
+
+def test_flush_serializes_append_until_prefix_removal(tmp_path: Path):
+    store = MarketHistoryStore(tmp_path / "history.sqlite")
+    store.append_sample(sample())
+    entered = threading.Event()
+    release = threading.Event()
+    original = store._write
+
+    def blocked(dataset, rows):
+        entered.set()
+        release.wait(timeout=2)
+        return original(dataset, rows)
+
+    store._write = blocked  # type: ignore[method-assign]
+    thread = threading.Thread(target=store.flush)
+    thread.start()
+    assert entered.wait(timeout=2)
+    append_thread = threading.Thread(target=lambda: store.append_sample(sample(ts=2)))
+    append_thread.start()
+    sleep(0.05)
+    assert append_thread.is_alive()
+    release.set()
+    thread.join(timeout=2)
+    append_thread.join(timeout=2)
+    assert store.pending_rows["samples"] == 1
+    assert store.flush().datasets["samples"].inserted == 1
+    store.close()
