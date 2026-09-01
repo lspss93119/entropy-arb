@@ -159,7 +159,7 @@ Minute aggregates retain these fields:
 
 | column | meaning |
 |---|---|
-| `minute_ts`, `time_utc` | minute start (epoch seconds, ISO UTC) |
+| `minute_ts` | minute start (epoch seconds); `time_utc` can be derived when needed |
 | `entropy_bid/ask`, `hedge_bid/ask` | last fresh top-of-book of the minute |
 | `premium_open/high/low/close/mean/std_bps` | mid-to-mid premium of Entropy over the hedge |
 | `sell_edge_mean/max_bps` | executable premium for SELL entropy (entropy bid / hedge ask − 1) |

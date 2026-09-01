@@ -210,6 +210,74 @@ def _write_process(db_path: str, symbol: str, start_ms: int, count: int) -> None
     store.close()
 
 
+def _fresh_database_process(
+    db_path: str,
+    barrier,
+    result_queue,
+    worker_id: int,
+) -> None:
+    """Race first-open schema initialization in an independent process."""
+    try:
+        barrier.wait(timeout=20)
+        store = MarketHistoryStore(db_path)
+        store.append_sample(
+            SampleRow(
+                **{
+                    **sample(ts=1_700_100_000_000 + worker_id).__dict__,
+                    "symbol": f"W{worker_id}",
+                }
+            )
+        )
+        report = store.flush()
+        if not report.ok:
+            raise RuntimeError("fresh-database flush failed")
+        store.close()
+    except BaseException as exc:
+        result_queue.put((worker_id, type(exc).__name__, str(exc)))
+        raise
+    else:
+        result_queue.put((worker_id, "ok", ""))
+
+
+def test_fresh_database_concurrent_initialization_is_serialized(tmp_path: Path):
+    """Independent processes can initialize and write a brand-new database."""
+    db = tmp_path / "fresh-market-history.sqlite"
+    ctx = mp.get_context("spawn")
+    workers = 8
+    barrier = ctx.Barrier(workers)
+    result_queue = ctx.Queue()
+    processes = [
+        ctx.Process(
+            target=_fresh_database_process,
+            args=(str(db), barrier, result_queue, worker_id),
+        )
+        for worker_id in range(workers)
+    ]
+    for process in processes:
+        process.start()
+    results = []
+    try:
+        for process in processes:
+            process.join(30)
+            if process.is_alive():
+                process.terminate()
+                process.join(5)
+        for _ in range(workers):
+            results.append(result_queue.get(timeout=5))
+    finally:
+        for process in processes:
+            if process.is_alive():
+                process.terminate()
+                process.join(5)
+
+    assert all(process.exitcode == 0 for process in processes), results
+    assert len(results) == workers, results
+    assert all(result[1] == "ok" for result in results), results
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("PRAGMA quick_check").fetchone() == ("ok",)
+        assert conn.execute("SELECT COUNT(*) FROM samples").fetchone() == (workers,)
+
+
 def test_two_real_processes_write_same_wal_database(tmp_path: Path):
     db = tmp_path / "market-history.sqlite"
     MarketHistoryStore(db).close()

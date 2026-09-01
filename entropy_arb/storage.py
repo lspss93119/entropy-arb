@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -123,7 +124,47 @@ _CREATE = {
 }
 
 
+def _is_lock_error(exc: sqlite3.OperationalError) -> bool:
+    """Return whether *exc* is one of SQLite's retryable lock errors."""
+    code = getattr(exc, "sqlite_errorcode", None)
+    if isinstance(code, int):
+        primary_code = code & 0xFF
+        return primary_code in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+    message = str(exc).lower()
+    return "busy" in message or "locked" in message
+
+
 class MarketHistoryStore:
+    def _configure_wal(self, busy_timeout_ms: int) -> None:
+        """Enable WAL, retrying only transient first-open lock failures.
+
+        SQLite's WAL mode transition is a database-wide operation.  On a
+        brand-new path several processes can reach it at the same time before
+        any schema transaction exists.  The explicit retry loop keeps that
+        initialization race bounded by the existing ten-second policy while
+        leaving the normal connection busy timeout in place after WAL is set.
+        """
+        timeout_ms = max(0, int(busy_timeout_ms))
+        retry_budget_s = min(timeout_ms, DEFAULT_BUSY_TIMEOUT_MS) / 1000.0
+        deadline = time.monotonic() + retry_budget_s
+        # PRAGMA journal_mode=WAL may otherwise use a separate SQLite busy
+        # handler whose wait is not accounted for by our explicit deadline.
+        self._conn.execute("PRAGMA busy_timeout=0")
+        delay_s = 0.01
+        while True:
+            try:
+                self._conn.execute("PRAGMA journal_mode=WAL")
+                break
+            except sqlite3.OperationalError as exc:
+                if not _is_lock_error(exc):
+                    raise
+                remaining_s = deadline - time.monotonic()
+                if remaining_s <= 0:
+                    raise
+                time.sleep(min(delay_s, remaining_s))
+                delay_s = min(delay_s * 2.0, 0.25)
+        self._conn.execute(f"PRAGMA busy_timeout={timeout_ms}")
+
     def __init__(self, path: str | Path, *, busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS,
                  max_pending_rows_per_dataset: int = MAX_PENDING_ROWS_PER_DATASET):
         self.path = Path(path)
@@ -135,27 +176,32 @@ class MarketHistoryStore:
         self._buffers = {name: [] for name in _SPECS}
         self._dropped_rows = {name: 0 for name in _SPECS}
         self._conn = sqlite3.connect(self.path, check_same_thread=False)
-        self._conn.execute(f"PRAGMA busy_timeout={int(busy_timeout_ms)}")
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA synchronous=FULL")
-        self._conn.execute("PRAGMA foreign_keys=ON")
-        with self._db_lock:
-            self._conn.execute("BEGIN")
-            try:
-                for sql in _CREATE.values():
-                    self._conn.execute(sql)
-                current = self._conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
-                if current and current[0] != SCHEMA_VERSION:
-                    raise RuntimeError(f"unsupported market-history schema version: {current[0]}")
-                if current is None:
-                    now = datetime.now(timezone.utc).isoformat()
-                    self._conn.execute("INSERT INTO meta(key,value) VALUES('schema_version',?)", (SCHEMA_VERSION,))
-                    self._conn.execute("INSERT INTO meta(key,value) VALUES('created_at_utc',?)", (now,))
-                self._conn.commit()
-            except Exception:
-                self._conn.rollback()
-                self._conn.close()
-                raise
+        try:
+            self._conn.execute(f"PRAGMA busy_timeout={int(busy_timeout_ms)}")
+            self._configure_wal(busy_timeout_ms)
+            self._conn.execute("PRAGMA synchronous=FULL")
+            self._conn.execute("PRAGMA foreign_keys=ON")
+            with self._db_lock:
+                # Reserve the write slot before bootstrapping any schema so
+                # concurrent first-open processes serialize cleanly.
+                self._conn.execute("BEGIN IMMEDIATE")
+                try:
+                    for sql in _CREATE.values():
+                        self._conn.execute(sql)
+                    current = self._conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+                    if current and current[0] != SCHEMA_VERSION:
+                        raise RuntimeError(f"unsupported market-history schema version: {current[0]}")
+                    if current is None:
+                        now = datetime.now(timezone.utc).isoformat()
+                        self._conn.execute("INSERT INTO meta(key,value) VALUES('schema_version',?)", (SCHEMA_VERSION,))
+                        self._conn.execute("INSERT INTO meta(key,value) VALUES('created_at_utc',?)", (now,))
+                    self._conn.commit()
+                except Exception:
+                    self._conn.rollback()
+                    raise
+        except Exception:
+            self._conn.close()
+            raise
 
     @property
     def pending_rows(self) -> dict[str, int]:

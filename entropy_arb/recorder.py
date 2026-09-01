@@ -2,7 +2,7 @@
 
 While the bot runs (live or --record-only), both venues' actual order books
 are sampled once per second. Each valid BBO sample is persisted for persistence
-research and aggregated into one CSV row per minute. These datasets support
+research and aggregated into one SQLite minute row. These datasets support
 offline market analysis and explicit strategy parameter selection in
 config.yaml; the recorder never selects a strategy.
 
