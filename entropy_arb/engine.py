@@ -20,6 +20,7 @@ import logging
 import os
 import time
 from collections import deque
+from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 import aiohttp
@@ -43,6 +44,21 @@ CSV_HEADER = ["ts", "direction", "buy_venue", "sell_venue", "qty",
               "buy_status", "sell_status", "fill_edge_usd"]
 BALANCE_POLL_SEC = 30.0
 REFERENCE_HEDGE_KEYS = frozenset(("lighter", "lighter-rh"))
+
+
+@dataclass
+class _ExecutionContext:
+    """In-memory accounting context for one execution and its hedge."""
+
+    execution_id: str
+    trade: dict
+    residual_qty: float
+    hedge_is_sell: bool
+    realized_before_hedge: Optional[float]
+    hedge_filled_qty: float = 0.0
+    hedge_priced_qty: float = 0.0
+    hedge_result: float = 0.0
+    hedge_notional: float = 0.0
 
 
 class Engine:
@@ -93,6 +109,8 @@ class Engine:
         self._venue_fetch_fails: Dict[str, int] = {}
         # per-execution records for the dashboard (newest last)
         self.recent_trades: deque = deque(maxlen=50)
+        self._execution_seq = 0
+        self._execution_contexts: Dict[str, _ExecutionContext] = {}
 
     # ------------------------------------------------------------- utilities
 
@@ -445,9 +463,11 @@ class Engine:
         caller), then release them and settle the aftermath: unresolved
         outcomes escalate to reconcile, everything else gets a net-delta
         check."""
+        execution_id = self._new_execution_id()
         unresolved = False
         try:
-            unresolved = await self._execute(buy, sell, plan, state)
+            unresolved = await self._execute(
+                buy, sell, plan, state, execution_id=execution_id)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -458,7 +478,7 @@ class Engine:
         if unresolved:
             self._reconcile_evt.set()
         else:
-            await self._maybe_hedge()
+            await self._maybe_hedge(execution_id)
         self._update_evt.set()  # freed venues may have a queued opportunity
 
     def _scan(self, now: float):
@@ -527,12 +547,14 @@ class Engine:
     # ------------------------------------------------------------- execution
 
     async def _execute(self, buy, sell, plan: ArbPlan,
-                       state: StrategyState) -> bool:
+                       state: StrategyState,
+                       execution_id: Optional[str] = None) -> bool:
         """Send both legs and settle the fills. Both venue locks are held by
         the caller. Returns True when an outcome is unresolved and the caller
         must escalate to reconcile."""
         if self.halted:
             return False
+        execution_id = execution_id or self._new_execution_id()
         cfg = self.cfg
         inv_bps = self._inv_add_bps(buy, sell)
         direction = "sell_entropy" if sell.key == "entropy" else "buy_entropy"
@@ -608,30 +630,168 @@ class Engine:
         if sent_ok:
             self.trades += 1
             self.total_exp_edge += plan.exp_edge_usd
-        self._record_trade(direction, plan,
-                           None if unresolved else fill_edge,
-                           f"{binfo['status']}/{sinfo['status']}", sent_ok)
+        initial_status = f"{binfo['status']}/{sinfo['status']}"
+        realized_before_hedge = self._realized_leg_result(
+            bfill,
+            sfill,
+            binfo.get("avg_px"),
+            sinfo.get("avg_px"),
+            plan.buy_fee,
+            plan.sell_fee,
+        )
+        residual_qty = abs(bfill - sfill)
+        has_fills = bfill > 0.0 or sfill > 0.0
+        actual: Optional[float]
+        if unresolved:
+            actual = None
+            lifecycle_status = f"{initial_status} → pending"
+        elif residual_qty > 1e-12:
+            actual = None
+            lifecycle_status = f"{initial_status} → hedging"
+        elif realized_before_hedge is None and has_fills:
+            actual = None
+            lifecycle_status = f"{initial_status} → pending"
+        else:
+            actual = realized_before_hedge or 0.0
+            lifecycle_status = initial_status
+        trade = self._record_trade(
+            direction,
+            plan,
+            None if unresolved else fill_edge,
+            lifecycle_status,
+            sent_ok,
+            execution_id=execution_id,
+            actual=actual,
+        )
+        if unresolved or residual_qty > 1e-12:
+            self._execution_contexts[execution_id] = _ExecutionContext(
+                execution_id=execution_id,
+                trade=trade,
+                residual_qty=residual_qty,
+                hedge_is_sell=bfill > sfill,
+                realized_before_hedge=realized_before_hedge,
+            )
         self._log_csv(direction, buy, sell, plan, sent_ok, bfill, sfill,
                       binfo["status"], sinfo["status"], fill_edge, inv_bps,
                       state)
         self.last_trade_ts = time.time()
         return bool(unresolved)
 
+    def _new_execution_id(self) -> str:
+        self._execution_seq += 1
+        return f"exec-{self._execution_seq}"
+
+    @staticmethod
+    def _realized_leg_result(buy_fill: float, sell_fill: float,
+                             buy_price: Optional[float],
+                             sell_price: Optional[float], buy_fee: float,
+                             sell_fee: float) -> Optional[float]:
+        if buy_fill > 0.0 and buy_price is None:
+            return None
+        if sell_fill > 0.0 and sell_price is None:
+            return None
+        return (
+            sell_fill * (sell_price or 0.0) * (1.0 - sell_fee)
+            - buy_fill * (buy_price or 0.0) * (1.0 + buy_fee)
+        )
+
     def _record_trade(self, direction: str, plan: ArbPlan, fill_edge,
-                      status: str, ok: bool) -> None:
-        self.recent_trades.append({
+                      status: str, ok: bool, *, execution_id: str,
+                      actual: Optional[float]) -> dict:
+        trade = {
             "ts": time.time(), "direction": direction, "qty": plan.qty,
             "notional": plan.buy_notional,
             "prem_bps": plan.marginal_premium_bps,
-            "exp": plan.exp_edge_usd, "fill": fill_edge, "status": status,
-            "ok": ok})
+            "exp": plan.exp_edge_usd, "fill": fill_edge, "actual": actual,
+            "status": status, "ok": ok, "execution_id": execution_id,
+            "hedge_venue": None, "hedge_side": None,
+            "hedge_filled_qty": 0.0, "hedge_avg_px": None,
+        }
+        self.recent_trades.append(trade)
+        return trade
 
-    async def _maybe_hedge(self) -> None:
+    async def _maybe_hedge(self, execution_id: Optional[str] = None) -> None:
         net = sum(v.position for v in self.venues.values())
         if abs(net) > self.cfg.net_tolerance_base:
-            await self._hedge(net)
+            execution_id = self._select_hedge_context(execution_id, net)
+            await self._hedge(net, execution_id=execution_id)
 
-    async def _hedge(self, net: float) -> None:
+    def _select_hedge_context(self, preferred_id: Optional[str], net: float) -> Optional[str]:
+        """Choose the pending execution whose residual this hedge can settle.
+
+        The normal path supplies the current execution id.  Reconciliation can
+        hedge an older residual, though, so fall back to the oldest pending
+        context with the same inventory direction rather than losing the
+        execution-to-hedge correlation.
+        """
+        hedge_is_sell = net > 0.0
+        if preferred_id is not None:
+            preferred = self._execution_contexts.get(preferred_id)
+            if (preferred is not None
+                    and preferred.hedge_is_sell == hedge_is_sell
+                    and preferred.hedge_filled_qty < preferred.residual_qty):
+                return preferred_id
+        for execution_id, context in self._execution_contexts.items():
+            if (context.hedge_is_sell == hedge_is_sell
+                    and context.hedge_filled_qty < context.residual_qty):
+                return execution_id
+        return None
+
+    def _note_hedge_result(self, execution_id: Optional[str], v, is_sell: bool,
+                           info: dict) -> None:
+        if execution_id is None:
+            return
+        context = self._execution_contexts.get(execution_id)
+        if context is None or context.hedge_is_sell != is_sell:
+            return
+        trade = context.trade
+        trade["hedge_venue"] = v.name
+        trade["hedge_side"] = "SELL" if is_sell else "BUY"
+        if info.get("err") is not None or info.get("unresolved"):
+            trade["status"] = "hedge-unresolved"
+            return
+        try:
+            filled = max(float(info.get("filled_base") or 0.0), 0.0)
+        except (TypeError, ValueError):
+            filled = 0.0
+        if filled <= 0.0:
+            trade["status"] = "hedge-unresolved"
+            return
+
+        remaining = max(context.residual_qty - context.hedge_filled_qty, 0.0)
+        applied = min(filled, remaining)
+        context.hedge_filled_qty += applied
+        trade["hedge_filled_qty"] = context.hedge_filled_qty
+        try:
+            avg_px = (float(info["avg_px"])
+                      if info.get("avg_px") is not None else None)
+        except (TypeError, ValueError):
+            avg_px = None
+        if applied > 0.0 and avg_px is not None:
+            context.hedge_priced_qty += applied
+            context.hedge_notional += applied * avg_px
+            fee = v.fee_bps / 1e4
+            context.hedge_result += (
+                applied * avg_px * (1.0 - fee)
+                if is_sell else -applied * avg_px * (1.0 + fee)
+            )
+            trade["hedge_avg_px"] = (
+                context.hedge_notional / context.hedge_priced_qty
+            )
+        if context.hedge_filled_qty + 1e-12 < context.residual_qty:
+            trade["status"] = "hedging"
+            return
+        if (context.realized_before_hedge is None
+                or context.hedge_priced_qty + 1e-12 < context.hedge_filled_qty):
+            trade["status"] = "hedged (actual unavailable)"
+            self._execution_contexts.pop(execution_id, None)
+            return
+        trade["actual"] = context.realized_before_hedge + context.hedge_result
+        trade["status"] = "hedged"
+        self._execution_contexts.pop(execution_id, None)
+
+    async def _hedge(self, net: float,
+                     execution_id: Optional[str] = None) -> None:
         """Reduce the venue that carries the imbalance back toward net zero
         (reduce-only taker with hedge_slippage_bps price protection)."""
         cfg = self.cfg
@@ -671,6 +831,8 @@ class Engine:
                               info.get("err") or "unresolved")
                     if str(info.get("err", "")).startswith("RATE_LIMITED"):
                         self._mark_limited(v)
+                    self._note_hedge_result(
+                        execution_id, v, is_sell, info)
                     self._reconcile_evt.set()
                 else:
                     fill = info["filled_base"]
@@ -683,6 +845,8 @@ class Engine:
                         v.volume_usd += fill * px
                     log.info("[HEDGE SETTLED] %s %s %.6g/%.6g",
                              v.name, info["status"], fill, qty)
+                    self._note_hedge_result(
+                        execution_id, v, is_sell, info)
                 v.last_traded_ts = time.time()
             finally:
                 lk.release()

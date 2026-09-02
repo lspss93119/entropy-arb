@@ -107,18 +107,32 @@ def test_renders_key_numbers():
     eng.recent_trades.append({
         "ts": time.time(), "direction": "sell_entropy", "qty": 0.5,
         "notional": 50.0, "prem_bps": 15.0, "exp": 0.07, "fill": 0.05,
+        "actual": 0.08,
         "status": "filled/filled", "ok": True})
     out = render(eng)
     for needle in ("ENTROPY", "RH", "SELL entropy", "BUY entropy",
                    "100.14", "99.99", "mid premium", "midline",
                    "7 / 1", "sell_entropy", "filled/filled",
-                   "$+10.00", "LIVE", "s ago"):
+                   "$+10.00", "$+0.0800", "LIVE", "s ago"):
         assert needle in out, f"{needle!r} missing from render"
+    assert "$+0.0500" not in out
     assert "render error" not in out
     # signal math: sell hurdle = midline+upper = +6 (zero fees, flat books)
     assert "+6.00" in out
     # buy hurdle = lower - midline = +1
     assert "+1.00" in out
+
+
+def test_trade_panel_displays_pending_actual_until_hedge_settles():
+    eng = make_engine()
+    eng.recent_trades.append({
+        "ts": time.time(), "direction": "sell_entropy", "qty": 0.5,
+        "notional": 50.0, "prem_bps": 15.0, "exp": 0.07, "fill": 0.0,
+        "actual": None, "status": "hedge-unresolved", "ok": True,
+    })
+    out = render(eng)
+    assert "pending" in out
+    assert "hedge-unresolved" in out
 
 
 def test_render_reads_strategy_state_without_mutation():

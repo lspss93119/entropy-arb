@@ -85,6 +85,64 @@ class StubVenue:
                             [{"px": str(ask), "sz": str(sz)}]])
 
 
+class SettlementVenue(StubVenue):
+    def __init__(self, key, label, responses, *, fee=0.0):
+        super().__init__(key, label, fee=fee)
+        self.volume_usd = 0.0
+        self.responses = list(responses)
+
+    def px_round(self, px, round_up):
+        return px
+
+    async def send_taker(self, **kwargs):
+        assert self.responses, f"unexpected send_taker on {self.key}"
+        return self.responses.pop(0)
+
+
+def execution_plan(qty=1.0, buy_px=100.0, sell_px=101.0,
+                   buy_fee=0.001, sell_fee=0.002):
+    return SimpleNamespace(
+        qty=qty,
+        buy_limit=buy_px,
+        sell_limit=sell_px,
+        buy_notional=qty * buy_px,
+        sell_notional=qty * sell_px,
+        q_max=qty,
+        q_max_notional=qty * buy_px,
+        marginal_premium_bps=(sell_px / buy_px - 1.0) * 1e4,
+        buy_fee=buy_fee,
+        sell_fee=sell_fee,
+        exp_edge_usd=(qty * sell_px * (1.0 - sell_fee)
+                      - qty * buy_px * (1.0 + buy_fee)),
+        gross_edge_usd=qty * (sell_px - buy_px),
+    )
+
+
+def settlement_info(status, filled_base, avg_px=None, *, unresolved=False,
+                    err=None):
+    return {
+        "status": status,
+        "filled_base": filled_base,
+        "avg_px": avg_px,
+        "err": err,
+        "unresolved": unresolved,
+    }
+
+
+def make_settlement_engine(buy_responses, sell_responses, *, buy_fee=10.0,
+                           sell_fee=20.0):
+    eng = Engine(make_cfg())
+    eng.hedge = SettlementVenue("hedge", "RH", buy_responses, fee=buy_fee)
+    eng.entropy = SettlementVenue("entropy", "ENTROPY", sell_responses,
+                                  fee=sell_fee)
+    eng.venues = {"entropy": eng.entropy, "hedge": eng.hedge}
+    eng._step, eng._min_base, eng._min_notional = 1e-4, 1e-4, 10.0
+    eng.hedge.set_book(99.0, 100.0)
+    eng.entropy.set_book(101.0, 102.0)
+    eng._log_csv = lambda *args, **kwargs: None
+    return eng
+
+
 def make_engine(**thr):
     cfg = make_cfg(**thr)
     eng = Engine(cfg)
@@ -395,6 +453,120 @@ def test_log_csv_records_captured_strategy_center(tmp_path):
     rows = trades_csv.read_text().strip().splitlines()
     assert rows[0].split(",")[12] == "midline_bps"
     assert rows[1].split(",")[12] == "7.500"
+
+
+def test_execution_actual_full_fill_equals_realized_fill_result():
+    eng = make_settlement_engine(
+        [settlement_info("filled", 1.0, 100.0)],
+        [settlement_info("filled", 1.0, 101.0)],
+    )
+    plan = execution_plan()
+
+    async def scenario():
+        await eng._execute(eng.hedge, eng.entropy, plan,
+                           eng.strategy.state(), execution_id="exec-full")
+
+    asyncio.run(scenario())
+    trade = eng.recent_trades[-1]
+    expected = 101.0 * (1.0 - plan.sell_fee) - 100.0 * (1.0 + plan.buy_fee)
+    assert trade["actual"] == pytest.approx(expected)
+    assert trade["actual"] == pytest.approx(trade["fill"])
+    assert eng.total_fill_edge == pytest.approx(expected)
+    assert trade["status"] == "filled/filled"
+
+
+def test_execution_actual_no_fill_is_zero():
+    eng = make_settlement_engine(
+        [settlement_info("canceled", 0.0)],
+        [settlement_info("canceled", 0.0)],
+    )
+
+    async def scenario():
+        await eng._execute(eng.hedge, eng.entropy, execution_plan(),
+                           eng.strategy.state(), execution_id="exec-none")
+
+    asyncio.run(scenario())
+    trade = eng.recent_trades[-1]
+    assert trade["actual"] == 0.0
+    assert trade["fill"] == 0.0
+    assert trade["status"] == "canceled/canceled"
+
+
+def test_execution_actual_pending_then_includes_successful_hedge():
+    eng = make_settlement_engine(
+        [settlement_info("filled", 1.0, 100.0),
+         settlement_info("filled", 1.0, 99.0)],
+        [settlement_info("canceled", 0.0)],
+    )
+    plan = execution_plan()
+    execution_id = "exec-hedge"
+
+    async def scenario():
+        await eng._execute(eng.hedge, eng.entropy, plan,
+                           eng.strategy.state(), execution_id=execution_id)
+        initial = eng.recent_trades[-1]
+        assert initial["execution_id"] == execution_id
+        assert initial["actual"] is None
+        assert initial["status"] == "filled/canceled → hedging"
+        await eng._maybe_hedge(execution_id)
+
+    asyncio.run(scenario())
+    trade = eng.recent_trades[-1]
+    expected = -100.0 * (1.0 + plan.buy_fee) + 99.0 * (1.0 - eng.hedge.fee_bps / 1e4)
+    assert trade["actual"] == pytest.approx(expected)
+    assert trade["actual"] != 0.0
+    assert trade["status"] == "hedged"
+    assert trade["hedge_venue"] == "RH"
+    assert trade["hedge_side"] == "SELL"
+    assert trade["hedge_filled_qty"] == pytest.approx(1.0)
+    assert trade["hedge_avg_px"] == pytest.approx(99.0)
+    assert eng.total_fill_edge == 0.0
+
+
+def test_execution_actual_partial_fill_includes_residual_hedge():
+    eng = make_settlement_engine(
+        [settlement_info("filled", 2.0, 100.0),
+         settlement_info("filled", 1.0, 98.0)],
+        [settlement_info("filled", 1.0, 101.0)],
+    )
+    plan = execution_plan(qty=2.0)
+    execution_id = "exec-partial"
+
+    async def scenario():
+        await eng._execute(eng.hedge, eng.entropy, plan,
+                           eng.strategy.state(), execution_id=execution_id)
+        assert eng.recent_trades[-1]["actual"] is None
+        await eng._maybe_hedge(execution_id)
+
+    asyncio.run(scenario())
+    trade = eng.recent_trades[-1]
+    matched = 101.0 * (1.0 - plan.sell_fee) - 100.0 * (1.0 + plan.buy_fee)
+    residual = -100.0 * (1.0 + plan.buy_fee) + 98.0 * (1.0 - eng.hedge.fee_bps / 1e4)
+    assert trade["actual"] == pytest.approx(matched + residual)
+    assert trade["fill"] == pytest.approx(matched)
+    assert eng.total_fill_edge == pytest.approx(matched)
+    assert trade["status"] == "hedged"
+
+
+def test_execution_actual_stays_pending_when_hedge_unresolved():
+    eng = make_settlement_engine(
+        [settlement_info("filled", 1.0, 100.0),
+         settlement_info("timeout", 0.0, unresolved=True)],
+        [settlement_info("canceled", 0.0)],
+    )
+    execution_id = "exec-unresolved"
+
+    async def scenario():
+        await eng._execute(eng.hedge, eng.entropy, execution_plan(),
+                           eng.strategy.state(), execution_id=execution_id)
+        await eng._maybe_hedge(execution_id)
+
+    asyncio.run(scenario())
+    trade = eng.recent_trades[-1]
+    assert trade["actual"] is None
+    assert trade["status"] == "hedge-unresolved"
+    assert trade["actual"] != 0.0
+    assert eng.total_fill_edge == 0.0
 
 
 def test_run_inner_logs_selected_stable_strategy_and_no_auto_selection(

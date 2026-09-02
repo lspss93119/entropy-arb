@@ -388,7 +388,9 @@ class Dashboard:
         eng = self.eng
         rows = list(eng.recent_trades)[-TRADE_ROWS:]
         exp_sum = sum(r["exp"] for r in rows)
-        fills = [r["fill"] for r in rows if r["fill"] is not None]
+        actuals = [r.get("actual") for r in rows]
+        actual_pending = any(value is None for value in actuals)
+        actual_sum = sum(value for value in actuals if value is not None)
         t = Table(box=box.SIMPLE_HEAD, expand=True, padding=(0, 1),
                   show_footer=bool(rows))
         t.add_column(self._t("time"),
@@ -400,14 +402,18 @@ class Dashboard:
         t.add_column(self._t("prem bps"), justify="right")
         t.add_column(self._t("expected $"), justify="right", footer=_usd(exp_sum))
         t.add_column(self._t("actual $"), justify="right",
-                     footer=_usd(sum(fills) if fills else None))
+                     footer=(Text("pending", style="yellow")
+                             if actual_pending else _usd(actual_sum)))
         t.add_column(self._t("status"))
         for r in reversed(rows):
             style = "green" if r["ok"] else "bold red"
+            actual = r.get("actual")
             t.add_row(time.strftime("%H:%M:%S", time.localtime(r["ts"])),
                       r["direction"], f"{r['qty']:.6g}",
                       f"${r['notional']:,.0f}", f"{r['prem_bps']:+.1f}",
-                      _usd(r["exp"]), _usd(r["fill"]),
+                      _usd(r["exp"]),
+                      (Text("pending", style="yellow")
+                       if actual is None else _usd(actual)),
                       Text(r["status"], style=style))
         if not rows:
             t.add_row(Text(self._t("no executions yet"), style="dim"),
