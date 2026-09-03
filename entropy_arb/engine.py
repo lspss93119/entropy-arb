@@ -42,6 +42,13 @@ CSV_HEADER = ["ts", "direction", "buy_venue", "sell_venue", "qty",
               "exp_edge_usd", "gross_edge_usd", "marginal_premium_bps",
               "midline_bps", "inv_add_bps", "ok", "buy_fill", "sell_fill",
               "buy_status", "sell_status", "fill_edge_usd"]
+EXECUTION_TELEMETRY_HEADER = [
+    "event_ts", "event_type", "timestamp", "execution_id", "direction",
+    "expected_edge_usd", "fill_edge_usd", "actual_usd", "lifecycle_status",
+    "buy_venue", "sell_venue", "requested_qty", "buy_filled_qty",
+    "sell_filled_qty", "buy_avg_px", "sell_avg_px", "hedge_venue",
+    "hedge_side", "hedge_filled_qty", "hedge_avg_px", "hedge_status",
+]
 BALANCE_POLL_SEC = 30.0
 REFERENCE_HEDGE_KEYS = frozenset(("lighter", "lighter-rh"))
 
@@ -111,6 +118,9 @@ class Engine:
         self.recent_trades: deque = deque(maxlen=50)
         self._execution_seq = 0
         self._execution_contexts: Dict[str, _ExecutionContext] = {}
+        # Optional override is useful for tests; live defaults to a separate
+        # append-only file beside the configured engine log.
+        self.execution_telemetry_csv: Optional[str] = None
 
     # ------------------------------------------------------------- utilities
 
@@ -211,6 +221,18 @@ class Engine:
             self.market_history = MarketHistoryStore(cfg.recorder_database)
 
         live = not self.record_only
+        if live:
+            log.info(
+                "execution config: leg_slippage=%.2fbps "
+                "hedge_slippage=%.2fbps persistence=%.2fs cooldown=%.2fs "
+                "max_order=$%g inventory_scale=%.2fbps",
+                cfg.leg_slippage_bps,
+                cfg.hedge_slippage_bps,
+                cfg.premium_persist_sec,
+                cfg.cooldown_sec,
+                cfg.max_order_notional,
+                cfg.inventory_scale_bps,
+            )
         if live:
             if not cfg.creds_complete:
                 raise RuntimeError(
@@ -663,6 +685,21 @@ class Engine:
             execution_id=execution_id,
             actual=actual,
         )
+        needs_followup = unresolved or residual_qty > 1e-12 or actual is None
+        trade.update({
+            "buy_venue": buy.name,
+            "sell_venue": sell.name,
+            "requested_qty": plan.qty,
+            "buy_filled_qty": bfill,
+            "sell_filled_qty": sfill,
+            "buy_avg_px": binfo.get("avg_px"),
+            "sell_avg_px": sinfo.get("avg_px"),
+            "hedge_status": "pending" if needs_followup else "not_required",
+        })
+        self._persist_execution_event(
+            trade,
+            "execution_opened" if needs_followup else "execution_finalized",
+        )
         if unresolved or residual_qty > 1e-12:
             self._execution_contexts[execution_id] = _ExecutionContext(
                 execution_id=execution_id,
@@ -710,6 +747,70 @@ class Engine:
         self.recent_trades.append(trade)
         return trade
 
+    def _execution_telemetry_path(self) -> str:
+        if self.execution_telemetry_csv is not None:
+            return self.execution_telemetry_csv
+        log_dir = os.path.dirname(self.cfg.log_file) or "logs"
+        return os.path.join(
+            log_dir,
+            f"executions-{self.cfg.symbol}-{self.cfg.hedge_venue}.csv",
+        )
+
+    def _persist_execution_event(self, trade: dict, event_type: str) -> None:
+        """Append a complete lifecycle snapshot without affecting trading.
+
+        Rows are append-only; offline consumers recover the current/final
+        state by taking the last row for each execution_id.
+        """
+        try:
+            path = self._execution_telemetry_path()
+            directory = os.path.dirname(path)
+            if directory:
+                os.makedirs(directory, exist_ok=True)
+            new = not os.path.exists(path) or os.path.getsize(path) == 0
+            with open(path, "a", newline="") as fh:
+                writer = csv.writer(fh)
+                if new:
+                    writer.writerow(EXECUTION_TELEMETRY_HEADER)
+                writer.writerow([
+                    time.time(),
+                    event_type,
+                    trade.get("ts"),
+                    trade.get("execution_id"),
+                    trade.get("direction"),
+                    trade.get("exp"),
+                    trade.get("fill"),
+                    trade.get("actual"),
+                    trade.get("status"),
+                    trade.get("buy_venue"),
+                    trade.get("sell_venue"),
+                    trade.get("requested_qty"),
+                    trade.get("buy_filled_qty"),
+                    trade.get("sell_filled_qty"),
+                    trade.get("buy_avg_px"),
+                    trade.get("sell_avg_px"),
+                    trade.get("hedge_venue"),
+                    trade.get("hedge_side"),
+                    trade.get("hedge_filled_qty"),
+                    trade.get("hedge_avg_px"),
+                    trade.get("hedge_status"),
+                ])
+        except Exception:
+            # Telemetry must never interrupt order settlement or hedging.
+            log.exception("execution telemetry write failed")
+
+    def _mark_hedge_started(self, execution_id: Optional[str]) -> None:
+        if execution_id is None:
+            return
+        context = self._execution_contexts.get(execution_id)
+        if context is None:
+            return
+        trade = context.trade
+        if trade.get("hedge_status") == "hedging":
+            return
+        trade["hedge_status"] = "hedging"
+        self._persist_execution_event(trade, "hedge_started")
+
     async def _maybe_hedge(self, execution_id: Optional[str] = None) -> None:
         net = sum(v.position for v in self.venues.values())
         if abs(net) > self.cfg.net_tolerance_base:
@@ -748,14 +849,18 @@ class Engine:
         trade["hedge_venue"] = v.name
         trade["hedge_side"] = "SELL" if is_sell else "BUY"
         if info.get("err") is not None or info.get("unresolved"):
+            trade["hedge_status"] = "unresolved"
             trade["status"] = "hedge-unresolved"
+            self._persist_execution_event(trade, "execution_finalized")
             return
         try:
             filled = max(float(info.get("filled_base") or 0.0), 0.0)
         except (TypeError, ValueError):
             filled = 0.0
         if filled <= 0.0:
+            trade["hedge_status"] = "unresolved"
             trade["status"] = "hedge-unresolved"
+            self._persist_execution_event(trade, "execution_finalized")
             return
 
         remaining = max(context.residual_qty - context.hedge_filled_qty, 0.0)
@@ -779,15 +884,21 @@ class Engine:
                 context.hedge_notional / context.hedge_priced_qty
             )
         if context.hedge_filled_qty + 1e-12 < context.residual_qty:
+            trade["hedge_status"] = "partial"
             trade["status"] = "hedging"
+            self._persist_execution_event(trade, "hedge_settled")
             return
         if (context.realized_before_hedge is None
                 or context.hedge_priced_qty + 1e-12 < context.hedge_filled_qty):
+            trade["hedge_status"] = "filled"
             trade["status"] = "hedged (actual unavailable)"
+            self._persist_execution_event(trade, "execution_finalized")
             self._execution_contexts.pop(execution_id, None)
             return
         trade["actual"] = context.realized_before_hedge + context.hedge_result
+        trade["hedge_status"] = "filled"
         trade["status"] = "hedged"
+        self._persist_execution_event(trade, "execution_finalized")
         self._execution_contexts.pop(execution_id, None)
 
     async def _hedge(self, net: float,
@@ -818,6 +929,7 @@ class Engine:
                 else v.px_round(ref * (1 + slip), True)
             if qty * limit < max(cfg.min_order_notional, v.min_quote):
                 continue
+            self._mark_hedge_started(execution_id)
             await lk.acquire()  # verified free, no awaits since: fast path
             try:
                 log.warning("[HEDGE] net %+.6g — %s %.6g on %s @%.6g",

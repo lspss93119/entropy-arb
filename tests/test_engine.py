@@ -3,6 +3,7 @@
 Run:  python3 -m pytest tests/  (or  python3 tests/test_engine.py)
 """
 import asyncio
+import csv
 import logging
 import os
 import sys
@@ -130,8 +131,10 @@ def settlement_info(status, filled_base, avg_px=None, *, unresolved=False,
 
 
 def make_settlement_engine(buy_responses, sell_responses, *, buy_fee=10.0,
-                           sell_fee=20.0):
+                           sell_fee=20.0, telemetry_path=None):
     eng = Engine(make_cfg())
+    if telemetry_path is not None:
+        eng.execution_telemetry_csv = str(telemetry_path)
     eng.hedge = SettlementVenue("hedge", "RH", buy_responses, fee=buy_fee)
     eng.entropy = SettlementVenue("entropy", "ENTROPY", sell_responses,
                                   fee=sell_fee)
@@ -141,6 +144,11 @@ def make_settlement_engine(buy_responses, sell_responses, *, buy_fee=10.0,
     eng.entropy.set_book(101.0, 102.0)
     eng._log_csv = lambda *args, **kwargs: None
     return eng
+
+
+def execution_rows(path):
+    with path.open(newline="") as fh:
+        return list(csv.DictReader(fh))
 
 
 def make_engine(**thr):
@@ -475,10 +483,43 @@ def test_execution_actual_full_fill_equals_realized_fill_result():
     assert trade["status"] == "filled/filled"
 
 
-def test_execution_actual_no_fill_is_zero():
+def test_execution_telemetry_persists_filled_filled_actual(tmp_path):
+    telemetry = tmp_path / "executions.csv"
+    eng = make_settlement_engine(
+        [settlement_info("filled", 1.0, 100.0)],
+        [settlement_info("filled", 1.0, 101.0)],
+        telemetry_path=telemetry,
+    )
+
+    async def scenario():
+        await eng._execute(eng.hedge, eng.entropy, execution_plan(),
+                           eng.strategy.state(), execution_id="exec-persist")
+
+    asyncio.run(scenario())
+    rows = execution_rows(telemetry)
+    assert len(rows) == 1
+    row = rows[-1]
+    assert row["event_type"] == "execution_finalized"
+    assert row["execution_id"] == "exec-persist"
+    assert float(row["actual_usd"]) == pytest.approx(
+        101.0 * 0.998 - 100.0 * 1.001)
+    assert row["lifecycle_status"] == "filled/filled"
+    assert row["buy_venue"] == "RH"
+    assert row["sell_venue"] == "ENTROPY"
+    assert float(row["requested_qty"]) == pytest.approx(1.0)
+    assert float(row["buy_filled_qty"]) == pytest.approx(1.0)
+    assert float(row["sell_filled_qty"]) == pytest.approx(1.0)
+    assert float(row["buy_avg_px"]) == pytest.approx(100.0)
+    assert float(row["sell_avg_px"]) == pytest.approx(101.0)
+    assert row["hedge_status"] == "not_required"
+
+
+def test_execution_actual_no_fill_is_zero(tmp_path):
+    telemetry = tmp_path / "executions.csv"
     eng = make_settlement_engine(
         [settlement_info("canceled", 0.0)],
         [settlement_info("canceled", 0.0)],
+        telemetry_path=telemetry,
     )
 
     async def scenario():
@@ -490,6 +531,29 @@ def test_execution_actual_no_fill_is_zero():
     assert trade["actual"] == 0.0
     assert trade["fill"] == 0.0
     assert trade["status"] == "canceled/canceled"
+    row = execution_rows(telemetry)[-1]
+    assert row["event_type"] == "execution_finalized"
+    assert float(row["actual_usd"]) == pytest.approx(0.0)
+
+
+def test_execution_telemetry_one_leg_is_pending_not_zero_before_hedge(tmp_path):
+    telemetry = tmp_path / "executions.csv"
+    eng = make_settlement_engine(
+        [settlement_info("filled", 1.0, 100.0)],
+        [settlement_info("canceled", 0.0)],
+        telemetry_path=telemetry,
+    )
+
+    async def scenario():
+        await eng._execute(eng.hedge, eng.entropy, execution_plan(),
+                           eng.strategy.state(), execution_id="exec-open")
+
+    asyncio.run(scenario())
+    row = execution_rows(telemetry)[-1]
+    assert row["event_type"] == "execution_opened"
+    assert row["execution_id"] == "exec-open"
+    assert row["actual_usd"] == ""
+    assert row["lifecycle_status"] == "filled/canceled → hedging"
 
 
 def test_execution_actual_pending_then_includes_successful_hedge():
@@ -523,6 +587,35 @@ def test_execution_actual_pending_then_includes_successful_hedge():
     assert eng.total_fill_edge == 0.0
 
 
+def test_execution_telemetry_hedge_finalizes_same_execution_id(tmp_path):
+    telemetry = tmp_path / "executions.csv"
+    eng = make_settlement_engine(
+        [settlement_info("filled", 1.0, 100.0),
+         settlement_info("filled", 1.0, 99.0)],
+        [settlement_info("canceled", 0.0)],
+        telemetry_path=telemetry,
+    )
+
+    async def scenario():
+        await eng._execute(eng.hedge, eng.entropy, execution_plan(),
+                           eng.strategy.state(), execution_id="exec-hedged")
+        await eng._maybe_hedge("exec-hedged")
+
+    asyncio.run(scenario())
+    rows = execution_rows(telemetry)
+    assert {row["execution_id"] for row in rows} == {"exec-hedged"}
+    final = rows[-1]
+    assert final["event_type"] == "execution_finalized"
+    assert float(final["actual_usd"]) == pytest.approx(
+        -100.0 * 1.001 + 99.0 * 0.999)
+    assert final["lifecycle_status"] == "hedged"
+    assert final["hedge_venue"] == "RH"
+    assert final["hedge_side"] == "SELL"
+    assert float(final["hedge_filled_qty"]) == pytest.approx(1.0)
+    assert float(final["hedge_avg_px"]) == pytest.approx(99.0)
+    assert final["hedge_status"] == "filled"
+
+
 def test_execution_actual_partial_fill_includes_residual_hedge():
     eng = make_settlement_engine(
         [settlement_info("filled", 2.0, 100.0),
@@ -548,6 +641,50 @@ def test_execution_actual_partial_fill_includes_residual_hedge():
     assert trade["status"] == "hedged"
 
 
+def test_execution_telemetry_partial_hedge_persists_all_in_result(tmp_path):
+    telemetry = tmp_path / "executions.csv"
+    eng = make_settlement_engine(
+        [settlement_info("filled", 2.0, 100.0),
+         settlement_info("filled", 1.0, 98.0)],
+        [settlement_info("filled", 1.0, 101.0)],
+        telemetry_path=telemetry,
+    )
+
+    async def scenario():
+        await eng._execute(eng.hedge, eng.entropy,
+                           execution_plan(qty=2.0), eng.strategy.state(),
+                           execution_id="exec-partial")
+        await eng._maybe_hedge("exec-partial")
+
+    asyncio.run(scenario())
+    final = execution_rows(telemetry)[-1]
+    expected = (101.0 * 0.998 - 100.0 * 1.001
+                - 100.0 * 1.001 + 98.0 * 0.999)
+    assert float(final["actual_usd"]) == pytest.approx(expected)
+    assert float(final["buy_filled_qty"]) == pytest.approx(2.0)
+    assert float(final["sell_filled_qty"]) == pytest.approx(1.0)
+    assert float(final["hedge_filled_qty"]) == pytest.approx(1.0)
+    assert final["lifecycle_status"] == "hedged"
+
+
+def test_finalized_execution_telemetry_survives_shutdown(tmp_path):
+    telemetry = tmp_path / "executions.csv"
+    eng = make_settlement_engine(
+        [settlement_info("filled", 1.0, 100.0)],
+        [settlement_info("filled", 1.0, 101.0)],
+        telemetry_path=telemetry,
+    )
+
+    async def scenario():
+        await eng._execute(eng.hedge, eng.entropy, execution_plan(),
+                           eng.strategy.state(),
+                           execution_id="exec-shutdown")
+
+    asyncio.run(scenario())
+    eng.request_stop()
+    assert execution_rows(telemetry)[-1]["execution_id"] == "exec-shutdown"
+
+
 def test_execution_actual_stays_pending_when_hedge_unresolved():
     eng = make_settlement_engine(
         [settlement_info("filled", 1.0, 100.0),
@@ -567,6 +704,29 @@ def test_execution_actual_stays_pending_when_hedge_unresolved():
     assert trade["status"] == "hedge-unresolved"
     assert trade["actual"] != 0.0
     assert eng.total_fill_edge == 0.0
+
+
+def test_execution_telemetry_unresolved_hedge_is_not_zero(tmp_path):
+    telemetry = tmp_path / "executions.csv"
+    eng = make_settlement_engine(
+        [settlement_info("filled", 1.0, 100.0),
+         settlement_info("timeout", 0.0, unresolved=True)],
+        [settlement_info("canceled", 0.0)],
+        telemetry_path=telemetry,
+    )
+
+    async def scenario():
+        await eng._execute(eng.hedge, eng.entropy, execution_plan(),
+                           eng.strategy.state(),
+                           execution_id="exec-unresolved")
+        await eng._maybe_hedge("exec-unresolved")
+
+    asyncio.run(scenario())
+    final = execution_rows(telemetry)[-1]
+    assert final["event_type"] == "execution_finalized"
+    assert final["actual_usd"] == ""
+    assert final["lifecycle_status"] == "hedge-unresolved"
+    assert final["hedge_status"] == "unresolved"
 
 
 def test_run_inner_logs_selected_stable_strategy_and_no_auto_selection(
@@ -739,6 +899,7 @@ async def run_strategy_wiring_scenario(
     *,
     strategy_name,
     record_only,
+    execution_overrides=None,
 ):
     cfg = make_cfg(
         strategy_name=strategy_name,
@@ -748,6 +909,8 @@ async def run_strategy_wiring_scenario(
     )
     if not record_only:
         monkeypatch.setattr(type(cfg), "creds_complete", property(lambda self: True))
+    for key, value in (execution_overrides or {}).items():
+        setattr(cfg, key, value)
     eng = Engine(cfg, record_only=record_only)
     venues = iter([
         LifecycleVenue("entropy", "ENTROPY"),
@@ -813,6 +976,30 @@ def test_live_stable_run_inner_starts_strategy_without_observer(monkeypatch):
         "strategy": True,
         "observer": False,
     }
+
+
+def test_live_startup_logs_effective_execution_config(monkeypatch, caplog):
+    caplog.set_level(logging.INFO, logger="engine")
+    asyncio.run(
+        run_strategy_wiring_scenario(
+            monkeypatch,
+            strategy_name="stable_basis",
+            record_only=False,
+            execution_overrides={
+                "leg_slippage_bps": 7.5,
+                "hedge_slippage_bps": 20.0,
+                "premium_persist_sec": 1.0,
+                "cooldown_sec": 1.0,
+                "max_order_notional": 100.0,
+                "inventory_scale_bps": 7.5,
+            },
+        )
+    )
+    assert (
+        "execution config: leg_slippage=7.50bps hedge_slippage=20.00bps "
+        "persistence=1.00s cooldown=1.00s max_order=$100 "
+        "inventory_scale=7.50bps"
+    ) in caplog.text
 
 
 def test_live_drifting_run_inner_starts_strategy_and_observer(monkeypatch):
