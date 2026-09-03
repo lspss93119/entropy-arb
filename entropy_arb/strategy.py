@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Deque, Iterable
 
 from .config import (
+    DEFAULT_CENTER_MAX_LATEST_SAMPLE_AGE_SEC,
     DEFAULT_CENTER_LAST_VALID_MAX_AGE_HOURS,
     DEFAULT_CENTER_MIN_COVERAGE_RATIO,
     DEFAULT_CENTER_MIN_SAMPLES,
@@ -29,6 +30,7 @@ class StrategyState:
     warmup_span_sec: float | None = None
     coverage_ratio: float | None = None
     center_source: str | None = None
+    latest_sample_age_sec: float | None = None
 
 
 @dataclass(frozen=True)
@@ -55,6 +57,7 @@ class RollingCenterUpdate:
     coverage_ratio: float = 0.0
     window_start: float = 0.0
     window_end: float = 0.0
+    latest_sample_age_sec: float = 0.0
 
 
 class StableBasisStrategy:
@@ -74,6 +77,9 @@ class StableBasisStrategy:
         center_min_samples: int = DEFAULT_CENTER_MIN_SAMPLES,
         center_last_valid_max_age_hours: float = (
             DEFAULT_CENTER_LAST_VALID_MAX_AGE_HOURS
+        ),
+        center_max_latest_sample_age_sec: float = (
+            DEFAULT_CENTER_MAX_LATEST_SAMPLE_AGE_SEC
         ),
     ):
         if center_mode not in ("fixed", "rolling"):
@@ -100,6 +106,11 @@ class StableBasisStrategy:
             or center_last_valid_max_age_hours <= 0
         ):
             raise ValueError("center_last_valid_max_age_hours must be > 0")
+        if (
+            not math.isfinite(center_max_latest_sample_age_sec)
+            or center_max_latest_sample_age_sec <= 0
+        ):
+            raise ValueError("center_max_latest_sample_age_sec must be > 0")
 
         self.center_mode = center_mode
         self.fixed_center_bps = center_bps
@@ -112,6 +123,9 @@ class StableBasisStrategy:
         self.center_min_samples = center_min_samples
         self.center_last_valid_max_age_hours = float(
             center_last_valid_max_age_hours
+        )
+        self.center_max_latest_sample_age_sec = float(
+            center_max_latest_sample_age_sec
         )
         self.upper_bps = upper_bps
         self.lower_bps = lower_bps
@@ -163,7 +177,26 @@ class StableBasisStrategy:
             return None
         if coverage < self.center_min_coverage_ratio:
             return None
+        if self._latest_sample_age(samples, timestamp) > (
+            self.center_max_latest_sample_age_sec
+        ):
+            return None
         return samples
+
+    @staticmethod
+    def _latest_sample_age(
+        samples: list[tuple[float, float]], timestamp: float
+    ) -> float:
+        return max(0.0, timestamp - max(ts for ts, _ in samples))
+
+    def latest_sample_age_sec(self, timestamp: float) -> float | None:
+        """Return the age of the newest valid sample in the causal window."""
+        if not math.isfinite(timestamp):
+            return None
+        samples = self._window_samples(timestamp)
+        if not samples:
+            return None
+        return self._latest_sample_age(samples, timestamp)
 
     def _prune(self, timestamp: float) -> None:
         cutoff = timestamp - self.window_sec
@@ -258,7 +291,8 @@ class StableBasisStrategy:
     def _accept_fresh_center(
         self, new_center: float, values: list[float], now: float
     ) -> RollingCenterUpdate:
-        coverage = self._window_metrics(now)[1]
+        window_samples, coverage, _ = self._window_metrics(now)
+        latest_age = self._latest_sample_age(window_samples, now)
         old_center = self._effective_center_bps
         self._effective_center_bps = new_center
         self._center_source = "fresh_rolling"
@@ -283,6 +317,7 @@ class StableBasisStrategy:
             coverage_ratio=coverage,
             window_start=now - self.window_sec,
             window_end=now,
+            latest_sample_age_sec=latest_age,
         )
 
     def update(
@@ -321,8 +356,11 @@ class StableBasisStrategy:
 
     def state(self) -> StrategyState:
         coverage = None
+        latest_age = None
         if self.center_mode == "rolling" and self._last_observation_ts is not None:
-            coverage = self._window_metrics(self._last_observation_ts)[1]
+            evaluation_ts = self._last_observation_ts
+            coverage = self._window_metrics(evaluation_ts)[1]
+            latest_age = self.latest_sample_age_sec(evaluation_ts)
         return StrategyState(
             ready=True,
             center_bps=self._effective_center_bps,
@@ -330,6 +368,7 @@ class StableBasisStrategy:
             lower_bps=self.lower_bps,
             coverage_ratio=coverage,
             center_source=self._center_source,
+            latest_sample_age_sec=latest_age,
         )
 
     def rolling_history_summary(self, *, now: float) -> tuple[int, float]:
@@ -426,6 +465,7 @@ def build_strategy(conf: StrategyConf):
             center_min_coverage_ratio=conf.center_min_coverage_ratio,
             center_min_samples=conf.center_min_samples,
             center_last_valid_max_age_hours=conf.center_last_valid_max_age_hours,
+            center_max_latest_sample_age_sec=conf.center_max_latest_sample_age_sec,
         )
     if conf.name == "drifting_basis":
         if conf.window_minutes is None:

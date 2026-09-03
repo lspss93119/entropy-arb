@@ -23,6 +23,16 @@ def observations(now: float, minutes: int, value: float = -5.0):
     ]
 
 
+def observations_with_latest(
+    now: float, minutes: int, value: float = -5.0, latest_age: float = 2.0
+):
+    """Cover ``minutes`` buckets while keeping one recent sample available."""
+    assert 1 <= minutes <= 720
+    if minutes == 720:
+        return observations(now, minutes, value)
+    return observations(now, minutes - 1, value) + [(now - latest_age, value)]
+
+
 def rolling(**kwargs) -> StableBasisStrategy:
     return StableBasisStrategy(
         center_bps=-1.8,
@@ -47,27 +57,79 @@ def test_full_window_uses_fresh_median_and_reports_coverage():
     assert strategy.state().center_source == "fresh_rolling"
 
 
-def test_9_8_hours_gap_aware_coverage_passes_eighty_percent():
+def test_9_8_hours_gap_aware_coverage_passes_seventy_percent():
     now = 100_000.0
     strategy = rolling()
 
-    update = strategy.bootstrap(observations(now, 588), now=now)
+    update = strategy.bootstrap(observations_with_latest(now, 588), now=now)
 
     assert update is not None
     assert update.coverage_ratio == pytest.approx(588 / 720)
     assert strategy.state().center_source == "fresh_rolling"
 
 
-def test_79_percent_coverage_uses_fixed_fallback():
+def test_69_9_percent_coverage_uses_fixed_fallback():
     now = 100_000.0
     strategy = rolling()
 
-    update = strategy.bootstrap(observations(now, 568), now=now)
+    update = strategy.bootstrap(observations_with_latest(now, 503), now=now)
 
     assert update is None
     assert strategy.state().center_bps == pytest.approx(-1.8)
     assert strategy.state().center_source == "fixed_fallback"
-    assert strategy.state().coverage_ratio == pytest.approx(568 / 720)
+    assert strategy.state().coverage_ratio == pytest.approx(503 / 720)
+
+
+def test_73_8_percent_coverage_with_fresh_latest_sample_passes():
+    now = 100_000.0
+    strategy = rolling()
+
+    update = strategy.bootstrap(observations_with_latest(now, 531), now=now)
+
+    assert update is not None
+    assert update.coverage_ratio == pytest.approx(531 / 720)
+    assert update.latest_sample_age_sec == pytest.approx(2.0)
+    assert strategy.state().center_source == "fresh_rolling"
+
+
+def test_high_coverage_with_stale_latest_sample_is_rejected():
+    now = 100_000.0
+    strategy = rolling()
+
+    update = strategy.bootstrap(observations(now, 648), now=now)
+
+    assert update is None
+    assert strategy.state().center_source == "fixed_fallback"
+    assert strategy.latest_sample_age_sec(now) == pytest.approx(72 * 60 + 30)
+
+
+def test_latest_sample_at_freshness_limit_is_accepted():
+    now = 100_000.0
+    strategy = rolling(center_max_latest_sample_age_sec=300.0)
+    history = observations_with_latest(now, 531, latest_age=300.0)
+
+    update = strategy.bootstrap(history, now=now)
+
+    assert update is not None
+    assert update.latest_sample_age_sec == pytest.approx(300.0)
+
+
+def test_last_valid_is_used_when_latest_sample_is_stale():
+    now = 100_000.0
+    strategy = rolling()
+    snapshot = RollingCenterSnapshot(
+        center_bps=-5.72,
+        calculated_at=now - 2 * 3600.0,
+        window_start=now - 14 * 3600.0,
+        window_end=now - 2 * 3600.0,
+        coverage_ratio=1.0,
+        sample_count=720,
+    )
+    assert strategy.restore_last_valid(snapshot, now=now)
+
+    assert strategy.bootstrap(observations(now, 648), now=now) is None
+    assert strategy.state().center_source == "last_valid"
+    assert strategy.state().center_bps == pytest.approx(-5.72)
 
 
 def test_internal_gap_reduces_coverage_even_when_timestamp_span_is_full():

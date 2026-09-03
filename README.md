@@ -40,10 +40,11 @@ The live bot uses one explicitly selected strategy in `config.yaml`:
 - `stable_basis` can explicitly set `center_mode: rolling` to source the
   center from the causal midpoint premium median in `[T−12h, T)`, recalculated
   once per hour. Availability uses covered 60-second buckets (default minimum
-  `0.80`) plus a minimum sample count (default `60`). A recent persisted
-  last-valid center (default max age `6h`) is used while fresh coverage is
-  temporarily insufficient; otherwise the configured `center_bps` is the
-  fallback.
+  `0.70`) plus a minimum sample count (default `60`); the newest valid sample
+  must also be no older than 5 minutes by default. A recent persisted
+  last-valid center (default max age `6h`) is used while fresh coverage or
+  freshness is temporarily insufficient; otherwise the configured `center_bps`
+  is the fallback.
 - `drifting_basis` uses a causal, timestamp-based rolling-median center from
   approximately 1 Hz valid fresh-BBO observations. It requires a full-window
   warm-up and at least 90% valid coverage. A valid-observation gap longer than

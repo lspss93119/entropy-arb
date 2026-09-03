@@ -408,13 +408,15 @@ class Engine:
         label = "initialized" if initialized else "updated"
         log.info(
             "rolling center %s: old=%+.2fbps new=%+.2fbps window=%gh "
-            "coverage=%.1f%% samples=%d range=[%+.2f,%+.2f]",
+            "coverage=%.1f%% samples=%d latest_age=%.1fs "
+            "range=[%+.2f,%+.2f]",
             label,
             update.old_center_bps,
             update.new_center_bps,
             update.window_sec / 3600.0,
             update.coverage_ratio * 100.0,
             update.samples,
+            update.latest_sample_age_sec,
             update.range_min_bps,
             update.range_max_bps,
         )
@@ -505,6 +507,10 @@ class Engine:
         samples, span_sec, coverage = self.strategy.rolling_coverage_summary(
             now=now
         )
+        latest_age = self.strategy.latest_sample_age_sec(now)
+        latest_age_text = (
+            f"{latest_age:.1f}s" if latest_age is not None else "n/a"
+        )
         state = self.strategy.state()
         if state.center_source == "last_valid":
             snapshot = self.strategy.last_valid_snapshot()
@@ -515,8 +521,12 @@ class Engine:
             )
             log.info(
                 "rolling center fresh history insufficient: coverage=%.1f%% "
+                "samples=%d latest_age=%s max_latest_age=%.1fs "
                 "required=%.1f%% using last-valid=%+.2fbps age=%.1fh",
                 coverage * 100.0,
+                samples,
+                latest_age_text,
+                self.strategy.center_max_latest_sample_age_sec,
                 self.strategy.center_min_coverage_ratio * 100.0,
                 state.center_bps,
                 age_hours,
@@ -524,12 +534,15 @@ class Engine:
         else:
             log.info(
                 "rolling center unavailable: coverage=%.1f%% required=%.1f%% "
-                "samples=%d span=%.1fh no recent last-valid center "
+                "samples=%d span=%.1fh latest_age=%s "
+                "max_latest_age=%.1fs no recent last-valid center "
                 "using fallback=%+.2fbps",
                 coverage * 100.0,
                 self.strategy.center_min_coverage_ratio * 100.0,
                 samples,
                 span_sec / 3600.0,
+                latest_age_text,
+                self.strategy.center_max_latest_sample_age_sec,
                 fallback,
             )
 

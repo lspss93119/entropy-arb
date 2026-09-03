@@ -35,9 +35,10 @@ HL_WS_URL = "wss://api.hyperliquid.xyz/ws"   # official ws — the only HL feed 
 
 HEDGE_VENUES = ("lighter", "lighter-rh", "tradexyz")
 DEFAULT_RECORDER_DATABASE = "data/market-history.sqlite"
-DEFAULT_CENTER_MIN_COVERAGE_RATIO = 0.80
+DEFAULT_CENTER_MIN_COVERAGE_RATIO = 0.70
 DEFAULT_CENTER_MIN_SAMPLES = 60
 DEFAULT_CENTER_LAST_VALID_MAX_AGE_HOURS = 6.0
+DEFAULT_CENTER_MAX_LATEST_SAMPLE_AGE_SEC = 300.0
 
 
 @dataclass(frozen=True)
@@ -127,6 +128,9 @@ class StrategyConf:
     center_min_coverage_ratio: float = DEFAULT_CENTER_MIN_COVERAGE_RATIO
     center_min_samples: int = DEFAULT_CENTER_MIN_SAMPLES
     center_last_valid_max_age_hours: float = DEFAULT_CENTER_LAST_VALID_MAX_AGE_HOURS
+    center_max_latest_sample_age_sec: float = (
+        DEFAULT_CENTER_MAX_LATEST_SAMPLE_AGE_SEC
+    )
 
 
 @dataclass
@@ -333,6 +337,7 @@ def _parse_strategy(raw: dict) -> StrategyConf:
             "center_mode", "center_bps", "center_window_hours",
             "center_update_minutes", "center_min_coverage_ratio",
             "center_min_samples", "center_last_valid_max_age_hours",
+            "center_max_latest_sample_age_sec",
             "upper_bps", "lower_bps",
         }
     else:
@@ -377,6 +382,10 @@ def _parse_strategy(raw: dict) -> StrategyConf:
             params, "center_last_valid_max_age_hours",
             DEFAULT_CENTER_LAST_VALID_MAX_AGE_HOURS, "strategy.params"
         )
+        center_max_latest_sample_age_sec = _optional_finite_number(
+            params, "center_max_latest_sample_age_sec",
+            DEFAULT_CENTER_MAX_LATEST_SAMPLE_AGE_SEC, "strategy.params"
+        )
         return StrategyConf(
             name=name,
             center_bps=center,
@@ -388,6 +397,7 @@ def _parse_strategy(raw: dict) -> StrategyConf:
             center_min_coverage_ratio=center_min_coverage_ratio,
             center_min_samples=center_min_samples,
             center_last_valid_max_age_hours=center_last_valid_max_age_hours,
+            center_max_latest_sample_age_sec=center_max_latest_sample_age_sec,
         )
 
     if "window_minutes" not in params:
