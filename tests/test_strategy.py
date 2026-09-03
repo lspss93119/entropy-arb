@@ -23,6 +23,107 @@ def test_stable_basis_is_immediately_ready_and_fixed():
     assert after == before
 
 
+def _rolling_stable():
+    return StableBasisStrategy(
+        center_bps=-1.8,
+        upper_bps=0.75,
+        lower_bps=0.75,
+        center_mode="rolling",
+        center_window_hours=12,
+        center_update_minutes=60,
+    )
+
+
+def test_rolling_center_with_insufficient_history_uses_fixed_fallback():
+    strategy = _rolling_stable()
+
+    update = strategy.bootstrap(
+        [(0.0, -10.0), (6 * 3600.0, -3.0)],
+        now=6 * 3600.0 + 1.0,
+    )
+
+    assert update is None
+    assert strategy.state().ready is True
+    assert strategy.state().center_bps == pytest.approx(-1.8)
+    assert strategy.requires_observations is True
+
+
+def test_rolling_center_bootstrap_uses_causal_twelve_hour_median():
+    strategy = _rolling_stable()
+
+    update = strategy.bootstrap(
+        [(1.0, -10.0), (6 * 3600.0, -2.0), (12 * 3600.0, -6.0)],
+        now=12 * 3600.0 + 1.0,
+    )
+
+    assert update is not None
+    assert update.new_center_bps == pytest.approx(-6.0)
+    assert strategy.state().center_bps == pytest.approx(-6.0)
+
+
+def test_rolling_center_excludes_future_bootstrap_samples():
+    strategy = _rolling_stable()
+
+    strategy.bootstrap(
+        [(1.0, -10.0), (6 * 3600.0, -2.0), (12 * 3600.0, -6.0),
+         (12 * 3600.0 + 2.0, 1000.0)],
+        now=12 * 3600.0 + 1.0,
+    )
+
+    assert strategy.state().center_bps == pytest.approx(-6.0)
+
+
+def test_rolling_center_updates_at_most_once_per_hour():
+    strategy = _rolling_stable()
+    history = ([
+        (1.0, -10.0),
+    ] + [
+        (3601.0 + i * 3600.0, float(i))
+        for i in range(9)
+    ] + [(12 * 3600.0, -6.0)])
+    strategy.bootstrap(
+        history,
+        now=12 * 3600.0 + 1.0,
+    )
+    initial = strategy.state().center_bps
+
+    assert strategy.update(12 * 3600.0 + 3600.0, 20.0) is None
+    assert strategy.state().center_bps == initial
+
+    changed = strategy.update(12 * 3600.0 + 3600.0 + 1.0, 20.0)
+    assert changed is not None
+    assert strategy.state().center_bps != initial
+
+
+def test_rolling_center_keeps_last_valid_value_when_update_has_no_history():
+    strategy = _rolling_stable()
+    strategy.bootstrap(
+        [(1.0, -10.0), (6 * 3600.0, -2.0), (12 * 3600.0, -6.0)],
+        now=12 * 3600.0 + 1.0,
+    )
+    initial = strategy.state().center_bps
+
+    # A non-finite live observation is ignored; the previously valid center
+    # remains effective and no exception escapes the strategy boundary.
+    assert strategy.update(12 * 3600.0 + 3600.0 + 1.0, math.nan) is None
+    assert strategy.state().center_bps == initial
+
+
+def test_rolling_center_restart_bootstraps_from_the_same_history():
+    observations = [
+        (1.0, -10.0),
+        (6 * 3600.0, -2.0),
+        (12 * 3600.0, -6.0),
+    ]
+    first = _rolling_stable()
+    second = _rolling_stable()
+
+    first.bootstrap(observations, now=12 * 3600.0 + 1.0)
+    second.bootstrap(observations, now=12 * 3600.0 + 1.0)
+
+    assert second.state() == first.state()
+
+
 def test_drifting_not_ready_before_full_window():
     s = DriftingBasisStrategy(window_minutes=1, upper_bps=3.0, lower_bps=3.5)
     feed_seconds(s, 1000.0, 60, lambda i: 1.0)

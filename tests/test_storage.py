@@ -83,6 +83,36 @@ def test_second_open_is_idempotent(tmp_path: Path):
         assert conn.execute("PRAGMA quick_check").fetchone() == ("ok",)
 
 
+def test_recent_premium_observations_are_bounded_and_ordered(tmp_path: Path):
+    db = tmp_path / "market-history.sqlite"
+    store = MarketHistoryStore(db)
+    store.append_sample(sample(ts=10_000, premium=1.0))
+    store.append_sample(sample(ts=20_000, premium=2.0))
+    store.append_sample(sample(ts=30_000, premium=3.0))
+    assert store.flush().ok
+
+    observations = store.recent_premium_observations(
+        "SNDK", "lighter-rh", start_ms=15_000, end_ms=30_000
+    )
+
+    assert observations == [(20.0, 2.0)]
+    store.close()
+
+
+def test_recent_premium_observations_fall_back_to_minute_means(tmp_path: Path):
+    db = tmp_path / "market-history.sqlite"
+    store = MarketHistoryStore(db)
+    store.append_minute(minute(ts=20))
+    assert store.flush().ok
+
+    observations = store.recent_premium_observations(
+        "SNDK", "lighter-rh", start_ms=19_000, end_ms=21_000
+    )
+
+    assert observations == [(0.02, 15.0)]
+    store.close()
+
+
 def test_exact_duplicate_is_noop_and_conflicting_payload_does_not_replace(tmp_path: Path):
     db = tmp_path / "market-history.sqlite"
     store = MarketHistoryStore(db)

@@ -79,6 +79,57 @@ def test_stable_strategy_config_loads():
     assert cfg.strategy.upper_bps == 4.0
     assert cfg.strategy.lower_bps == 3.0
     assert cfg.strategy.window_minutes is None
+    assert cfg.strategy.center_mode == "fixed"
+
+
+def test_stable_strategy_rolling_center_config_loads():
+    cfg = load("""
+strategy:
+  name: stable_basis
+  params:
+    center_mode: rolling
+    center_bps: -1.8
+    center_window_hours: 12
+    center_update_minutes: 60
+    upper_bps: 0.75
+    lower_bps: 0.75
+""")
+    assert cfg.strategy.center_mode == "rolling"
+    assert cfg.strategy.center_bps == -1.8
+    assert cfg.strategy.center_window_hours == 12
+    assert cfg.strategy.center_update_minutes == 60
+
+
+def test_rolling_center_parameters_are_strictly_validated():
+    expect_error("""
+strategy:
+  name: stable_basis
+  params:
+    center_mode: adaptive
+    center_bps: -1.8
+    upper_bps: 0.75
+    lower_bps: 0.75
+""", "center_mode must be 'fixed' or 'rolling'")
+    expect_error("""
+strategy:
+  name: stable_basis
+  params:
+    center_mode: rolling
+    center_bps: -1.8
+    center_window_hours: 0
+    upper_bps: 0.75
+    lower_bps: 0.75
+""", "center_window_hours")
+    expect_error("""
+strategy:
+  name: stable_basis
+  params:
+    center_mode: rolling
+    center_bps: -1.8
+    center_update_minutes: 0
+    upper_bps: 0.75
+    lower_bps: 0.75
+""", "center_update_minutes")
 
 
 def test_drifting_strategy_config_loads():

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import sqlite3
 import threading
 import time
@@ -228,6 +229,42 @@ class MarketHistoryStore:
     def append_minute(self, row: MinuteRow) -> None: self._append("minutes", row)
     def append_entropy_reference(self, row: EntropyReferenceRow) -> None: self._append("entropy_reference", row)
     def append_hedge_reference(self, row: HedgeReferenceRow) -> None: self._append("hedge_reference", row)
+
+    def recent_premium_observations(
+        self,
+        symbol: str,
+        hedge: str,
+        start_ms: int,
+        end_ms: int,
+    ) -> list[tuple[float, float]]:
+        """Read a bounded, causal premium window for center bootstrap.
+
+        Samples are the primary source because they contain the exact
+        midpoint-to-midpoint premium used by the live strategy.  Minute means
+        are a compatibility fallback for databases that have minute history
+        but no sample rows in the requested window.  ``end_ms`` is exclusive.
+        """
+        if end_ms <= start_ms:
+            return []
+        with self._db_lock:
+            rows = self._conn.execute(
+                "SELECT timestamp_ms, premium_bps FROM samples "
+                "WHERE symbol=? AND hedge=? AND timestamp_ms>=? "
+                "AND timestamp_ms<? ORDER BY timestamp_ms",
+                (symbol, hedge, int(start_ms), int(end_ms)),
+            ).fetchall()
+            if not rows:
+                rows = self._conn.execute(
+                    "SELECT minute_ts, premium_mean_bps FROM minutes "
+                    "WHERE symbol=? AND hedge=? AND minute_ts*1000>=? "
+                    "AND minute_ts*1000<? ORDER BY minute_ts",
+                    (symbol, hedge, int(start_ms), int(end_ms)),
+                ).fetchall()
+        return [
+            (float(timestamp) / 1000.0, float(value))
+            for timestamp, value in rows
+            if value is not None and math.isfinite(float(value))
+        ]
 
     def _write(self, dataset: str, rows: Sequence[object]) -> InsertCounts:
         _, keys, fields = _SPECS[dataset]

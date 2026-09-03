@@ -116,6 +116,11 @@ class StrategyConf:
     lower_bps: float
     center_bps: Optional[float] = None
     window_minutes: Optional[int] = None
+    # stable_basis may optionally source its center from a causal rolling
+    # median.  The fallback remains the explicitly configured center_bps.
+    center_mode: str = "fixed"
+    center_window_hours: float = 12.0
+    center_update_minutes: int = 60
 
 
 @dataclass
@@ -272,6 +277,31 @@ def _finite_number(params: dict, key: str, path: str) -> float:
     return value
 
 
+def _optional_finite_number(params: dict, key: str, default: float,
+                            path: str) -> float:
+    if key not in params:
+        return default
+    value = params[key]
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise ConfigError(f"'{path}.{key}' must be a number")
+    value = float(value)
+    if not math.isfinite(value):
+        raise ConfigError(f"'{path}.{key}' must be finite")
+    if value <= 0:
+        raise ConfigError(f"'{path}.{key}' must be > 0")
+    return value
+
+
+def _optional_positive_int(params: dict, key: str, default: int,
+                           path: str) -> int:
+    if key not in params:
+        return default
+    value = params[key]
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise ConfigError(f"'{path}.{key}' must be a positive integer")
+    return value
+
+
 def _parse_strategy(raw: dict) -> StrategyConf:
     node = raw.get("strategy")
     if not isinstance(node, dict):
@@ -285,7 +315,10 @@ def _parse_strategy(raw: dict) -> StrategyConf:
         raise ConfigError("'strategy.params' must be a mapping")
 
     if name == "stable_basis":
-        allowed = {"center_bps", "upper_bps", "lower_bps"}
+        allowed = {
+            "center_mode", "center_bps", "center_window_hours",
+            "center_update_minutes", "upper_bps", "lower_bps",
+        }
     else:
         allowed = {"window_minutes", "upper_bps", "lower_bps"}
 
@@ -303,11 +336,27 @@ def _parse_strategy(raw: dict) -> StrategyConf:
 
     if name == "stable_basis":
         center = _finite_number(params, "center_bps", "strategy.params")
+        center_mode = params.get("center_mode", "fixed")
+        if not isinstance(center_mode, str):
+            raise ConfigError("'strategy.params.center_mode' must be a string")
+        if center_mode not in ("fixed", "rolling"):
+            raise ConfigError(
+                "strategy.params.center_mode must be 'fixed' or 'rolling'"
+            )
+        center_window_hours = _optional_finite_number(
+            params, "center_window_hours", 12.0, "strategy.params"
+        )
+        center_update_minutes = _optional_positive_int(
+            params, "center_update_minutes", 60, "strategy.params"
+        )
         return StrategyConf(
             name=name,
             center_bps=center,
             upper_bps=upper,
             lower_bps=lower,
+            center_mode=center_mode,
+            center_window_hours=center_window_hours,
+            center_update_minutes=center_update_minutes,
         )
 
     if "window_minutes" not in params:

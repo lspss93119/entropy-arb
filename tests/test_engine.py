@@ -33,13 +33,22 @@ def make_cfg(
     recorder_enabled=True,
     strategy_name="stable_basis",
     window_minutes=60,
+    center_mode="fixed",
+    center_window_hours=12,
+    center_update_minutes=60,
 ):
     if strategy_name == "stable_basis":
+        rolling_params = ""
+        if center_mode != "fixed":
+            rolling_params = f"""    center_mode: {center_mode}
+    center_window_hours: {center_window_hours}
+    center_update_minutes: {center_update_minutes}
+"""
         strategy_yaml = f"""
 strategy:
   name: stable_basis
   params:
-    center_bps: {midline}
+{rolling_params}    center_bps: {midline}
     upper_bps: {upper}
     lower_bps: {lower}
 """
@@ -350,6 +359,119 @@ def test_engine_premium_bps_matches_shared_helper():
         hedge_ask=100.00,
     )
     assert eng.premium_bps() == pytest.approx(values.premium_bps)
+
+
+def test_rolling_center_bootstrap_from_history_updates_effective_thresholds():
+    eng = make_engine(
+        midline=-1.8,
+        upper=0.75,
+        lower=0.75,
+        center_mode="rolling",
+    )
+    observations = [
+        (1.0, -10.0),
+        (6 * 3600.0, -2.0),
+        (12 * 3600.0, -6.0),
+    ]
+    eng.market_history = SimpleNamespace(
+        recent_premium_observations=lambda *args: observations
+    )
+
+    asyncio.run(eng._bootstrap_rolling_center(now=12 * 3600.0 + 1.0))
+    state = eng.strategy.state()
+
+    assert state.center_bps == pytest.approx(-6.0)
+    assert eng._eff_threshold(eng.hedge, eng.entropy, state) == pytest.approx(-5.25)
+    assert eng._eff_threshold(eng.entropy, eng.hedge, state) == pytest.approx(6.75)
+
+
+def test_rolling_center_thresholds_keep_existing_inventory_surcharge():
+    eng = make_engine(
+        midline=-1.8,
+        upper=0.75,
+        lower=0.75,
+        center_mode="rolling",
+    )
+    eng.entropy.set_book(100.0, 100.1)
+    eng.hedge.set_book(100.0, 100.1)
+    eng.strategy.bootstrap(
+        [(1.0, -10.0), (6 * 3600.0, -2.0), (12 * 3600.0, -6.0)],
+        now=12 * 3600.0 + 1.0,
+    )
+
+    eng.hedge.position = 90.0
+    eng.entropy.position = -90.0
+    surcharge = eng._inv_add_bps(eng.hedge, eng.entropy)
+    state = eng.strategy.state()
+
+    assert surcharge > 0
+    assert eng._eff_threshold(eng.hedge, eng.entropy, state) == pytest.approx(
+        state.center_bps + state.upper_bps + surcharge
+    )
+
+    buy_eng = make_engine(
+        midline=-1.8,
+        upper=0.75,
+        lower=0.75,
+        center_mode="rolling",
+    )
+    buy_eng.entropy.set_book(100.0, 100.1)
+    buy_eng.hedge.set_book(100.0, 100.1)
+    buy_eng.strategy.bootstrap(
+        [(1.0, -10.0), (6 * 3600.0, -2.0), (12 * 3600.0, -6.0)],
+        now=12 * 3600.0 + 1.0,
+    )
+    buy_eng.entropy.position = 90.0
+    buy_eng.hedge.position = -90.0
+    buy_surcharge = buy_eng._inv_add_bps(buy_eng.entropy, buy_eng.hedge)
+    buy_state = buy_eng.strategy.state()
+    assert buy_surcharge > 0
+    assert buy_eng._eff_threshold(
+        buy_eng.entropy, buy_eng.hedge, buy_state
+    ) == pytest.approx(
+        buy_state.lower_bps - buy_state.center_bps + buy_surcharge
+    )
+
+
+def test_rolling_center_status_exposes_effective_center(caplog):
+    eng = make_engine(
+        midline=-1.8,
+        upper=0.75,
+        lower=0.75,
+        center_mode="rolling",
+    )
+    eng.strategy.bootstrap(
+        [(1.0, -10.0), (6 * 3600.0, -2.0), (12 * 3600.0, -6.0)],
+        now=12 * 3600.0 + 1.0,
+    )
+    eng.entropy.set_book(100.0, 100.1)
+    eng.hedge.set_book(100.0, 100.1)
+
+    caplog.set_level(logging.INFO, logger="engine")
+    asyncio.run(run_one_status_cycle(eng))
+
+    assert "strategy=stable_basis" in caplog.text
+    assert "center=-6.00" in caplog.text
+
+
+def test_rolling_center_history_failure_keeps_fixed_fallback(caplog):
+    eng = make_engine(
+        midline=-1.8,
+        upper=0.75,
+        lower=0.75,
+        center_mode="rolling",
+    )
+
+    def fail(*args):
+        raise OSError("history unavailable")
+
+    eng.market_history = SimpleNamespace(recent_premium_observations=fail)
+    caplog.set_level(logging.INFO, logger="engine")
+
+    asyncio.run(eng._bootstrap_rolling_center(now=12 * 3600.0 + 1.0))
+
+    assert eng.strategy.state().center_bps == pytest.approx(-1.8)
+    assert "using fallback=-1.80bps" in caplog.text
 
 
 def test_drifting_observations_reach_ready_from_live_books():

@@ -4,7 +4,7 @@ import math
 import statistics
 from collections import deque
 from dataclasses import dataclass
-from typing import Deque
+from typing import Deque, Iterable
 
 from .config import StrategyConf
 
@@ -24,23 +24,186 @@ class StrategyState:
     coverage_ratio: float | None = None
 
 
+@dataclass(frozen=True)
+class RollingCenterUpdate:
+    """A valid center recalculation, for startup/runtime observability."""
+
+    old_center_bps: float
+    new_center_bps: float
+    window_sec: float
+    samples: int
+    range_min_bps: float
+    range_max_bps: float
+    observed_at: float
+
+
 class StableBasisStrategy:
     name = "stable_basis"
     requires_observations = False
 
-    def __init__(self, *, center_bps: float, upper_bps: float, lower_bps: float):
-        self._state = StrategyState(
-            ready=True,
-            center_bps=center_bps,
-            upper_bps=upper_bps,
-            lower_bps=lower_bps,
+    def __init__(
+        self,
+        *,
+        center_bps: float,
+        upper_bps: float,
+        lower_bps: float,
+        center_mode: str = "fixed",
+        center_window_hours: float = 12.0,
+        center_update_minutes: int = 60,
+    ):
+        if center_mode not in ("fixed", "rolling"):
+            raise ValueError("center_mode must be 'fixed' or 'rolling'")
+        if not math.isfinite(center_bps):
+            raise ValueError("center_bps must be finite")
+        if not math.isfinite(center_window_hours) or center_window_hours <= 0:
+            raise ValueError("center_window_hours must be > 0")
+        if not isinstance(center_update_minutes, int) or center_update_minutes <= 0:
+            raise ValueError("center_update_minutes must be a positive integer")
+
+        self.center_mode = center_mode
+        self.fixed_center_bps = center_bps
+        self.center_window_hours = float(center_window_hours)
+        self.center_update_minutes = center_update_minutes
+        self.window_sec = self.center_window_hours * 3600.0
+        self.update_sec = float(center_update_minutes * 60)
+        self.requires_observations = center_mode == "rolling"
+        self.upper_bps = upper_bps
+        self.lower_bps = lower_bps
+        self._effective_center_bps = center_bps
+        self._rolling_samples: Deque[tuple[float, float]] = deque()
+        self._rolling_ready = False
+        self._next_update_ts: float | None = None
+
+    def _window_samples(self, timestamp: float) -> list[tuple[float, float]]:
+        cutoff = timestamp - self.window_sec
+        return [
+            (ts, value)
+            for ts, value in self._rolling_samples
+            if cutoff <= ts < timestamp
+            and math.isfinite(ts)
+            and math.isfinite(value)
+        ]
+
+    def _valid_window_values(
+        self, timestamp: float
+    ) -> list[tuple[float, float]] | None:
+        samples = self._window_samples(timestamp)
+        if len(samples) < 2:
+            return None
+        span = max(ts for ts, _ in samples) - min(ts for ts, _ in samples)
+        # A one-second tolerance accounts for the strict causal right edge
+        # when observations arrive at the configured one-second cadence.
+        if span + OBSERVATION_INTERVAL_SEC < self.window_sec:
+            return None
+        return samples
+
+    def _prune(self, timestamp: float) -> None:
+        cutoff = timestamp - self.window_sec
+        while self._rolling_samples and self._rolling_samples[0][0] < cutoff:
+            self._rolling_samples.popleft()
+
+    def bootstrap(
+        self,
+        observations: Iterable[tuple[float, float]],
+        *,
+        now: float,
+    ) -> RollingCenterUpdate | None:
+        """Seed a rolling center from bounded historical observations.
+
+        ``observations`` are expected to be chronological, as returned by the
+        SQLite history query.  Values at or after ``now`` are deliberately
+        excluded so bootstrap has the same causal boundary as live updates.
+        """
+        if self.center_mode != "rolling":
+            return None
+        self._rolling_samples.clear()
+        self._rolling_ready = False
+        self._effective_center_bps = self.fixed_center_bps
+        if not math.isfinite(now):
+            self._next_update_ts = None
+            return None
+
+        valid = sorted(
+            (float(timestamp), float(value))
+            for timestamp, value in observations
+            if math.isfinite(timestamp)
+            and math.isfinite(value)
+            and timestamp < now
+        )
+        self._rolling_samples.extend(valid)
+        self._prune(now)
+        self._next_update_ts = now + self.update_sec
+        samples = self._valid_window_values(now)
+        if samples is None:
+            return None
+        values = [value for _, value in samples]
+        new_center = statistics.median(values)
+        old_center = self._effective_center_bps
+        self._effective_center_bps = new_center
+        self._rolling_ready = True
+        return RollingCenterUpdate(
+            old_center_bps=old_center,
+            new_center_bps=new_center,
+            window_sec=self.window_sec,
+            samples=len(values),
+            range_min_bps=min(values),
+            range_max_bps=max(values),
+            observed_at=now,
         )
 
-    def update(self, timestamp: float, premium_bps: float) -> None:
-        return None
+    def update(
+        self, timestamp: float, premium_bps: float
+    ) -> RollingCenterUpdate | None:
+        if self.center_mode != "rolling":
+            return None
+        if not (math.isfinite(timestamp) and math.isfinite(premium_bps)):
+            return None
+
+        self._rolling_samples.append((timestamp, premium_bps))
+        self._prune(timestamp)
+        if self._next_update_ts is None:
+            self._next_update_ts = timestamp + self.update_sec
+            return None
+        if timestamp < self._next_update_ts:
+            return None
+
+        samples = self._valid_window_values(timestamp)
+        self._next_update_ts = timestamp + self.update_sec
+        if samples is None:
+            # Keep the last valid rolling value, or the fixed fallback during
+            # warm-up.  Missing history is never converted into a new center.
+            return None
+        values = [value for _, value in samples]
+        new_center = statistics.median(values)
+        old_center = self._effective_center_bps
+        self._effective_center_bps = new_center
+        self._rolling_ready = True
+        return RollingCenterUpdate(
+            old_center_bps=old_center,
+            new_center_bps=new_center,
+            window_sec=self.window_sec,
+            samples=len(values),
+            range_min_bps=min(values),
+            range_max_bps=max(values),
+            observed_at=timestamp,
+        )
 
     def state(self) -> StrategyState:
-        return self._state
+        return StrategyState(
+            ready=True,
+            center_bps=self._effective_center_bps,
+            upper_bps=self.upper_bps,
+            lower_bps=self.lower_bps,
+        )
+
+    def rolling_history_summary(self, *, now: float) -> tuple[int, float]:
+        samples = self._window_samples(now)
+        if not samples:
+            return 0, 0.0
+        return (
+            len(samples),
+            max(ts for ts, _ in samples) - min(ts for ts, _ in samples),
+        )
 
 
 class DriftingBasisStrategy:
@@ -115,6 +278,9 @@ def build_strategy(conf: StrategyConf):
             center_bps=conf.center_bps,
             upper_bps=conf.upper_bps,
             lower_bps=conf.lower_bps,
+            center_mode=conf.center_mode,
+            center_window_hours=conf.center_window_hours,
+            center_update_minutes=conf.center_update_minutes,
         )
     if conf.name == "drifting_basis":
         if conf.window_minutes is None:

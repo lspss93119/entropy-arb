@@ -1,6 +1,7 @@
 """Two-venue arbitrage engine: Entropy vs one hedge venue.
 
-The signal is a fixed band around a configured midline (config.yaml):
+The signal is a fixed band around the configured or effective center
+(config.yaml):
 
     SELL entropy / BUY hedge  when executable premium >= midline + upper (+fees)
     BUY entropy / SELL hedge  when executable premium <= midline - lower (+fees)
@@ -31,7 +32,7 @@ from .premium import calculate_premiums
 from .recorder import MinuteRecorder
 from .reference import ReferenceRecorder
 from .storage import FLUSH_INTERVAL_SEC, MarketHistoryStore
-from .strategy import StrategyState, build_strategy
+from .strategy import RollingCenterUpdate, StrategyState, build_strategy
 from .venue_hl import HLVenue
 from .venue_lighter import LighterVenue
 
@@ -219,6 +220,7 @@ class Engine:
         self.markets_ready = True
         if cfg.recorder_enabled or self.record_only:
             self.market_history = MarketHistoryStore(cfg.recorder_database)
+        await self._bootstrap_rolling_center()
 
         live = not self.record_only
         if live:
@@ -387,6 +389,74 @@ class Engine:
 
     # -------------------------------------------------------------- strategy
 
+    def _log_rolling_center_update(
+        self, update: RollingCenterUpdate, *, initialized: bool
+    ) -> None:
+        label = "initialized" if initialized else "updated"
+        log.info(
+            "rolling center %s: old=%+.2fbps new=%+.2fbps window=%gh "
+            "samples=%d range=[%+.2f,%+.2f]",
+            label,
+            update.old_center_bps,
+            update.new_center_bps,
+            update.window_sec / 3600.0,
+            update.samples,
+            update.range_min_bps,
+            update.range_max_bps,
+        )
+
+    async def _bootstrap_rolling_center(self, now: float | None = None) -> None:
+        """Load only the recent premium window for an optional rolling center."""
+        if getattr(self.strategy, "center_mode", "fixed") != "rolling":
+            return
+        now = time.time() if now is None else now
+        fallback = self.strategy.fixed_center_bps
+        window_hours = self.strategy.center_window_hours
+        update_minutes = self.strategy.center_update_minutes
+        log.info(
+            "center config: mode=rolling fallback=%+.2fbps window=%gh update=%gm",
+            fallback,
+            window_hours,
+            update_minutes,
+        )
+
+        observations = []
+        if self.market_history is not None:
+            start_ms = int(
+                (now - self.strategy.window_sec - 2 * 1.0) * 1000
+            )
+            end_ms = int(now * 1000)
+            try:
+                observations = await asyncio.to_thread(
+                    self.market_history.recent_premium_observations,
+                    self.cfg.symbol,
+                    self.cfg.hedge_venue,
+                    start_ms,
+                    end_ms,
+                )
+            except Exception:
+                # History is an optional bootstrap aid; a storage/read error
+                # must not take down live execution or change the fallback.
+                log.exception("rolling center history bootstrap failed")
+
+        try:
+            update = self.strategy.bootstrap(observations, now=now)
+        except Exception:
+            log.exception("rolling center bootstrap failed; using fallback")
+            update = None
+        if update is not None:
+            self._log_rolling_center_update(update, initialized=True)
+            return
+
+        samples, span_sec = self.strategy.rolling_history_summary(now=now)
+        log.info(
+            "rolling center unavailable: history=%.1fh required=%gh "
+            "using fallback=%+.2fbps",
+            span_sec / 3600.0,
+            window_hours,
+            fallback,
+        )
+
     async def _strategy_loop(self) -> None:
         while not self.stop.is_set():
             await self._update_evt.wait()
@@ -418,7 +488,9 @@ class Engine:
             return False
         before = self.strategy.state()
         values = calculate_premiums(e_bid, e_ask, h_bid, h_ask)
-        self.strategy.update(now, values.premium_bps)
+        update = self.strategy.update(now, values.premium_bps)
+        if isinstance(update, RollingCenterUpdate):
+            self._log_rolling_center_update(update, initialized=False)
         after = self.strategy.state()
         if after != before:
             self._update_evt.set()

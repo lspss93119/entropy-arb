@@ -49,6 +49,17 @@ strategy:
     upper_bps: 4.0
     lower_bps: 4.0
 
+# Optional rolling center (replace the active params above; do not enable both):
+# strategy:
+#   name: stable_basis
+#   params:
+#     center_mode: rolling
+#     center_bps: -1.8          # fixed fallback while history is insufficient
+#     center_window_hours: 12
+#     center_update_minutes: 60
+#     upper_bps: 0.75
+#     lower_bps: 0.75
+
 # Alternate (choose this block instead of the active strategy above):
 # strategy:
 #   name: drifting_basis
