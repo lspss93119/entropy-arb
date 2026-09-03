@@ -8,6 +8,7 @@ import time
 from typing import Any
 
 from .storage import EntropyReferenceRow, HedgeReferenceRow, MarketHistoryStore
+from .ws_lifecycle import EntropyWebSocketLifecycle
 
 try:
     from websockets.asyncio.client import connect as ws_connect
@@ -220,69 +221,83 @@ class HLReferenceFeed:
     async def run(self, stop: asyncio.Event) -> None:
         """Consume activeAssetCtx frames with isolated reconnect handling."""
         backoff = 1.0
+        attempt = 0
         while not stop.is_set():
+            attempt += 1
+            lifecycle = EntropyWebSocketLifecycle(
+                "entropy-reference",
+                attempt=attempt,
+                logger=log,
+            )
+            lifecycle.attempt_started()
             pinger = None
             try:
-                async with self._connect(
-                    self.ws_url,
-                    max_size=2**23,
-                    open_timeout=10,
-                    ping_interval=15,
-                    ping_timeout=15,
-                ) as ws:
-                    backoff = 1.0
-                    await ws.send(
-                        json.dumps(
-                            {
-                                "method": "subscribe",
-                                "subscription": {
-                                    "type": "activeAssetCtx",
-                                    "coin": self.coin,
-                                },
-                            }
-                        )
-                    )
-                    pinger = asyncio.create_task(self._pinger(ws))
-                    async for raw in ws:
-                        recv_ms = self._clock_ns() // 1_000_000
+                try:
+                    async with self._connect(
+                        self.ws_url,
+                        max_size=2**23,
+                        open_timeout=10,
+                        ping_interval=15,
+                        ping_timeout=15,
+                    ) as ws:
+                        lifecycle.opened()
+                        lifecycle.connected()
                         backoff = 1.0
-                        try:
-                            msg = json.loads(raw)
-                        except (json.JSONDecodeError, TypeError) as exc:
-                            log.warning(
-                                "[%s] malformed reference JSON: %s",
-                                self.name,
-                                exc,
+                        await ws.send(
+                            json.dumps(
+                                {
+                                    "method": "subscribe",
+                                    "subscription": {
+                                        "type": "activeAssetCtx",
+                                        "coin": self.coin,
+                                    },
+                                }
                             )
-                            continue
-                        if not isinstance(msg, dict):
-                            continue
-                        try:
-                            parsed = parse_hl_reference(msg, coin=self.coin)
-                        except Exception as exc:
-                            log.warning(
-                                "[%s] malformed relevant reference frame: %s",
-                                self.name,
-                                exc,
-                            )
-                            continue
-                        if parsed is not None and self.writer.enabled:
-                            self.writer.write((recv_ms, *parsed))
-                        if stop.is_set():
-                            break
+                        )
+                        pinger = asyncio.create_task(self._pinger(ws))
+                        async for raw in ws:
+                            recv_ms = self._clock_ns() // 1_000_000
+                            backoff = 1.0
+                            try:
+                                msg = json.loads(raw)
+                            except (json.JSONDecodeError, TypeError) as exc:
+                                log.warning(
+                                    "[%s] malformed reference JSON: %s",
+                                    self.name,
+                                    exc,
+                                )
+                                continue
+                            if not isinstance(msg, dict):
+                                continue
+                            try:
+                                parsed = parse_hl_reference(msg, coin=self.coin)
+                            except Exception as exc:
+                                log.warning(
+                                    "[%s] malformed relevant reference frame: %s",
+                                    self.name,
+                                    exc,
+                                )
+                                continue
+                            if parsed is not None and self.writer.enabled:
+                                self.writer.write((recv_ms, *parsed))
+                            if stop.is_set():
+                                break
+                finally:
+                    if pinger is not None:
+                        pinger.cancel()
+                        await asyncio.gather(pinger, return_exceptions=True)
+                    lifecycle.closing()
+                    lifecycle.closed()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                lifecycle.error(exc, reconnect_delay=backoff)
                 log.warning(
                     "[%s] reference ws error: %s — reconnect in %.0fs",
                     self.name,
                     exc,
                     backoff,
                 )
-            finally:
-                if pinger is not None:
-                    pinger.cancel()
-                    await asyncio.gather(pinger, return_exceptions=True)
             if stop.is_set():
                 break
             await self._sleep(backoff)

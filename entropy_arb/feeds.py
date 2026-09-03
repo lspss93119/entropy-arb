@@ -25,6 +25,7 @@ except ImportError:
     from websockets import connect as ws_connect  # type: ignore
 
 from .book import OrderBook
+from .ws_lifecycle import EntropyWebSocketLifecycle
 
 log = logging.getLogger("feeds")
 
@@ -132,13 +133,17 @@ class HLBookFeed:
     """Official Hyperliquid l2Book consumer for one coin (e.g. 'io:SNDK')."""
 
     def __init__(self, name: str, ws_url: str, coin: str, book: OrderBook,
-                 notify: Callable[[], None], ping_sec: float = 5.0) -> None:
+                 notify: Callable[[], None], ping_sec: float = 5.0,
+                 *, purpose: str = "entropy-market-data",
+                 count_active: bool = True) -> None:
         self.name = name
         self.ws_url = ws_url
         self.coin = coin
         self.book = book
         self.notify = notify
         self.ping_sec = ping_sec
+        self.purpose = purpose
+        self.count_active = count_active
         self._snapped = False
 
     def _on_frame(self, msg: dict) -> None:
@@ -168,32 +173,47 @@ class HLBookFeed:
 
     async def run(self, stop: asyncio.Event) -> None:
         backoff = 1.0
+        attempt = 0
         while not stop.is_set():
+            attempt += 1
+            lifecycle = EntropyWebSocketLifecycle(
+                self.purpose,
+                attempt=attempt,
+                logger=log,
+                count_active=self.count_active,
+            )
+            lifecycle.attempt_started()
             ptask = None
             try:
-                async with ws_connect(self.ws_url, max_size=2**23, open_timeout=10,
-                                      ping_interval=15, ping_timeout=15) as ws:
-                    log.info("[%s] connected (official ws, %s)", self.name, self.coin)
-                    self.book.clear()
-                    self._snapped = False
-                    await ws.send(json.dumps({
-                        "method": "subscribe",
-                        "subscription": {"type": "l2Book", "coin": self.coin,
-                                         "fast": True}}))
-                    ptask = asyncio.create_task(self._pinger(ws))
-                    async for raw in ws:
-                        backoff = 1.0
-                        self._on_frame(json.loads(raw))
-                        if stop.is_set():
-                            break
+                try:
+                    async with ws_connect(self.ws_url, max_size=2**23, open_timeout=10,
+                                          ping_interval=15, ping_timeout=15) as ws:
+                        lifecycle.opened()
+                        lifecycle.connected()
+                        log.info("[%s] connected (official ws, %s)", self.name, self.coin)
+                        self.book.clear()
+                        self._snapped = False
+                        await ws.send(json.dumps({
+                            "method": "subscribe",
+                            "subscription": {"type": "l2Book", "coin": self.coin,
+                                             "fast": True}}))
+                        ptask = asyncio.create_task(self._pinger(ws))
+                        async for raw in ws:
+                            backoff = 1.0
+                            self._on_frame(json.loads(raw))
+                            if stop.is_set():
+                                break
+                finally:
+                    if ptask is not None:
+                        ptask.cancel()
+                    lifecycle.closing()
+                    lifecycle.closed()
             except asyncio.CancelledError:
                 raise
             except Exception as e:
+                lifecycle.error(e, reconnect_delay=backoff)
                 log.warning("[%s] ws error: %s — reconnect in %.0fs",
                             self.name, e, backoff)
-            finally:
-                if ptask is not None:
-                    ptask.cancel()
             self.book.ready = False
             self.notify()
             if stop.is_set():

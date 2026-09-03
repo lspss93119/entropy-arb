@@ -145,9 +145,13 @@ class HLVenue:
                      self.name, other.name)
 
     def start_tasks(self, stop: asyncio.Event, notify, live: bool) -> list:
+        is_entropy = self.conf.hl_dex == "io"
         return [asyncio.create_task(
             HLBookFeed(self.name, self.ws_url, self.coin, self.book,
-                       notify).run(stop),
+                       notify,
+                       purpose=("entropy-market-data"
+                                if is_entropy else "hyperliquid-market-data"),
+                       count_active=is_entropy).run(stop),
             name=f"book-{self.key}")]
 
     def ready_to_trade(self) -> bool:
