@@ -112,6 +112,7 @@ def test_renders_key_numbers():
     out = render(eng)
     for needle in ("ENTROPY", "RH", "SELL entropy", "BUY entropy",
                    "100.14", "99.99", "mid premium", "midline",
+                   "center source", "fixed_fallback",
                    "7 / 1", "sell_entropy", "filled/filled",
                    "$+10.00", "$+0.0800", "LIVE", "s ago"):
         assert needle in out, f"{needle!r} missing from render"

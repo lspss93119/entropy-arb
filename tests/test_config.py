@@ -98,6 +98,28 @@ strategy:
     assert cfg.strategy.center_bps == -1.8
     assert cfg.strategy.center_window_hours == 12
     assert cfg.strategy.center_update_minutes == 60
+    assert cfg.strategy.center_min_coverage_ratio == pytest.approx(0.80)
+    assert cfg.strategy.center_min_samples == 60
+    assert cfg.strategy.center_last_valid_max_age_hours == pytest.approx(6.0)
+
+
+def test_rolling_center_availability_parameters_load():
+    cfg = load("""
+strategy:
+  name: stable_basis
+  params:
+    center_mode: rolling
+    center_bps: -1.8
+    center_min_coverage_ratio: 0.85
+    center_min_samples: 120
+    center_last_valid_max_age_hours: 4
+    upper_bps: 0.75
+    lower_bps: 0.75
+""")
+
+    assert cfg.strategy.center_min_coverage_ratio == pytest.approx(0.85)
+    assert cfg.strategy.center_min_samples == 120
+    assert cfg.strategy.center_last_valid_max_age_hours == pytest.approx(4.0)
 
 
 def test_rolling_center_parameters_are_strictly_validated():
@@ -130,6 +152,36 @@ strategy:
     upper_bps: 0.75
     lower_bps: 0.75
 """, "center_update_minutes")
+    expect_error("""
+strategy:
+  name: stable_basis
+  params:
+    center_mode: rolling
+    center_bps: -1.8
+    center_min_coverage_ratio: 1.1
+    upper_bps: 0.75
+    lower_bps: 0.75
+""", "center_min_coverage_ratio")
+    expect_error("""
+strategy:
+  name: stable_basis
+  params:
+    center_mode: rolling
+    center_bps: -1.8
+    center_min_samples: 0
+    upper_bps: 0.75
+    lower_bps: 0.75
+""", "center_min_samples")
+    expect_error("""
+strategy:
+  name: stable_basis
+  params:
+    center_mode: rolling
+    center_bps: -1.8
+    center_last_valid_max_age_hours: 0
+    upper_bps: 0.75
+    lower_bps: 0.75
+""", "center_last_valid_max_age_hours")
 
 
 def test_drifting_strategy_config_loads():

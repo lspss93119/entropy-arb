@@ -23,7 +23,7 @@ def test_stable_basis_is_immediately_ready_and_fixed():
     assert after == before
 
 
-def _rolling_stable():
+def _rolling_stable(**kwargs):
     return StableBasisStrategy(
         center_bps=-1.8,
         upper_bps=0.75,
@@ -31,7 +31,13 @@ def _rolling_stable():
         center_mode="rolling",
         center_window_hours=12,
         center_update_minutes=60,
+        **kwargs,
     )
+
+
+def _full_rolling_history(now, value=-6.0):
+    start = now - 12 * 3600.0
+    return [(start + (i + 0.5) * 60.0, value) for i in range(720)]
 
 
 def test_rolling_center_with_insufficient_history_uses_fixed_fallback():
@@ -50,10 +56,14 @@ def test_rolling_center_with_insufficient_history_uses_fixed_fallback():
 
 def test_rolling_center_bootstrap_uses_causal_twelve_hour_median():
     strategy = _rolling_stable()
+    now = 12 * 3600.0 + 1.0
+    history = _full_rolling_history(now)
+    history[0] = (history[0][0], -10.0)
+    history[1] = (history[1][0], -2.0)
 
     update = strategy.bootstrap(
-        [(1.0, -10.0), (6 * 3600.0, -2.0), (12 * 3600.0, -6.0)],
-        now=12 * 3600.0 + 1.0,
+        history,
+        now=now,
     )
 
     assert update is not None
@@ -63,11 +73,14 @@ def test_rolling_center_bootstrap_uses_causal_twelve_hour_median():
 
 def test_rolling_center_excludes_future_bootstrap_samples():
     strategy = _rolling_stable()
+    now = 12 * 3600.0 + 1.0
+    history = _full_rolling_history(now)
+    history[0] = (history[0][0], -10.0)
+    history[1] = (history[1][0], -2.0)
 
     strategy.bootstrap(
-        [(1.0, -10.0), (6 * 3600.0, -2.0), (12 * 3600.0, -6.0),
-         (12 * 3600.0 + 2.0, 1000.0)],
-        now=12 * 3600.0 + 1.0,
+        history + [(now + 1.0, 1000.0)],
+        now=now,
     )
 
     assert strategy.state().center_bps == pytest.approx(-6.0)
@@ -75,46 +88,43 @@ def test_rolling_center_excludes_future_bootstrap_samples():
 
 def test_rolling_center_updates_at_most_once_per_hour():
     strategy = _rolling_stable()
-    history = ([
-        (1.0, -10.0),
-    ] + [
-        (3601.0 + i * 3600.0, float(i))
-        for i in range(9)
-    ] + [(12 * 3600.0, -6.0)])
+    now = 100_000.0
     strategy.bootstrap(
-        history,
-        now=12 * 3600.0 + 1.0,
+        _full_rolling_history(now),
+        now=now,
     )
     initial = strategy.state().center_bps
 
-    assert strategy.update(12 * 3600.0 + 3600.0, 20.0) is None
+    assert strategy.update(now + 1800.0, 20.0) is None
     assert strategy.state().center_bps == initial
 
-    changed = strategy.update(12 * 3600.0 + 3600.0 + 1.0, 20.0)
+    for i in range(30):
+        strategy.update(now + 1830.0 + i * 60.0, 20.0)
+    changed = strategy.update(now + 3600.0, 20.0)
     assert changed is not None
-    assert strategy.state().center_bps != initial
+    assert strategy.state().center_bps == initial
 
 
 def test_rolling_center_keeps_last_valid_value_when_update_has_no_history():
     strategy = _rolling_stable()
-    strategy.bootstrap(
-        [(1.0, -10.0), (6 * 3600.0, -2.0), (12 * 3600.0, -6.0)],
-        now=12 * 3600.0 + 1.0,
-    )
+    now = 100_000.0
+    strategy.bootstrap(_full_rolling_history(now), now=now)
     initial = strategy.state().center_bps
 
     # A non-finite live observation is ignored; the previously valid center
     # remains effective and no exception escapes the strategy boundary.
-    assert strategy.update(12 * 3600.0 + 3600.0 + 1.0, math.nan) is None
+    assert strategy.update(now + 3600.0, math.nan) is None
     assert strategy.state().center_bps == initial
+
+    # A later hourly window with only one new sample is below the coverage
+    # gate, but the recent last-valid center is retained.
+    assert strategy.update(now + 5 * 3600.0, 20.0) is None
+    assert strategy.state().center_bps == initial
+    assert strategy.state().center_source == "last_valid"
 
 
 def test_rolling_center_restart_bootstraps_from_the_same_history():
-    observations = [
-        (1.0, -10.0),
-        (6 * 3600.0, -2.0),
-        (12 * 3600.0, -6.0),
-    ]
+    observations = _full_rolling_history(12 * 3600.0 + 1.0)
     first = _rolling_stable()
     second = _rolling_stable()
 

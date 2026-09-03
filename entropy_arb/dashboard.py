@@ -77,6 +77,7 @@ _ZH = {
     "mid premium ": "中间价溢价 ",
     "   strategy ": "   策略 ",
     "   midline ": "   中枢 ",
+    "   center source ": "   中枢来源 ",
     "   band ": "   区间 ",
     "   window ": "   窗口 ",
     "   span ": "   覆盖时长 ",
@@ -350,6 +351,8 @@ class Dashboard:
         head.append(self._t("   strategy "), style="dim")
         head.append(eng.cfg.strategy.name)
         head.append(self._t("   midline "), style="dim")
+        head.append(self._t("   center source "), style="dim")
+        head.append(state.center_source or "—")
         if state.ready and state.center_bps is not None:
             head.append(f"{state.center_bps:+.2f}")
             head.append(self._t("   band "), style="dim")

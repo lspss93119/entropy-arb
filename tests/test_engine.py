@@ -20,6 +20,8 @@ from entropy_arb.config import load_config  # noqa: E402
 from entropy_arb.engine import Engine  # noqa: E402
 from entropy_arb.storage import MarketHistoryStore  # noqa: E402
 from entropy_arb.premium import calculate_premiums  # noqa: E402
+from entropy_arb.rolling_center_state import RollingCenterStateStore  # noqa: E402
+from entropy_arb.strategy import RollingCenterSnapshot  # noqa: E402
 
 NO_ENV = os.path.join(tempfile.gettempdir(), "entropy-arb-no-such.env")
 
@@ -168,6 +170,11 @@ def make_engine(**thr):
     eng.venues = {"entropy": eng.entropy, "hedge": eng.hedge}
     eng._step, eng._min_base, eng._min_notional = 1e-4, 1e-4, 10.0
     return eng
+
+
+def full_rolling_history(now, value=-6.0):
+    start = now - 12 * 3600.0
+    return [(start + (i + 0.5) * 60.0, value) for i in range(720)]
 
 
 def approx(a, b, tol=1e-9):
@@ -368,21 +375,92 @@ def test_rolling_center_bootstrap_from_history_updates_effective_thresholds():
         lower=0.75,
         center_mode="rolling",
     )
-    observations = [
-        (1.0, -10.0),
-        (6 * 3600.0, -2.0),
-        (12 * 3600.0, -6.0),
-    ]
+    now = 12 * 3600.0 + 1.0
+    observations = full_rolling_history(now)
+    observations[0] = (observations[0][0], -10.0)
+    observations[1] = (observations[1][0], -2.0)
     eng.market_history = SimpleNamespace(
         recent_premium_observations=lambda *args: observations
     )
 
-    asyncio.run(eng._bootstrap_rolling_center(now=12 * 3600.0 + 1.0))
+    asyncio.run(eng._bootstrap_rolling_center(now=now))
     state = eng.strategy.state()
 
     assert state.center_bps == pytest.approx(-6.0)
     assert eng._eff_threshold(eng.hedge, eng.entropy, state) == pytest.approx(-5.25)
     assert eng._eff_threshold(eng.entropy, eng.hedge, state) == pytest.approx(6.75)
+
+
+def test_engine_persists_fresh_center_and_restores_recent_last_valid(
+        tmp_path, caplog):
+    now = 100_000.0
+    path = tmp_path / "rolling-center.json"
+    eng = make_engine(
+        midline=-1.8,
+        upper=0.75,
+        lower=0.75,
+        center_mode="rolling",
+    )
+    eng.rolling_center_state_path = str(path)
+    eng.market_history = SimpleNamespace(
+        recent_premium_observations=lambda *args: full_rolling_history(now)
+    )
+
+    asyncio.run(eng._bootstrap_rolling_center(now=now))
+    persisted = RollingCenterStateStore(path).load()
+    assert persisted is not None
+    assert persisted.center_bps == pytest.approx(-6.0)
+    assert persisted.coverage_ratio == pytest.approx(1.0)
+
+    restarted = make_engine(
+        midline=-1.8,
+        upper=0.75,
+        lower=0.75,
+        center_mode="rolling",
+    )
+    restarted.rolling_center_state_path = str(path)
+    restarted.market_history = SimpleNamespace(
+        recent_premium_observations=lambda *args: full_rolling_history(
+            now, value=-5.0
+        )[:400]
+    )
+    caplog.set_level(logging.INFO, logger="engine")
+    asyncio.run(restarted._bootstrap_rolling_center(now=now + 3600.0))
+
+    assert restarted.strategy.state().center_bps == pytest.approx(-6.0)
+    assert restarted.strategy.state().center_source == "last_valid"
+    assert "using last-valid=-6.00bps" in caplog.text
+
+
+def test_engine_old_last_valid_center_falls_back_to_configured_center(
+        tmp_path, caplog):
+    now = 100_000.0
+    path = tmp_path / "rolling-center.json"
+    RollingCenterStateStore(path).save(RollingCenterSnapshot(
+        center_bps=-6.0,
+        calculated_at=now - 7 * 3600.0,
+        window_start=now - 19 * 3600.0,
+        window_end=now - 7 * 3600.0,
+        coverage_ratio=1.0,
+        sample_count=720,
+    ))
+    eng = make_engine(
+        midline=-1.8,
+        upper=0.75,
+        lower=0.75,
+        center_mode="rolling",
+    )
+    eng.rolling_center_state_path = str(path)
+    eng.market_history = SimpleNamespace(
+        recent_premium_observations=lambda *args: []
+    )
+    caplog.set_level(logging.INFO, logger="engine")
+
+    asyncio.run(eng._bootstrap_rolling_center(now=now))
+
+    assert eng.strategy.state().center_bps == pytest.approx(-1.8)
+    assert eng.strategy.state().center_source == "fixed_fallback"
+    assert "no recent last-valid center" in caplog.text
 
 
 def test_rolling_center_thresholds_keep_existing_inventory_surcharge():
@@ -395,7 +473,7 @@ def test_rolling_center_thresholds_keep_existing_inventory_surcharge():
     eng.entropy.set_book(100.0, 100.1)
     eng.hedge.set_book(100.0, 100.1)
     eng.strategy.bootstrap(
-        [(1.0, -10.0), (6 * 3600.0, -2.0), (12 * 3600.0, -6.0)],
+        full_rolling_history(12 * 3600.0 + 1.0),
         now=12 * 3600.0 + 1.0,
     )
 
@@ -418,7 +496,7 @@ def test_rolling_center_thresholds_keep_existing_inventory_surcharge():
     buy_eng.entropy.set_book(100.0, 100.1)
     buy_eng.hedge.set_book(100.0, 100.1)
     buy_eng.strategy.bootstrap(
-        [(1.0, -10.0), (6 * 3600.0, -2.0), (12 * 3600.0, -6.0)],
+        full_rolling_history(12 * 3600.0 + 1.0),
         now=12 * 3600.0 + 1.0,
     )
     buy_eng.entropy.position = 90.0
@@ -441,7 +519,7 @@ def test_rolling_center_status_exposes_effective_center(caplog):
         center_mode="rolling",
     )
     eng.strategy.bootstrap(
-        [(1.0, -10.0), (6 * 3600.0, -2.0), (12 * 3600.0, -6.0)],
+        full_rolling_history(12 * 3600.0 + 1.0),
         now=12 * 3600.0 + 1.0,
     )
     eng.entropy.set_book(100.0, 100.1)

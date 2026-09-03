@@ -22,6 +22,7 @@ import os
 import time
 from collections import deque
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, List, Optional
 
 import aiohttp
@@ -32,8 +33,13 @@ from .entropy_quota import EntropyQuotaCoordinator
 from .premium import calculate_premiums
 from .recorder import MinuteRecorder
 from .reference import ReferenceRecorder
+from .rolling_center_state import RollingCenterStateStore
 from .storage import FLUSH_INTERVAL_SEC, MarketHistoryStore
-from .strategy import RollingCenterUpdate, StrategyState, build_strategy
+from .strategy import (
+    RollingCenterUpdate,
+    StrategyState,
+    build_strategy,
+)
 from .venue_hl import HLVenue
 from .venue_lighter import LighterVenue
 
@@ -124,6 +130,9 @@ class Engine:
         # Optional override is useful for tests; live defaults to a separate
         # append-only file beside the configured engine log.
         self.execution_telemetry_csv: Optional[str] = None
+        # Durable only for the latest valid rolling center; samples remain in
+        # the shared market-history database.  Tests may override this path.
+        self.rolling_center_state_path: Optional[str] = None
 
     # ------------------------------------------------------------- utilities
 
@@ -399,15 +408,46 @@ class Engine:
         label = "initialized" if initialized else "updated"
         log.info(
             "rolling center %s: old=%+.2fbps new=%+.2fbps window=%gh "
-            "samples=%d range=[%+.2f,%+.2f]",
+            "coverage=%.1f%% samples=%d range=[%+.2f,%+.2f]",
             label,
             update.old_center_bps,
             update.new_center_bps,
             update.window_sec / 3600.0,
+            update.coverage_ratio * 100.0,
             update.samples,
             update.range_min_bps,
             update.range_max_bps,
         )
+
+    def _rolling_center_state_store(self) -> RollingCenterStateStore | None:
+        path = self.rolling_center_state_path
+        if path is None:
+            # Unit tests often use a lightweight fake history object.  Do not
+            # share a real process-state sidecar across those isolated tests.
+            if (
+                self.market_history is not None
+                and not isinstance(self.market_history, MarketHistoryStore)
+            ):
+                return None
+            database = Path(self.cfg.recorder_database)
+            if str(database) == ":memory:":
+                return None
+            path = str(database.with_suffix(".rolling-center.json"))
+        return RollingCenterStateStore(path)
+
+    def _persist_rolling_center_update(self) -> None:
+        snapshot = self.strategy.last_valid_snapshot()
+        if snapshot is None:
+            return
+        store = self._rolling_center_state_store()
+        if store is None:
+            return
+        try:
+            store.save(snapshot)
+        except Exception:
+            # A sidecar failure must not change the center currently used for
+            # trading; the next valid update can retry the durable write.
+            log.exception("rolling center state persistence failed")
 
     async def _bootstrap_rolling_center(self, now: float | None = None) -> None:
         """Load only the recent premium window for an optional rolling center."""
@@ -424,10 +464,19 @@ class Engine:
             update_minutes,
         )
 
+        state_store = self._rolling_center_state_store()
+        if state_store is not None:
+            try:
+                persisted = state_store.load()
+            except Exception:
+                persisted = None
+            if persisted is not None:
+                self.strategy.restore_last_valid(persisted, now=now)
+
         observations = []
         if self.market_history is not None:
             start_ms = int(
-                (now - self.strategy.window_sec - 2 * 1.0) * 1000
+                (now - self.strategy.window_sec) * 1000
             )
             end_ms = int(now * 1000)
             try:
@@ -449,17 +498,40 @@ class Engine:
             log.exception("rolling center bootstrap failed; using fallback")
             update = None
         if update is not None:
+            self._persist_rolling_center_update()
             self._log_rolling_center_update(update, initialized=True)
             return
 
-        samples, span_sec = self.strategy.rolling_history_summary(now=now)
-        log.info(
-            "rolling center unavailable: history=%.1fh required=%gh "
-            "using fallback=%+.2fbps",
-            span_sec / 3600.0,
-            window_hours,
-            fallback,
+        samples, span_sec, coverage = self.strategy.rolling_coverage_summary(
+            now=now
         )
+        state = self.strategy.state()
+        if state.center_source == "last_valid":
+            snapshot = self.strategy.last_valid_snapshot()
+            age_hours = (
+                max(0.0, now - snapshot.calculated_at) / 3600.0
+                if snapshot is not None
+                else float("nan")
+            )
+            log.info(
+                "rolling center fresh history insufficient: coverage=%.1f%% "
+                "required=%.1f%% using last-valid=%+.2fbps age=%.1fh",
+                coverage * 100.0,
+                self.strategy.center_min_coverage_ratio * 100.0,
+                state.center_bps,
+                age_hours,
+            )
+        else:
+            log.info(
+                "rolling center unavailable: coverage=%.1f%% required=%.1f%% "
+                "samples=%d span=%.1fh no recent last-valid center "
+                "using fallback=%+.2fbps",
+                coverage * 100.0,
+                self.strategy.center_min_coverage_ratio * 100.0,
+                samples,
+                span_sec / 3600.0,
+                fallback,
+            )
 
     async def _strategy_loop(self) -> None:
         while not self.stop.is_set():
@@ -494,6 +566,7 @@ class Engine:
         values = calculate_premiums(e_bid, e_ask, h_bid, h_ask)
         update = self.strategy.update(now, values.premium_bps)
         if isinstance(update, RollingCenterUpdate):
+            self._persist_rolling_center_update()
             self._log_rolling_center_update(update, initialized=False)
         after = self.strategy.state()
         if after != before:
@@ -1204,13 +1277,15 @@ class Engine:
             return (
                 f"strategy={self.cfg.strategy.name} "
                 f"center={state.center_bps:+.2f}bps "
-                f"band=[{low:+.2f},{high:+.2f}]"
+                f"band=[{low:+.2f},{high:+.2f}] "
+                f"source={state.center_source or '—'}"
             )
         return (
             f"strategy={self.cfg.strategy.name} "
             f"window={state.window_minutes}m "
             f"center=WARMING_UP "
-            f"band-offset=[{-state.lower_bps:+.2f},{state.upper_bps:+.2f}]"
+            f"band-offset=[{-state.lower_bps:+.2f},{state.upper_bps:+.2f}] "
+            f"source={state.center_source or 'warming_up'}"
         )
 
     def _status_strategy_desc(self, state: StrategyState) -> str:
@@ -1219,14 +1294,16 @@ class Engine:
             return (
                 f"strategy={self.cfg.strategy.name} "
                 f"center={state.center_bps:+.2f} "
-                f"band={low:+.2f}..{high:+.2f}"
+                f"band={low:+.2f}..{high:+.2f} "
+                f"source={state.center_source or '—'}"
             )
         span_min = (state.warmup_span_sec or 0.0) / 60.0
         coverage = 100.0 * (state.coverage_ratio or 0.0)
         return (
             f"strategy={self.cfg.strategy.name} "
             f"WARMING_UP window={state.window_minutes}m "
-            f"span={span_min:.1f}m valid={coverage:.1f}%"
+            f"span={span_min:.1f}m valid={coverage:.1f}% "
+            f"source={state.center_source or 'warming_up'}"
         )
 
     async def _status_loop(self) -> None:

@@ -35,6 +35,9 @@ HL_WS_URL = "wss://api.hyperliquid.xyz/ws"   # official ws — the only HL feed 
 
 HEDGE_VENUES = ("lighter", "lighter-rh", "tradexyz")
 DEFAULT_RECORDER_DATABASE = "data/market-history.sqlite"
+DEFAULT_CENTER_MIN_COVERAGE_RATIO = 0.80
+DEFAULT_CENTER_MIN_SAMPLES = 60
+DEFAULT_CENTER_LAST_VALID_MAX_AGE_HOURS = 6.0
 
 
 @dataclass(frozen=True)
@@ -121,6 +124,9 @@ class StrategyConf:
     center_mode: str = "fixed"
     center_window_hours: float = 12.0
     center_update_minutes: int = 60
+    center_min_coverage_ratio: float = DEFAULT_CENTER_MIN_COVERAGE_RATIO
+    center_min_samples: int = DEFAULT_CENTER_MIN_SAMPLES
+    center_last_valid_max_age_hours: float = DEFAULT_CENTER_LAST_VALID_MAX_AGE_HOURS
 
 
 @dataclass
@@ -302,6 +308,14 @@ def _optional_positive_int(params: dict, key: str, default: int,
     return value
 
 
+def _optional_coverage_ratio(params: dict, key: str, default: float,
+                             path: str) -> float:
+    value = _optional_finite_number(params, key, default, path)
+    if value > 1.0:
+        raise ConfigError(f"'{path}.{key}' must be in (0, 1]")
+    return value
+
+
 def _parse_strategy(raw: dict) -> StrategyConf:
     node = raw.get("strategy")
     if not isinstance(node, dict):
@@ -317,7 +331,9 @@ def _parse_strategy(raw: dict) -> StrategyConf:
     if name == "stable_basis":
         allowed = {
             "center_mode", "center_bps", "center_window_hours",
-            "center_update_minutes", "upper_bps", "lower_bps",
+            "center_update_minutes", "center_min_coverage_ratio",
+            "center_min_samples", "center_last_valid_max_age_hours",
+            "upper_bps", "lower_bps",
         }
     else:
         allowed = {"window_minutes", "upper_bps", "lower_bps"}
@@ -349,6 +365,18 @@ def _parse_strategy(raw: dict) -> StrategyConf:
         center_update_minutes = _optional_positive_int(
             params, "center_update_minutes", 60, "strategy.params"
         )
+        center_min_coverage_ratio = _optional_coverage_ratio(
+            params, "center_min_coverage_ratio",
+            DEFAULT_CENTER_MIN_COVERAGE_RATIO, "strategy.params"
+        )
+        center_min_samples = _optional_positive_int(
+            params, "center_min_samples", DEFAULT_CENTER_MIN_SAMPLES,
+            "strategy.params"
+        )
+        center_last_valid_max_age_hours = _optional_finite_number(
+            params, "center_last_valid_max_age_hours",
+            DEFAULT_CENTER_LAST_VALID_MAX_AGE_HOURS, "strategy.params"
+        )
         return StrategyConf(
             name=name,
             center_bps=center,
@@ -357,6 +385,9 @@ def _parse_strategy(raw: dict) -> StrategyConf:
             center_mode=center_mode,
             center_window_hours=center_window_hours,
             center_update_minutes=center_update_minutes,
+            center_min_coverage_ratio=center_min_coverage_ratio,
+            center_min_samples=center_min_samples,
+            center_last_valid_max_age_hours=center_last_valid_max_age_hours,
         )
 
     if "window_minutes" not in params:
