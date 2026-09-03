@@ -24,6 +24,7 @@ import aiohttp
 
 from .book import OrderBook
 from .config import VenueConf
+from .entropy_quota import EntropyQuotaCoordinator
 from .feeds import HLBookFeed
 
 log = logging.getLogger("hl")
@@ -60,7 +61,9 @@ class HLVenue:
     kind = "hl"
 
     def __init__(self, conf: VenueConf, api_url: str, ws_url: str,
-                 session: aiohttp.ClientSession, settle_timeout_sec: float) -> None:
+                 session: aiohttp.ClientSession, settle_timeout_sec: float,
+                 *, quota_coordinator: EntropyQuotaCoordinator | None = None,
+                 ) -> None:
         self.conf = conf
         self.key = conf.key
         self.name = conf.label
@@ -88,6 +91,7 @@ class HLVenue:
         self.min_quote = 10.0
         self._cloid = int(time.time() * 1000)
         self._signing = None      # lazy hyperliquid-sdk signing module
+        self.quota_coordinator = quota_coordinator
 
     async def _info(self, payload: dict):
         async with self.session.post(
@@ -146,12 +150,16 @@ class HLVenue:
 
     def start_tasks(self, stop: asyncio.Event, notify, live: bool) -> list:
         is_entropy = self.conf.hl_dex == "io"
+        quota_coordinator = getattr(self, "quota_coordinator", None)
         return [asyncio.create_task(
             HLBookFeed(self.name, self.ws_url, self.coin, self.book,
                        notify,
                        purpose=("entropy-market-data"
                                 if is_entropy else "hyperliquid-market-data"),
-                       count_active=is_entropy).run(stop),
+                       count_active=is_entropy,
+                       quota_coordinator=(
+                           quota_coordinator if is_entropy else None
+                       )).run(stop),
             name=f"book-{self.key}")]
 
     def ready_to_trade(self) -> bool:

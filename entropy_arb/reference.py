@@ -7,6 +7,7 @@ import math
 import time
 from typing import Any
 
+from .entropy_quota import EntropyQuotaCoordinator, is_entropy_quota_error
 from .storage import EntropyReferenceRow, HedgeReferenceRow, MarketHistoryStore
 from .ws_lifecycle import EntropyWebSocketLifecycle
 
@@ -203,6 +204,7 @@ class HLReferenceFeed:
         connect=ws_connect,
         clock_ns=time.time_ns,
         sleep=asyncio.sleep,
+        quota_coordinator: EntropyQuotaCoordinator | None = None,
     ) -> None:
         self.name = name
         self.ws_url = ws_url
@@ -211,6 +213,7 @@ class HLReferenceFeed:
         self._connect = connect
         self._clock_ns = clock_ns
         self._sleep = sleep
+        self.quota_coordinator = quota_coordinator
 
     async def _pinger(self, ws) -> None:
         """Send reference-connection application pings every five seconds."""
@@ -222,7 +225,11 @@ class HLReferenceFeed:
         """Consume activeAssetCtx frames with isolated reconnect handling."""
         backoff = 1.0
         attempt = 0
+        coordinator = self.quota_coordinator
         while not stop.is_set():
+            if coordinator is not None:
+                if not await coordinator.wait_reference_recovery(stop):
+                    break
             attempt += 1
             lifecycle = EntropyWebSocketLifecycle(
                 "entropy-reference",
@@ -231,6 +238,7 @@ class HLReferenceFeed:
             )
             lifecycle.attempt_started()
             pinger = None
+            reconnect_delay = backoff
             try:
                 try:
                     async with self._connect(
@@ -291,16 +299,25 @@ class HLReferenceFeed:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                lifecycle.error(exc, reconnect_delay=backoff)
+                if (
+                    coordinator is not None
+                    and is_entropy_quota_error(exc)
+                ):
+                    coordinator.note_quota_error("reference")
+                lifecycle.error(exc, reconnect_delay=reconnect_delay)
                 log.warning(
                     "[%s] reference ws error: %s — reconnect in %.0fs",
                     self.name,
                     exc,
-                    backoff,
+                    reconnect_delay,
                 )
             if stop.is_set():
                 break
-            await self._sleep(backoff)
+            if coordinator is not None:
+                if not await coordinator.wait_or_stop(stop, reconnect_delay):
+                    break
+            else:
+                await self._sleep(reconnect_delay)
             backoff = min(backoff * 2, 30.0)
 
 
@@ -410,6 +427,7 @@ class ReferenceRecorder:
         hedge_market_id: int,
         store: MarketHistoryStore,
         feed_stop_timeout_sec: float = REFERENCE_FEED_STOP_TIMEOUT_SEC,
+        quota_coordinator: EntropyQuotaCoordinator | None = None,
     ) -> None:
         self.entropy_writer = EntropyReferenceStoreWriter(store, symbol, hedge_key)
         self.hedge_writer = HedgeReferenceStoreWriter(store, symbol, hedge_key)
@@ -418,6 +436,7 @@ class ReferenceRecorder:
             entropy_ws_url,
             entropy_coin,
             self.entropy_writer,
+            quota_coordinator=quota_coordinator,
         )
         self.hedge_feed = LighterReferenceFeed(
             "hedge-reference",

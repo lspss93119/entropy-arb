@@ -1203,6 +1203,7 @@ def test_reference_lifecycle_matrix(
             "entropy_coin": "io:SNDK",
             "hedge_ws_url": "wss://api.rh.lighter.xyz/stream",
             "hedge_market_id": 32, "store": eng.market_history,
+            "quota_coordinator": eng.entropy_quota,
         }
 
 

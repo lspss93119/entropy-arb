@@ -28,6 +28,7 @@ import aiohttp
 
 from .book import ArbPlan, floor_step, plan_arb
 from .config import Config
+from .entropy_quota import EntropyQuotaCoordinator
 from .premium import calculate_premiums
 from .recorder import MinuteRecorder
 from .reference import ReferenceRecorder
@@ -73,6 +74,7 @@ class Engine:
     def __init__(self, cfg: Config, record_only: bool = False) -> None:
         self.cfg = cfg
         self.strategy = build_strategy(cfg.strategy)
+        self.entropy_quota = EntropyQuotaCoordinator()
         self.record_only = record_only
         self.session: Optional[aiohttp.ClientSession] = None
         self.entropy = None
@@ -171,7 +173,8 @@ class Engine:
         if vc.kind == "lighter":
             return LighterVenue(vc, self.session, self.cfg.settle_timeout_sec)
         return HLVenue(vc, self.cfg.hl_api_url, self.cfg.hl_ws_url,
-                       self.session, self.cfg.settle_timeout_sec)
+                       self.session, self.cfg.settle_timeout_sec,
+                       quota_coordinator=self.entropy_quota)
 
     def _build_reference_recorder(self) -> Optional[ReferenceRecorder]:
         if self.cfg.hedge_venue not in REFERENCE_HEDGE_KEYS:
@@ -188,6 +191,7 @@ class Engine:
             hedge_ws_url=self.hedge.profile.ws_url,
             hedge_market_id=self.hedge.market_id,
             store=self.market_history,
+            quota_coordinator=self.entropy_quota,
         )
 
     async def _run_reference(self) -> None:

@@ -25,6 +25,7 @@ except ImportError:
     from websockets import connect as ws_connect  # type: ignore
 
 from .book import OrderBook
+from .entropy_quota import EntropyQuotaCoordinator, is_entropy_quota_error
 from .ws_lifecycle import EntropyWebSocketLifecycle
 
 log = logging.getLogger("feeds")
@@ -135,7 +136,9 @@ class HLBookFeed:
     def __init__(self, name: str, ws_url: str, coin: str, book: OrderBook,
                  notify: Callable[[], None], ping_sec: float = 5.0,
                  *, purpose: str = "entropy-market-data",
-                 count_active: bool = True) -> None:
+                 count_active: bool = True,
+                 quota_coordinator: EntropyQuotaCoordinator | None = None,
+                 ) -> None:
         self.name = name
         self.ws_url = ws_url
         self.coin = coin
@@ -144,6 +147,7 @@ class HLBookFeed:
         self.ping_sec = ping_sec
         self.purpose = purpose
         self.count_active = count_active
+        self.quota_coordinator = quota_coordinator
         self._snapped = False
 
     def _on_frame(self, msg: dict) -> None:
@@ -174,6 +178,8 @@ class HLBookFeed:
     async def run(self, stop: asyncio.Event) -> None:
         backoff = 1.0
         attempt = 0
+        quota_attempt = 0
+        coordinator = self.quota_coordinator
         while not stop.is_set():
             attempt += 1
             lifecycle = EntropyWebSocketLifecycle(
@@ -184,6 +190,9 @@ class HLBookFeed:
             )
             lifecycle.attempt_started()
             ptask = None
+            connected_for = 0.0
+            quota_failure = False
+            reconnect_delay = backoff
             try:
                 try:
                     async with ws_connect(self.ws_url, max_size=2**23, open_timeout=10,
@@ -197,6 +206,8 @@ class HLBookFeed:
                             "method": "subscribe",
                             "subscription": {"type": "l2Book", "coin": self.coin,
                                              "fast": True}}))
+                        if coordinator is not None:
+                            coordinator.mark_main_connected()
                         ptask = asyncio.create_task(self._pinger(ws))
                         async for raw in ws:
                             backoff = 1.0
@@ -204,19 +215,51 @@ class HLBookFeed:
                             if stop.is_set():
                                 break
                 finally:
+                    if coordinator is not None:
+                        connected_for = coordinator.main_healthy_for_s()
+                        coordinator.mark_main_disconnected()
                     if ptask is not None:
                         ptask.cancel()
+                        await asyncio.gather(ptask, return_exceptions=True)
                     lifecycle.closing()
                     lifecycle.closed()
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                lifecycle.error(e, reconnect_delay=backoff)
+                quota_failure = (
+                    coordinator is not None
+                    and is_entropy_quota_error(e)
+                )
+                reconnect_delay = backoff
+                if quota_failure:
+                    if connected_for >= coordinator.main_healthy_required_sec:
+                        quota_attempt = 0
+                    quota_attempt += 1
+                    coordinator.note_quota_error("main")
+                    reconnect_delay = coordinator.quota_reconnect_delay(
+                        quota_attempt
+                    )
+                    log.warning(
+                        "[entropy-quota] main quota reconnect attempt=%d "
+                        "delay=%.0fs",
+                        quota_attempt,
+                        reconnect_delay,
+                    )
+                else:
+                    quota_attempt = 0
+                lifecycle.error(e, reconnect_delay=reconnect_delay)
                 log.warning("[%s] ws error: %s — reconnect in %.0fs",
-                            self.name, e, backoff)
+                            self.name, e, reconnect_delay)
             self.book.ready = False
             self.notify()
             if stop.is_set():
                 break
-            await asyncio.sleep(backoff)
+            reconnect_delay = (
+                reconnect_delay if quota_failure else backoff
+            )
+            if coordinator is not None:
+                if not await coordinator.wait_or_stop(stop, reconnect_delay):
+                    break
+            else:
+                await asyncio.sleep(reconnect_delay)
             backoff = min(backoff * 2, 30.0)
