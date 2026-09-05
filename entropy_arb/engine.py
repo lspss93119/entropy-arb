@@ -1,8 +1,7 @@
 """Two-venue arbitrage engine: generic Venue A vs Venue B.
 
-The current configuration maps Venue A to Entropy and Venue B to the selected
-hedge venue. The engine keeps those external configuration names for CLI and
-config compatibility while using role-based names internally.
+The selected venue identities are supplied by the configuration; the engine
+uses only the stable A/B roles for signal and execution behavior.
 
 The signal is a fixed band around a configured midline (config.yaml):
 
@@ -145,8 +144,8 @@ class Engine:
 
     async def _run_inner(self) -> None:
         cfg = self.cfg
-        self.venue_a = self._make_venue(cfg.entropy)
-        self.venue_b = self._make_venue(cfg.hedge)
+        self.venue_a = self._make_venue(cfg.venue_a)
+        self.venue_b = self._make_venue(cfg.venue_b)
         self.venues = {"venue_a": self.venue_a, "venue_b": self.venue_b}
         await asyncio.gather(self.venue_a.load_market(),
                              self.venue_b.load_market())
@@ -162,9 +161,9 @@ class Engine:
                     "请用 --record-only")
             self.venue_a.init_signer()
             self.venue_b.init_signer()
-            if self.venue_b.kind == "hl":
+            if self.venue_a.kind == "hl" and self.venue_b.kind == "hl":
                 self.venue_a.share_nonces_with(self.venue_b)
-        if (self.venue_b.kind == "hl"
+        if (self.venue_a.kind == "hl" and self.venue_b.kind == "hl"
                 and self.venue_a._query_address()
                 and self.venue_a._query_address() == self.venue_b._query_address()):
             self.venue_b.include_core_equity = False  # shared account: count once

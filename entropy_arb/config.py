@@ -1,20 +1,20 @@
-"""Configuration: strategy from a YAML file, credentials from .env, market
-selection (symbol + hedge venue) from the command line.
+"""Configuration: strategy from a YAML file, credentials from .env, and
+the selected venue pair from the command line.
 
 The split is deliberate: config.yaml IS the strategy (thresholds, sizing,
 risk) and is safe to share/commit as an example; .env holds only secrets;
 which markets to trade is stated explicitly on every start (--symbol,
---hedge). Every YAML key is validated against the schema below, so a typo
+--venue-a, --venue-b). Every YAML key is validated against the schema below, so a typo
 is an error rather than a setting that silently does nothing.
 
 Threshold model (fixed numbers the user derives from recorded minute data):
 
-    premium_bps = (entropy_price / hedge_price - 1) * 10_000
+    premium_bps = (venue_a_price / venue_b_price - 1) * 10_000
 
-    SELL entropy / BUY hedge  fires when the executable premium
-        (entropy bid over hedge ask) >= midline_bps + upper_bps
-    BUY entropy / SELL hedge  fires when the executable premium
-        (entropy ask under hedge bid) <= midline_bps - lower_bps
+    SELL A / BUY B  fires when the executable premium
+        (A bid over B ask) >= midline_bps + upper_bps
+    BUY A / SELL B  fires when the executable premium
+        (B bid over A ask) >= lower_bps - midline_bps
 
     Both hurdles are net of both venues' taker fees, so a full round trip
     nets >= (upper_bps + lower_bps) after fees by construction.
@@ -31,7 +31,7 @@ from dotenv import load_dotenv
 HL_API_URL = "https://api.hyperliquid.xyz"
 HL_WS_URL = "wss://api.hyperliquid.xyz/ws"   # official ws — the only HL feed used
 
-HEDGE_VENUES = ("lighter", "lighter-rh", "tradexyz")
+SUPPORTED_VENUES = ("entropy", "lighter", "lighter-rh", "tradexyz")
 
 
 @dataclass(frozen=True)
@@ -79,7 +79,8 @@ class HLCreds:
 
 @dataclass
 class VenueConf:
-    key: str                  # "entropy" | "hedge"
+    key: str                  # "venue_a" | "venue_b" role
+    venue_name: str           # actual supported venue identity
     kind: str                 # "hl" | "lighter"
     label: str                # human name for logs, e.g. "ENTROPY", "RH"
     symbol: str
@@ -97,9 +98,8 @@ class VenueConf:
 @dataclass
 class Config:
     symbol: str
-    hedge_venue: str
-    entropy: VenueConf
-    hedge: VenueConf
+    venue_a: VenueConf
+    venue_b: VenueConf
     # thresholds (the whole signal)
     midline_bps: float
     upper_bps: float
@@ -139,7 +139,7 @@ class Config:
 
     @property
     def creds_complete(self) -> bool:
-        for v in (self.entropy, self.hedge):
+        for v in (self.venue_a, self.venue_b):
             if v.kind == "hl" and not (v.hl_creds and v.hl_creds.complete):
                 return False
             if v.kind == "lighter" and not (v.lighter_creds
@@ -157,16 +157,27 @@ _SCHEMA: Dict[str, Any] = {
         "upper_bps": float,
         "lower_bps": float,
     },
-    "entropy": {
-        "dex": str,
-        "taker_fee_bps": float,
-        "max_position_usd": float,
-        "max_orders_per_min": int,
-    },
-    "hedge": {
-        "taker_fee_bps": float,
-        "max_position_usd": float,
-        "max_orders_per_min": int,
+    "venues": {
+        "entropy": {
+            "taker_fee_bps": float,
+            "max_position_usd": float,
+            "max_orders_per_min": int,
+        },
+        "lighter": {
+            "taker_fee_bps": float,
+            "max_position_usd": float,
+            "max_orders_per_min": int,
+        },
+        "lighter-rh": {
+            "taker_fee_bps": float,
+            "max_position_usd": float,
+            "max_orders_per_min": int,
+        },
+        "tradexyz": {
+            "taker_fee_bps": float,
+            "max_position_usd": float,
+            "max_orders_per_min": int,
+        },
     },
     "sizing": {
         "take_fraction": float,
@@ -250,10 +261,71 @@ def _env_i(name: str) -> Optional[int]:
     return int(v) if v not in (None, "") else None
 
 
+# Explicit venue construction map. Venue names choose protocol identity;
+# VenueConf.key remains only the A/B role used by the engine.
+VENUE_SPECS = {
+    "entropy": {"kind": "hl", "label": "ENTROPY", "hl_dex": "io",
+                "fee_bps": 0.0, "cap_usd": 1000.0, "orders_per_min": 120},
+    "tradexyz": {"kind": "hl", "label": "XYZ", "hl_dex": "xyz",
+                 "fee_bps": 1.0, "cap_usd": 1000.0, "orders_per_min": 120},
+    "lighter": {"kind": "lighter", "label": "LIGHTER",
+                 "fee_bps": 0.0, "cap_usd": 1000.0, "orders_per_min": 30},
+    "lighter-rh": {"kind": "lighter", "label": "RH",
+                    "fee_bps": 0.0, "cap_usd": 1000.0,
+                    "orders_per_min": 30},
+}
+
+
+def build_venue_conf(name: str, role: str, symbol: str,
+                     raw_config: Dict[str, Any]) -> VenueConf:
+    """Build one role-bound venue from the explicit supported venue map."""
+    if role not in ("venue_a", "venue_b"):
+        raise ConfigError(f"venue role must be venue_a or venue_b, got {role!r}")
+    if name not in SUPPORTED_VENUES:
+        raise ConfigError(f"unsupported venue {name!r}; supported venues are "
+                          f"{list(SUPPORTED_VENUES)}")
+
+    spec = VENUE_SPECS[name]
+    settings = (raw_config.get("venues") or {}).get(name) or {}
+    common = dict(
+        key=role,
+        venue_name=name,
+        kind=spec["kind"],
+        label=spec["label"],
+        symbol=symbol,
+        fee_bps=float(settings.get("taker_fee_bps", spec["fee_bps"])),
+        cap_usd=float(settings.get("max_position_usd", spec["cap_usd"])),
+        orders_per_min=int(settings.get("max_orders_per_min",
+                                    spec["orders_per_min"])),
+    )
+    if spec["kind"] == "hl":
+        if name == "tradexyz":
+            private_key = (_env_s("HL_PRIVATE_KEY_XYZ")
+                           or _env_s("HL_PRIVATE_KEY"))
+            account_address = (_env_s("HL_ACCOUNT_ADDRESS_XYZ")
+                               or _env_s("HL_ACCOUNT_ADDRESS"))
+        else:
+            private_key = _env_s("HL_PRIVATE_KEY")
+            account_address = _env_s("HL_ACCOUNT_ADDRESS")
+        return VenueConf(
+            **common,
+            hl_dex=spec["hl_dex"],
+            hl_creds=HLCreds(private_key, account_address),
+        )
+
+    return VenueConf(
+        **common,
+        lighter_profile=LIGHTER_PROFILES[name],
+        lighter_creds=LighterCreds(_env_i("LIGHTER_ACCOUNT_INDEX"),
+                                   _env_i("LIGHTER_API_KEY_INDEX"),
+                                   _env_s("LIGHTER_API_PRIVATE_KEY")),
+    )
+
+
 # -------------------------------------------------------------------- loading
 
 def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
-                symbol: str, hedge_venue: str) -> Config:
+                symbol: str, venue_a: str, venue_b: str) -> Config:
     load_dotenv(env_file)
     try:
         with open(config_file) as fh:
@@ -269,10 +341,13 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
     if not symbol:
         raise ConfigError("--symbol is required, e.g. --symbol SNDK / "
                           "必须用 --symbol 指定交易品种")
-    if hedge_venue not in HEDGE_VENUES:
-        raise ConfigError(
-            f"--hedge must be one of {list(HEDGE_VENUES)}, got "
-            f"{hedge_venue!r} / --hedge 必须是 {list(HEDGE_VENUES)} 之一")
+    for flag, name in (("--venue-a", venue_a), ("--venue-b", venue_b)):
+        if name not in SUPPORTED_VENUES:
+            raise ConfigError(f"{flag} must be one of the supported venues "
+                              f"{list(SUPPORTED_VENUES)}, got {name!r}")
+    if venue_a == venue_b:
+        raise ConfigError("--venue-a and --venue-b must be different venues "
+                          "/ 两条腿必须是不同交易所")
 
     thr = raw.get("thresholds") or {}
     for k in ("midline_bps", "upper_bps", "lower_bps"):
@@ -291,54 +366,16 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
                           "more than the profitable depth loses money on the "
                           "tail / 必须在 (0, 1] 之间")
 
-    entropy_dex = _get(raw, "entropy", "dex", "io")
-    if hedge_venue == "tradexyz" and entropy_dex == "xyz":
-        raise ConfigError("entropy.dex 'xyz' with hedge_venue 'tradexyz' is "
-                          "the same market on both legs / 两条腿是同一个市场")
-
-    entropy_hl_creds = HLCreds(_env_s("HL_PRIVATE_KEY"),
-                               _env_s("HL_ACCOUNT_ADDRESS"))
-    entropy = VenueConf(
-        key="entropy", kind="hl", label="ENTROPY",
-        symbol=symbol,
-        fee_bps=float(_get(raw, "entropy", "taker_fee_bps", 0.0)),
-        cap_usd=float(_get(raw, "entropy", "max_position_usd", 1000.0)),
-        orders_per_min=int(_get(raw, "entropy", "max_orders_per_min", 120)),
-        hl_dex=entropy_dex,
-        hl_creds=entropy_hl_creds,
-    )
-
-    if hedge_venue == "tradexyz":
-        hedge = VenueConf(
-            key="hedge", kind="hl", label="XYZ",
-            symbol=symbol,
-            fee_bps=float(_get(raw, "hedge", "taker_fee_bps", 1.0)),
-            cap_usd=float(_get(raw, "hedge", "max_position_usd", 1000.0)),
-            orders_per_min=int(_get(raw, "hedge", "max_orders_per_min", 120)),
-            hl_dex="xyz",
-            hl_creds=HLCreds(
-                _env_s("HL_PRIVATE_KEY_XYZ") or _env_s("HL_PRIVATE_KEY"),
-                _env_s("HL_ACCOUNT_ADDRESS_XYZ") or _env_s("HL_ACCOUNT_ADDRESS")),
-        )
-    else:
-        hedge = VenueConf(
-            key="hedge", kind="lighter",
-            label="LIGHTER" if hedge_venue == "lighter" else "RH",
-            symbol=symbol,
-            fee_bps=float(_get(raw, "hedge", "taker_fee_bps", 0.0)),
-            cap_usd=float(_get(raw, "hedge", "max_position_usd", 1000.0)),
-            orders_per_min=int(_get(raw, "hedge", "max_orders_per_min", 30)),
-            lighter_profile=LIGHTER_PROFILES[hedge_venue],
-            lighter_creds=LighterCreds(_env_i("LIGHTER_ACCOUNT_INDEX"),
-                                       _env_i("LIGHTER_API_KEY_INDEX"),
-                                       _env_s("LIGHTER_API_PRIVATE_KEY")),
-        )
+    a_conf = build_venue_conf(venue_a, "venue_a", symbol, raw)
+    b_conf = build_venue_conf(venue_b, "venue_b", symbol, raw)
+    recorder = raw.get("recorder") or {}
+    recorder_csv = (recorder["csv"] if "csv" in recorder else
+                    f"logs/minutes-{symbol}-{venue_a}-{venue_b}.csv")
 
     return Config(
         symbol=symbol,
-        hedge_venue=hedge_venue,
-        entropy=entropy,
-        hedge=hedge,
+        venue_a=a_conf,
+        venue_b=b_conf,
         midline_bps=float(thr["midline_bps"]),
         upper_bps=upper,
         lower_bps=lower,
@@ -360,7 +397,7 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         venue_probe_sec=float(_get(raw, "execution", "venue_probe_sec", 30.0)),
         http_keepalive_sec=float(_get(raw, "execution", "http_keepalive_sec", 10.0)),
         recorder_enabled=bool(_get(raw, "recorder", "enabled", True)),
-        recorder_csv=_get(raw, "recorder", "csv", "logs/minutes.csv"),
+        recorder_csv=recorder_csv,
         log_level=str(_get(raw, "logging", "level", "INFO")).upper(),
         status_interval_sec=float(_get(raw, "logging", "status_interval_sec", 30.0)),
         trades_csv=_get(raw, "logging", "trades_csv", "logs/trades.csv"),

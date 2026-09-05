@@ -219,6 +219,7 @@ def test_scan_respects_position_caps():
 class LifecycleVenue:
     def __init__(self, key, name, kind, conf):
         self.key, self.name, self.kind, self.conf = key, name, kind, conf
+        self.address = f"address-{key}"
         self.signer_calls = 0
         self.shared_with = []
         self.query_address_calls = 0
@@ -242,7 +243,7 @@ class LifecycleVenue:
 
     def _query_address(self):
         self.query_address_calls += 1
-        return f"address-{self.key}"
+        return self.address
 
     def start_tasks(self, stop, on_update, live):
         return []
@@ -265,6 +266,7 @@ def test_only_hl_pair_uses_shared_hyperliquid_lifecycle(monkeypatch):
     cfg.recorder_enabled = False
     a = LifecycleVenue("venue_a", "ENTROPY", "hl", cfg.venue_a)
     b = LifecycleVenue("venue_b", "XYZ", "hl", cfg.venue_b)
+    a.address = b.address = "shared-account"
     eng = Engine(cfg)
     monkeypatch.setattr(eng, "_make_venue",
                         lambda vc: a if vc.venue_name == "entropy" else b)
@@ -273,6 +275,7 @@ def test_only_hl_pair_uses_shared_hyperliquid_lifecycle(monkeypatch):
     assert a.signer_calls == b.signer_calls == 1
     assert b in a.shared_with
     assert a.query_address_calls > 0 and b.query_address_calls > 0
+    assert b.include_core_equity is False
 
 
 def test_lighter_plus_hl_does_not_call_hl_only_methods(monkeypatch):
@@ -291,6 +294,7 @@ def test_lighter_plus_hl_does_not_call_hl_only_methods(monkeypatch):
     asyncio.run(eng._run_inner())
     assert b.shared_with == []
     assert a.signer_calls == b.signer_calls == 1
+    assert b.include_core_equity is True
 
 
 if __name__ == "__main__":

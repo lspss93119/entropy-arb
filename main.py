@@ -2,13 +2,14 @@
 """entropy-arb entry point.
 
     # collect minute data only — no strategy, no credentials needed
-    python3 main.py --record-only --symbol SNDK --hedge lighter-rh
+    python3 main.py --record-only --symbol SNDK --venue-a entropy \
+        --venue-b lighter-rh
 
     # LIVE trading: real orders, real money (needs .env credentials)
-    python3 main.py --symbol SNDK --hedge lighter-rh
+    python3 main.py --symbol SNDK --venue-a entropy --venue-b lighter-rh
 
---symbol and --hedge are required on every start: the markets you trade are
-an explicit decision, not a config default. Add --cn for a Chinese-language
+--symbol, --venue-a, and --venue-b are required on every start: the markets
+you trade are an explicit decision, not a config default. Add --cn for a Chinese-language
 dashboard. There is no paper mode. Collect data with --record-only, set
 your thresholds with tools/analyze.py, then go live with small position
 caps.
@@ -27,7 +28,7 @@ import os
 import signal
 import sys
 
-from entropy_arb.config import HEDGE_VENUES, ConfigError, load_config
+from entropy_arb.config import SUPPORTED_VENUES, ConfigError, load_config
 from entropy_arb.engine import Engine
 
 
@@ -77,16 +78,20 @@ async def amain(cfg, record_only: bool, use_dashboard: bool, force_tty: bool,
 
 def main() -> None:
     p = argparse.ArgumentParser(
-        description="Two-venue LIVE arbitrage: Entropy vs Lighter mainnet / "
-                    "Lighter Robinhood / trade.xyz. Without --record-only, "
+        description="Two-venue LIVE arbitrage across the supported venues. "
+                    "Without --record-only, "
                     "real orders are sent.")
     p.add_argument("--symbol", required=True,
                    help="symbol traded on both venues, e.g. SNDK / "
                         "两个交易所共同交易的品种")
-    p.add_argument("--hedge", required=True, choices=HEDGE_VENUES,
+    p.add_argument("--venue-a", required=True, choices=SUPPORTED_VENUES,
                    metavar="VENUE",
-                   help=f"hedge venue, one of: {', '.join(HEDGE_VENUES)} / "
-                        f"对冲腿，三选一")
+                   help=f"Venue A, one of: {', '.join(SUPPORTED_VENUES)} / "
+                        f"A 腿交易所")
+    p.add_argument("--venue-b", required=True, choices=SUPPORTED_VENUES,
+                   metavar="VENUE",
+                   help=f"Venue B, one of: {', '.join(SUPPORTED_VENUES)} / "
+                        f"B 腿交易所（不得与 A 相同）")
     p.add_argument("--config", default="config.yaml",
                    help="strategy config (default: config.yaml)")
     p.add_argument("--env-file", default=".env",
@@ -105,7 +110,8 @@ def main() -> None:
 
     try:
         cfg = load_config(args.config, args.env_file,
-                          symbol=args.symbol, hedge_venue=args.hedge)
+                          symbol=args.symbol, venue_a=args.venue_a,
+                          venue_b=args.venue_b)
     except ConfigError as e:
         print(f"config error: {e}", file=sys.stderr)
         sys.exit(2)

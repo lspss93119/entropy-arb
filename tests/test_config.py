@@ -171,6 +171,27 @@ def test_cli_exposes_generic_pair_flags():
     assert "--hedge" not in result.stdout
 
 
+def test_cli_rejects_unknown_venue_before_startup():
+    result = subprocess.run(
+        [sys.executable, os.path.join(ROOT, "main.py"),
+         "--record-only", "--symbol", "SNDK", "--venue-a", "binance",
+         "--venue-b", "lighter-rh"],
+        capture_output=True, text=True, check=False)
+    assert result.returncode == 2
+    assert "invalid choice" in result.stderr
+
+
+def test_cli_rejects_equal_venues():
+    result = subprocess.run(
+        [sys.executable, os.path.join(ROOT, "main.py"),
+         "--record-only", "--symbol", "SNDK", "--venue-a", "lighter-rh",
+         "--venue-b", "lighter-rh", "--config", write_tmp(MINIMAL),
+         "--env-file", NO_ENV],
+        capture_output=True, text=True, check=False)
+    assert result.returncode == 2
+    assert "must be different" in result.stderr
+
+
 def test_missing_thresholds():
     expect_error("recorder:\n  enabled: true\n", "thresholds.")
 
