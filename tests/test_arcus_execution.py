@@ -12,8 +12,6 @@ import tempfile
 from decimal import Decimal
 from urllib.parse import urlparse
 
-import pytest
-
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from entropy_arb.config import load_config  # noqa: E402
