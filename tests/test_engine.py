@@ -123,8 +123,9 @@ def test_plan_keeps_original_executable_a_b_orientation():
         cap_notional=eng.cfg.max_order_notional,
         min_base=eng._min_base, min_notional=eng._min_notional,
         size_step=eng._step)
-    actual = eng._plan(b, a, eng.cfg.max_order_notional)
+    actual, actual_reason = eng._plan(b, a, eng.cfg.max_order_notional)
     assert reason == "ok"
+    assert actual_reason == "ok"
     assert actual is not None and expected is not None
     for field in ("qty", "buy_limit", "sell_limit", "buy_notional",
                   "sell_notional", "marginal_premium_bps", "exp_edge_usd"):
@@ -175,10 +176,14 @@ def test_scan_waits_for_persistence_before_firing():
     eng = make_engine(midline=5.0, upper=4.0, lower=3.0, persist=1.0)
     eng.venue_a.set_book(100.14, 100.16)
     eng.venue_b.set_book(99.99, 100.01)
-    assert eng._scan(100.0) is None
-    assert eng._armed[SELL_A_BUY_B] == 100.0
-    assert eng._scan(100.5) is None
-    best = eng._scan(101.0)
+
+    async def go():
+        assert eng._scan(100.0) is None
+        assert eng._armed[SELL_A_BUY_B] == 100.0
+        assert eng._scan(100.5) is None
+        return eng._scan(101.0)
+
+    best = asyncio.run(go())
     assert best is not None
     assert best[0] is eng.venue_b and best[1] is eng.venue_a
 

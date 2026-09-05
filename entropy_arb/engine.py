@@ -1,9 +1,13 @@
-"""Two-venue arbitrage engine: Entropy vs one hedge venue.
+"""Two-venue arbitrage engine: generic Venue A vs Venue B.
+
+The current configuration maps Venue A to Entropy and Venue B to the selected
+hedge venue. The engine keeps those external configuration names for CLI and
+config compatibility while using role-based names internally.
 
 The signal is a fixed band around a configured midline (config.yaml):
 
-    SELL entropy / BUY hedge  when executable premium >= midline + upper (+fees)
-    BUY entropy / SELL hedge  when executable premium <= midline - lower (+fees)
+    SELL A / BUY B  when executable premium >= midline + upper (+fees)
+    BUY A / SELL B  when executable premium <= midline - lower (+fees)
 
 Around the signal: per-direction persistence arming,
 per-venue inventory ladder + position caps, per-venue order budgets and
@@ -32,6 +36,9 @@ from .venue_lighter import LighterVenue
 
 log = logging.getLogger("engine")
 
+SELL_A_BUY_B = "sell_a_buy_b"
+BUY_A_SELL_B = "buy_a_sell_b"
+
 CSV_HEADER = ["ts", "direction", "buy_venue", "sell_venue", "qty",
               "buy_limit", "sell_limit", "buy_notional", "sell_notional",
               "exp_edge_usd", "gross_edge_usd", "marginal_premium_bps",
@@ -45,8 +52,8 @@ class Engine:
         self.cfg = cfg
         self.record_only = record_only
         self.session: Optional[aiohttp.ClientSession] = None
-        self.entropy = None
-        self.hedge = None
+        self.venue_a = None
+        self.venue_b = None
         self.venues: Dict[str, object] = {}
         self.recorder: Optional[MinuteRecorder] = None
         self.markets_ready = False
@@ -68,8 +75,8 @@ class Engine:
         self._last_skiplog = 0.0
         self._poke_due: Optional[float] = None
         # per-direction persistence arming: direction key -> first-seen ts
-        self._armed: Dict[str, Optional[float]] = {"sell_entropy": None,
-                                                   "buy_entropy": None}
+        self._armed: Dict[str, Optional[float]] = {SELL_A_BUY_B: None,
+                                                   BUY_A_SELL_B: None}
         self._step = 1e-4
         self._min_base = 0.0
         self._min_notional = 10.0
@@ -138,10 +145,11 @@ class Engine:
 
     async def _run_inner(self) -> None:
         cfg = self.cfg
-        self.entropy = self._make_venue(cfg.entropy)
-        self.hedge = self._make_venue(cfg.hedge)
-        self.venues = {"entropy": self.entropy, "hedge": self.hedge}
-        await asyncio.gather(self.entropy.load_market(), self.hedge.load_market())
+        self.venue_a = self._make_venue(cfg.entropy)
+        self.venue_b = self._make_venue(cfg.hedge)
+        self.venues = {"venue_a": self.venue_a, "venue_b": self.venue_b}
+        await asyncio.gather(self.venue_a.load_market(),
+                             self.venue_b.load_market())
         self.markets_ready = True
 
         live = not self.record_only
@@ -152,26 +160,26 @@ class Engine:
                     "(see .env.example); use --record-only to run without "
                     "them / 实盘需要在 .env 中配置两个交易所的密钥，仅采集数据"
                     "请用 --record-only")
-            self.entropy.init_signer()
-            self.hedge.init_signer()
-            if self.hedge.kind == "hl":
-                self.entropy.share_nonces_with(self.hedge)
-        if (self.hedge.kind == "hl"
-                and self.entropy._query_address()
-                and self.entropy._query_address() == self.hedge._query_address()):
-            self.hedge.include_core_equity = False  # shared account: count once
+            self.venue_a.init_signer()
+            self.venue_b.init_signer()
+            if self.venue_b.kind == "hl":
+                self.venue_a.share_nonces_with(self.venue_b)
+        if (self.venue_b.kind == "hl"
+                and self.venue_a._query_address()
+                and self.venue_a._query_address() == self.venue_b._query_address()):
+            self.venue_b.include_core_equity = False  # shared account: count once
 
-        self._step = 10 ** -min(self.entropy.size_decimals,
-                                self.hedge.size_decimals)
-        self._min_base = max(self.entropy.min_base, self.hedge.min_base,
+        self._step = 10 ** -min(self.venue_a.size_decimals,
+                                self.venue_b.size_decimals)
+        self._min_base = max(self.venue_a.min_base, self.venue_b.min_base,
                              self._step)
         self._min_notional = max(cfg.min_order_notional,
-                                 self.entropy.min_quote, self.hedge.min_quote)
-        log.info("pair ENTROPY(%s)-%s(%s): midline=%+.2fbps band=[-%.2f, +%.2f] "
+                                 self.venue_a.min_quote, self.venue_b.min_quote)
+        log.info("pair %s(%s)-%s(%s): midline=%+.2fbps band=[-%.2f, +%.2f] "
                  "fees=%.2f+%.2f step=%g min_ntl=$%g",
-                 self.entropy.conf.symbol, self.hedge.name,
-                 self.hedge.conf.symbol, cfg.midline_bps, cfg.lower_bps,
-                 cfg.upper_bps, self.entropy.fee_bps, self.hedge.fee_bps,
+                 self.venue_a.name, self.venue_a.conf.symbol, self.venue_b.name,
+                 self.venue_b.conf.symbol, cfg.midline_bps, cfg.lower_bps,
+                 cfg.upper_bps, self.venue_a.fee_bps, self.venue_b.fee_bps,
                  self._step, self._min_notional)
 
         if self.record_only:
@@ -190,8 +198,8 @@ class Engine:
         for v in self.venues.values():
             tasks += v.start_tasks(self.stop, self._update_evt.set, live)
         if cfg.recorder_enabled or self.record_only:
-            self.recorder = MinuteRecorder(cfg.recorder_csv, self.entropy.book,
-                                           self.hedge.book, cfg.staleness_sec)
+            self.recorder = MinuteRecorder(cfg.recorder_csv, self.venue_a.book,
+                                           self.venue_b.book, cfg.staleness_sec)
             tasks.append(asyncio.create_task(self.recorder.run(self.stop),
                                              name="recorder"))
         if not self.record_only:
@@ -249,9 +257,9 @@ class Engine:
     def _eff_threshold(self, buy, sell) -> float:
         """Net hurdle (bps, on top of fees) for the direction buy->sell.
 
-        selling entropy: executable premium must clear midline + upper;
-        buying entropy: the reverse premium must clear lower - midline."""
-        if sell.key == "entropy":
+        selling Venue A: executable premium must clear midline + upper;
+        buying Venue A: the reverse premium must clear lower - midline."""
+        if sell is self.venue_a:
             base = self.cfg.midline_bps + self.cfg.upper_bps
         else:
             base = self.cfg.lower_bps - self.cfg.midline_bps
@@ -357,8 +365,8 @@ class Engine:
         (buy, sell, plan), or None."""
         cfg = self.cfg
         best = None
-        for buy, sell, dkey in ((self.hedge, self.entropy, "sell_entropy"),
-                                (self.entropy, self.hedge, "buy_entropy")):
+        for buy, sell, dkey in ((self.venue_b, self.venue_a, SELL_A_BUY_B),
+                                (self.venue_a, self.venue_b, BUY_A_SELL_B)):
             if not (buy.book.is_fresh(cfg.staleness_sec)
                     and sell.book.is_fresh(cfg.staleness_sec)):
                 continue
@@ -416,7 +424,7 @@ class Engine:
             return False
         cfg = self.cfg
         inv_bps = self._inv_add_bps(buy, sell)
-        direction = "sell_entropy" if sell.key == "entropy" else "buy_entropy"
+        direction = SELL_A_BUY_B if sell is self.venue_a else BUY_A_SELL_B
         self.last_trade_ts = time.time()
         log.info("[ARB] %s: BUY %s %.6g @<=%.6g | SELL %s @>=%.6g | "
                  "take $%.0f of $%.0f | prem %.2fbps | exp $%.4f",
@@ -713,10 +721,11 @@ class Engine:
         return total - self._mtm_baseline
 
     def premium_bps(self) -> Optional[float]:
-        em, hm = self.entropy.book.mid(), self.hedge.book.mid()
-        if not (em and hm):
+        a_mid = self.venue_a.book.mid()
+        b_mid = self.venue_b.book.mid()
+        if not (a_mid and b_mid):
             return None
-        return (em / hm - 1.0) * 1e4
+        return (a_mid / b_mid - 1.0) * 1e4
 
     async def _status_loop(self) -> None:
         cfg = self.cfg

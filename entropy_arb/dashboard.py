@@ -21,6 +21,8 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from .engine import BUY_A_SELL_B, SELL_A_BUY_B
+
 log = logging.getLogger("dashboard")
 
 EVENT_LINES = 8
@@ -182,7 +184,7 @@ class Dashboard:
 
     def _render(self):
         eng = self.eng
-        if eng.entropy is None or eng.hedge is None or not eng.markets_ready:
+        if eng.venue_a is None or eng.venue_b is None or not eng.markets_ready:
             return Group(Panel(Text(self._t("starting — resolving markets…"),
                                     style="yellow"), title="entropy-arb",
                                box=box.ROUNDED), self._events_panel())
@@ -223,7 +225,8 @@ class Dashboard:
         g.add_column(justify="left")
         g.add_column(justify="right")
         left = Text.assemble(("entropy-arb  ", "bold"),
-                             (f"{cfg.symbol} × ENTROPY · {eng.hedge.name}",
+                             (f"{cfg.symbol} × {eng.venue_a.name} · "
+                              f"{eng.venue_b.name}",
                               "bold cyan"))
         right = Text()
         right.append_text(mode)
@@ -345,12 +348,12 @@ class Dashboard:
         t.add_column(self._t("hurdle bps"), justify="right")
         t.add_column(self._t("gap bps"), justify="right")
         t.add_column("", justify="left")
-        self._dir_row(t, self._t("SELL entropy → buy {h}", h=eng.hedge.name),
-                      eng.hedge, eng.entropy,
-                      cfg.midline_bps + cfg.upper_bps, "sell_entropy")
-        self._dir_row(t, self._t("BUY entropy → sell {h}", h=eng.hedge.name),
-                      eng.entropy, eng.hedge,
-                      cfg.lower_bps - cfg.midline_bps, "buy_entropy")
+        self._dir_row(t, self._t("SELL entropy → buy {h}", h=eng.venue_b.name),
+                      eng.venue_b, eng.venue_a,
+                      cfg.midline_bps + cfg.upper_bps, SELL_A_BUY_B)
+        self._dir_row(t, self._t("BUY entropy → sell {h}", h=eng.venue_b.name),
+                      eng.venue_a, eng.venue_b,
+                      cfg.lower_bps - cfg.midline_bps, BUY_A_SELL_B)
         return Panel(Group(head, t),
                      title=self._t("signal — executable premium vs full "
                                    "hurdle incl. fees (● = armed)"),
