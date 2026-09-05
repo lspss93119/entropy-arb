@@ -602,17 +602,21 @@ class ArcusVenue:
                                 err=ack.get("err"),
                                 unresolved=ack.get("unresolved", False))
 
-        payload = ack.get("payload")
-        if payload is not None:
-            direct = self._order_result(payload)
-            if not direct["unresolved"]:
-                self._apply_local_fill(direct, is_buy=is_buy)
-                return direct
-
         try:
             requested_qty = _finite_decimal(qty, "order quantity")
         except RuntimeError:
             requested_qty = Decimal("0")
+        payload = ack.get("payload")
+        if payload is not None:
+            direct = self._order_result(payload)
+            if not direct["unresolved"]:
+                direct = await self._complete_terminal_fill(
+                    direct, order_id=ack.get("order_id"),
+                    client_id=ack.get("client_id"),
+                    requested_qty=requested_qty)
+                self._apply_local_fill(direct, is_buy=is_buy)
+                return direct
+
         return await self._reconcile_order(
             order_id=ack.get("order_id"), client_id=ack.get("client_id"),
             is_buy=is_buy, requested_qty=requested_qty,
@@ -679,6 +683,35 @@ class ArcusVenue:
         status = ("filled" if requested_qty <= 0
                   or total >= requested_qty else "partially-filled")
         return self._result(status, filled_base=float(total), avg_px=average)
+
+    async def _complete_terminal_fill(self, result: dict[str, Any], *,
+                                      order_id: Optional[str],
+                                      client_id: Optional[str],
+                                      requested_qty: Decimal) -> dict[str, Any]:
+        """Fill missing average price from authoritative read-only evidence."""
+        if result["filled_base"] <= 0 or result["avg_px"] is not None:
+            return result
+
+        if order_id:
+            try:
+                snapshot = await self._fetch_order_status(order_id)
+                status_result = self._order_result(snapshot)
+                if (not status_result["unresolved"]
+                        and status_result["filled_base"] > 0
+                        and status_result["avg_px"] is not None):
+                    return status_result
+            except Exception:
+                pass
+
+        try:
+            fills = await self._fetch_fills_for_order(order_id, client_id)
+            fills_result = self._fills_result(fills, requested_qty)
+            if (fills_result is not None
+                    and not fills_result["unresolved"]):
+                return fills_result
+        except Exception:
+            pass
+        return result
 
     async def _reconcile_order(self, *, order_id: Optional[str],
                                client_id: Optional[str], is_buy: bool,

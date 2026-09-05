@@ -311,6 +311,31 @@ def test_send_taker_reconciles_from_fills_when_order_status_is_unavailable(
     assert any(call["path"] == "/v1/fills" for call in session.get_calls)
 
 
+def test_send_taker_completes_average_price_from_order_status_after_terminal_ack(
+        monkeypatch):
+    venue, session = make_venue(
+        monkeypatch,
+        get_routes={
+            "/v1/markets": fixture("arcus_markets_sndk.json"),
+            "/v1/order/order-terminal": {
+                "orderId": "order-terminal", "status": "FILLED",
+                "filledSize": "0.01", "avgFillPrice": "1762.88",
+            },
+        },
+        post_routes={"/v1/placeOrder": ({
+            "status": "FILLED", "orderId": "order-terminal",
+            "filledSize": "0.01",
+        }, 200)})
+
+    result = asyncio.run(venue.send_taker(
+        is_buy=True, qty=Decimal("0.01"), limit_px=Decimal("1762.92")))
+
+    assert result == {"status": "filled", "filled_base": 0.01,
+                      "avg_px": 1762.88, "err": None, "unresolved": False}
+    assert any(call["path"] == "/v1/order/order-terminal"
+               for call in session.get_calls)
+
+
 def test_ambiguous_timeout_is_unresolved_and_never_zero_fill(monkeypatch):
     venue, session = make_venue(
         monkeypatch,
