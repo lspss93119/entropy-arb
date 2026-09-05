@@ -20,9 +20,11 @@ from __future__ import annotations
 import asyncio
 import csv
 import logging
+import math
 import os
 import time
 from collections import deque
+from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 import aiohttp
@@ -45,6 +47,37 @@ CSV_HEADER = ["ts", "direction", "buy_venue", "sell_venue", "qty",
               "midline_bps", "inv_add_bps", "ok", "buy_fill", "sell_fill",
               "buy_status", "sell_status", "fill_edge_usd"]
 BALANCE_POLL_SEC = 30.0
+
+
+class ExecutionContractError(ValueError):
+    """An adapter returned a fill outside the requested execution contract."""
+
+
+@dataclass
+class TwoLegExecutionResult:
+    """Terminal facts for one generic two-leg execution cycle.
+
+    ``leg1`` is the engine's first (buy) leg and ``leg2`` is the sell/hedge
+    leg.  Unknown outcomes use ``None`` for residual fields rather than
+    pretending that the reported fill is authoritative.
+    """
+
+    status: str
+    requested_base: float
+    leg1_filled_base: float = 0.0
+    leg2_filled_base: float = 0.0
+    matched_base: float = 0.0
+    residual_base: Optional[float] = 0.0
+    emergency_unwind: bool = False
+    unwind_filled_base: float = 0.0
+    final_known_residual: Optional[float] = 0.0
+    unresolved: bool = False
+    direction: str = ""
+    error: Optional[str] = None
+
+    @property
+    def completed_base(self) -> float:
+        return self.matched_base
 
 
 class Engine:
@@ -365,22 +398,30 @@ class Engine:
 
     async def _execute_locked(self, buy, sell, plan: ArbPlan) -> None:
         """Run one execution while holding both venue locks (acquired by the
-        caller), then release them and settle the aftermath: unresolved
-        outcomes escalate to reconcile, everything else gets a net-delta
-        check."""
-        unresolved = False
+        caller), then release them and handle the terminal state."""
+        result = None
         try:
-            unresolved = await self._execute(buy, sell, plan)
+            result = await self._execute(buy, sell, plan)
         except asyncio.CancelledError:
             raise
         except Exception:
             log.exception("execute failed")
+            self.halted = True
+            self._reconcile_evt.set()
         finally:
             self._vlock(buy.key).release()
             self._vlock(sell.key).release()
-        if unresolved:
+        if result is None:
+            return
+        if result.unresolved:
+            self.halted = True
             self._reconcile_evt.set()
-        else:
+        elif (result.final_known_residual is not None
+              and result.final_known_residual > max(self._step, 1e-9)):
+            # A known residual is a terminal failure.  Do not let the normal
+            # strategy loop turn it into an implicit retry.
+            self.halted = True
+        elif result.status in ("PAIR_COMPLETED", "PAIR_COMPLETED_AFTER_UNWIND"):
             await self._maybe_hedge()
         self._update_evt.set()  # freed venues may have a queued opportunity
 
@@ -440,15 +481,84 @@ class Engine:
 
     # ------------------------------------------------------------- execution
 
-    async def _execute(self, buy, sell, plan: ArbPlan) -> bool:
-        """Send both legs and settle the fills. Both venue locks are held by
-        the caller. Returns True when an outcome is unresolved and the caller
-        must escalate to reconcile."""
+    async def _send_once(self, venue, *, is_buy: bool, qty: float,
+                         limit_px: float, reduce_only: bool = False) -> dict:
+        """Submit one logical action and classify transport uncertainty."""
+        self._record_send(venue)
+        try:
+            result = await venue.send_taker(
+                is_buy=is_buy, qty=qty, limit_px=limit_px,
+                reduce_only=reduce_only)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            return {"status": "send-failed", "filled_base": 0.0,
+                    "avg_px": None, "err": repr(exc), "unresolved": True}
+        if not isinstance(result, dict):
+            return {"status": "invalid-result", "filled_base": 0.0,
+                    "avg_px": None, "err": "adapter result is not an object",
+                    "unresolved": True}
+        return result
+
+    def _validate_fill(self, info: dict, requested: float, leg: str) -> float:
+        """Validate and normalize one adapter-reported base fill."""
+        if "filled_base" not in info:
+            raise ExecutionContractError(
+                f"{leg} result lacks filled_base")
+        try:
+            filled = float(info["filled_base"])
+        except (TypeError, ValueError) as exc:
+            raise ExecutionContractError(
+                f"{leg} filled_base is not numeric") from exc
+        if not math.isfinite(filled) or filled < 0.0:
+            raise ExecutionContractError(
+                f"{leg} filled_base is negative or non-finite: {filled!r}")
+        tolerance = max(self._step, 1e-9)
+        if filled > requested + tolerance:
+            raise ExecutionContractError(
+                f"{leg} filled_base {filled!r} exceeds requested "
+                f"{requested!r}")
+        # Accommodate a sub-step floating-point tail without carrying an
+        # impossible local position above the requested quantity.
+        return min(filled, requested)
+
+    @staticmethod
+    def _apply_fill(venue, *, is_buy: bool, filled: float, info: dict,
+                    fallback_px: float, fee: float) -> None:
+        """Apply one known fill to local position and cash accounting."""
+        if filled <= 0.0:
+            return
+        raw_px = info.get("avg_px")
+        try:
+            px = float(fallback_px if raw_px in (None, "", 0, "0") else raw_px)
+        except (TypeError, ValueError) as exc:
+            raise ExecutionContractError(
+                "filled result avg_px is not numeric") from exc
+        if not math.isfinite(px) or px <= 0.0:
+            raise ExecutionContractError(
+                f"filled result avg_px is invalid: {px!r}")
+        if is_buy:
+            venue.position += filled
+            venue.cash -= filled * px * (1.0 + fee)
+        else:
+            venue.position -= filled
+            venue.cash += filled * px * (1.0 - fee)
+        venue.volume_usd += filled * px
+
+    async def _execute(self, buy, sell, plan: ArbPlan) -> TwoLegExecutionResult:
+        """Execute one buy-first pair with bounded, fill-driven transitions.
+
+        The first ``buy`` leg is submitted once.  Only a known positive fill
+        permits the second sell leg, and the second leg receives exactly that
+        known quantity.  A known shortfall gets one residual unwind on the
+        first venue; any unknown outcome stops the cycle without guessing.
+        """
+        direction = SELL_A_BUY_B if sell is self.venue_a else BUY_A_SELL_B
         if self.halted:
-            return False
+            return TwoLegExecutionResult("HALTED", plan.qty,
+                                         direction=direction)
         cfg = self.cfg
         inv_bps = self._inv_add_bps(buy, sell)
-        direction = SELL_A_BUY_B if sell is self.venue_a else BUY_A_SELL_B
         self.last_trade_ts = time.time()
         log.info("[ARB] %s: BUY %s %.6g @<=%.6g | SELL %s @>=%.6g | "
                  "take $%.0f of $%.0f | prem %.2fbps | exp $%.4f",
@@ -458,76 +568,205 @@ class Engine:
         slip = cfg.leg_slippage_bps / 1e4
         buy_bound = buy.px_round(plan.buy_limit * (1 + slip), round_up=False)
         sell_bound = sell.px_round(plan.sell_limit * (1 - slip), round_up=True)
-        self._record_send(buy)
-        self._record_send(sell)
-        res = await asyncio.gather(
-            buy.send_taker(is_buy=True, qty=plan.qty, limit_px=buy_bound),
-            sell.send_taker(is_buy=False, qty=plan.qty, limit_px=sell_bound),
-            return_exceptions=True)
-        binfo, sinfo = (r if isinstance(r, dict) else
-                        {"status": "send-failed", "filled_base": 0.0,
-                         "avg_px": None, "err": repr(r), "unresolved": False}
-                        for r in res)
-        for v, info, side in ((buy, binfo, "buy"), (sell, sinfo, "sell")):
-            if info.get("err"):
-                log.error("[%s] %s leg: %s", v.name, side, info["err"])
-        bfill = binfo["filled_base"]
-        sfill = sinfo["filled_base"]
-        buy.position += bfill
-        sell.position -= sfill
-        if bfill:
-            bpx = binfo.get("avg_px") or plan.buy_limit
-            buy.cash -= bfill * bpx * (1 + plan.buy_fee)
-            buy.volume_usd += bfill * bpx
-        if sfill:
-            spx = sinfo.get("avg_px") or plan.sell_limit
-            sell.cash += sfill * spx * (1 - plan.sell_fee)
-            sell.volume_usd += sfill * spx
 
-        matched = min(bfill, sfill)
-        fill_edge = 0.0
-        if matched > 0 and binfo.get("avg_px") and sinfo.get("avg_px"):
-            fill_edge = matched * (sinfo["avg_px"] * (1 - plan.sell_fee)
-                                   - binfo["avg_px"] * (1 + plan.buy_fee))
-            self.total_fill_edge += fill_edge
-        log.info("[SETTLED] %s: buy %s %s %.6g/%.6g | sell %s %s %.6g/%.6g | "
-                 "matched %.6g | fill edge $%.4f", direction,
-                 buy.name, binfo["status"], bfill, plan.qty,
-                 sell.name, sinfo["status"], sfill, plan.qty, matched, fill_edge)
-        buy.last_traded_ts = sell.last_traded_ts = time.time()
+        second_submitted = False
 
-        unresolved = binfo.get("unresolved") or sinfo.get("unresolved")
-        hard_err = (binfo.get("err") is not None
-                    or sinfo.get("err") is not None)
-        rate_limited = False
-        for v, info in ((buy, binfo), (sell, sinfo)):
-            if str(info.get("err", "")).startswith("RATE_LIMITED"):
-                rate_limited = True
-                self._mark_limited(v)
-            elif "margin" in str(info.get("status", "")).lower():
-                log.warning("[%s] margin rejection — collateral exhausted, "
-                            "pausing venue", v.name)
-                self._mark_limited(v)
-        sent_ok = not hard_err and not unresolved
-        if sent_ok:
-            self.consec_errors = 0
-        elif not rate_limited:
-            self.consec_errors += 1
-            if self.consec_errors >= cfg.max_consecutive_errors:
+        def finish(result: TwoLegExecutionResult, first_info: dict,
+                   second_info: dict, unwind_info: dict,
+                   fill_edge: float = 0.0) -> TwoLegExecutionResult:
+            infos = ((buy, first_info, "buy"),
+                     (sell, second_info, "sell"),
+                     (buy, unwind_info, "unwind"))
+            rate_limited = False
+            for venue, info, side in infos:
+                if info.get("err"):
+                    log.error("[%s] %s leg: %s", venue.name, side,
+                              info["err"])
+                if str(info.get("err", "")).startswith("RATE_LIMITED"):
+                    rate_limited = True
+                    self._mark_limited(venue)
+                elif "margin" in str(info.get("status", "")).lower():
+                    log.warning("[%s] margin rejection — collateral exhausted, "
+                                "pausing venue", venue.name)
+                    self._mark_limited(venue)
+
+            safe = result.status in ("PAIR_COMPLETED",
+                                     "PAIR_COMPLETED_AFTER_UNWIND")
+            if safe:
+                self.consec_errors = 0
+                if result.matched_base > 0.0:
+                    self.trades += 1
+                    ratio = min(result.matched_base / plan.qty, 1.0)
+                    self.total_exp_edge += plan.exp_edge_usd * ratio
+            elif not rate_limited:
+                self.consec_errors += 1
+                if self.consec_errors >= cfg.max_consecutive_errors:
+                    self.halted = True
+                    log.critical("HALTED after %d consecutive execution problems "
+                                 "— flatten manually and restart / 连续执行异常，"
+                                 "引擎已停止，请手动平仓后重启",
+                                 self.consec_errors)
+            if fill_edge:
+                self.total_fill_edge += fill_edge
+            if (result.unresolved
+                    or (result.final_known_residual is not None
+                        and result.final_known_residual > max(self._step, 1e-9))):
                 self.halted = True
-                log.critical("HALTED after %d consecutive execution problems "
-                             "— flatten manually and restart / 连续执行异常，"
-                             "引擎已停止，请手动平仓后重启", self.consec_errors)
-        if sent_ok:
-            self.trades += 1
-            self.total_exp_edge += plan.exp_edge_usd
-        self._record_trade(direction, plan,
-                           None if unresolved else fill_edge,
-                           f"{binfo['status']}/{sinfo['status']}", sent_ok)
-        self._log_csv(direction, buy, sell, plan, sent_ok, bfill, sfill,
-                      binfo["status"], sinfo["status"], fill_edge, inv_bps)
-        self.last_trade_ts = time.time()
-        return bool(unresolved)
+            self._record_trade(direction, plan,
+                               None if result.unresolved else fill_edge,
+                               result.status, safe)
+            self._log_csv(
+                direction, buy, sell, plan, safe,
+                result.leg1_filled_base, result.leg2_filled_base,
+                first_info.get("status", "unknown"),
+                second_info.get("status", "not-submitted"), fill_edge,
+                inv_bps)
+            now = time.time()
+            buy.last_traded_ts = now
+            if second_submitted:
+                sell.last_traded_ts = now
+            self.last_trade_ts = now
+            return result
+
+        not_submitted = {"status": "not-submitted", "filled_base": 0.0,
+                         "avg_px": None, "err": None, "unresolved": False}
+        first_info = await self._send_once(
+            buy, is_buy=True, qty=plan.qty, limit_px=buy_bound)
+        try:
+            first_fill = self._validate_fill(first_info, plan.qty, "first leg")
+        except ExecutionContractError as exc:
+            return finish(TwoLegExecutionResult(
+                "INVALID_FIRST_LEG_RESULT", plan.qty,
+                direction=direction, unresolved=True, error=str(exc)),
+                first_info, not_submitted, not_submitted)
+        if first_info.get("unresolved"):
+            return finish(TwoLegExecutionResult(
+                "UNRESOLVED_FIRST_LEG", plan.qty,
+                direction=direction, unresolved=True, final_known_residual=None,
+                error=first_info.get("err") or "first-leg outcome unresolved"),
+                first_info, not_submitted, not_submitted)
+        if first_fill <= 0.0:
+            status = ("FIRST_LEG_REJECTED"
+                      if first_info.get("err")
+                      or "reject" in str(first_info.get("status", "")).lower()
+                      else "FIRST_LEG_ZERO_FILL")
+            return finish(TwoLegExecutionResult(
+                status, plan.qty, direction=direction, error=first_info.get("err")),
+                first_info, not_submitted, not_submitted)
+        try:
+            self._apply_fill(buy, is_buy=True, filled=first_fill,
+                             info=first_info, fallback_px=plan.buy_limit,
+                             fee=plan.buy_fee)
+        except ExecutionContractError as exc:
+            return finish(TwoLegExecutionResult(
+                "INVALID_FIRST_LEG_RESULT", plan.qty,
+                direction=direction, unresolved=True, error=str(exc)),
+                first_info, not_submitted, not_submitted)
+
+        second_submitted = True
+        second_info = await self._send_once(
+            sell, is_buy=False, qty=first_fill, limit_px=sell_bound)
+        try:
+            second_fill = self._validate_fill(second_info, first_fill,
+                                              "second leg")
+        except ExecutionContractError as exc:
+            return finish(TwoLegExecutionResult(
+                "INVALID_SECOND_LEG_RESULT", plan.qty,
+                leg1_filled_base=first_fill, direction=direction,
+                unresolved=True, final_known_residual=None, error=str(exc)),
+                first_info, second_info, not_submitted)
+        if second_info.get("unresolved"):
+            return finish(TwoLegExecutionResult(
+                "UNRESOLVED_SECOND_LEG", plan.qty,
+                leg1_filled_base=first_fill, direction=direction,
+                residual_base=None, final_known_residual=None,
+                unresolved=True,
+                error=second_info.get("err") or "second-leg outcome unresolved"),
+                first_info, second_info, not_submitted)
+        try:
+            self._apply_fill(sell, is_buy=False, filled=second_fill,
+                             info=second_info, fallback_px=plan.sell_limit,
+                             fee=plan.sell_fee)
+        except ExecutionContractError as exc:
+            return finish(TwoLegExecutionResult(
+                "INVALID_SECOND_LEG_RESULT", plan.qty,
+                leg1_filled_base=first_fill, direction=direction,
+                unresolved=True, final_known_residual=None, error=str(exc)),
+                first_info, second_info, not_submitted)
+
+        matched = min(first_fill, second_fill)
+        residual = max(first_fill - second_fill, 0.0)
+        fill_edge = 0.0
+        if matched > 0.0 and first_info.get("avg_px") and second_info.get("avg_px"):
+            fill_edge = matched * (
+                float(second_info["avg_px"]) * (1.0 - plan.sell_fee)
+                - float(first_info["avg_px"]) * (1.0 + plan.buy_fee))
+        if residual <= max(self._step, 1e-9):
+            return finish(TwoLegExecutionResult(
+                "PAIR_COMPLETED", plan.qty,
+                leg1_filled_base=first_fill, leg2_filled_base=second_fill,
+                matched_base=matched, direction=direction),
+                first_info, second_info, not_submitted, fill_edge)
+
+        # The second result is known, so only the known residual may be
+        # unwound.  There is deliberately no retry path after this call.
+        unwind_ref = buy.book.best_bid()
+        if unwind_ref is None:
+            return finish(TwoLegExecutionResult(
+                "RESIDUAL_EXPOSURE", plan.qty,
+                leg1_filled_base=first_fill, leg2_filled_base=second_fill,
+                matched_base=matched, residual_base=residual,
+                final_known_residual=residual, direction=direction,
+                error="first-leg book unavailable for emergency unwind"),
+                first_info, second_info, not_submitted, fill_edge)
+        unwind_limit = buy.px_round(unwind_ref * (1.0 - slip), round_up=False)
+        unwind_info = await self._send_once(
+            buy, is_buy=False, qty=residual, limit_px=unwind_limit,
+            reduce_only=True)
+        try:
+            unwind_fill = self._validate_fill(unwind_info, residual, "unwind")
+        except ExecutionContractError as exc:
+            return finish(TwoLegExecutionResult(
+                "INVALID_UNWIND_RESULT", plan.qty,
+                leg1_filled_base=first_fill, leg2_filled_base=second_fill,
+                matched_base=matched, residual_base=residual,
+                emergency_unwind=True, final_known_residual=None,
+                direction=direction, unresolved=True, error=str(exc)),
+                first_info, second_info, unwind_info, fill_edge)
+        if unwind_info.get("unresolved"):
+            return finish(TwoLegExecutionResult(
+                "UNRESOLVED_UNWIND", plan.qty,
+                leg1_filled_base=first_fill, leg2_filled_base=second_fill,
+                matched_base=matched, residual_base=residual,
+                emergency_unwind=True, final_known_residual=None,
+                direction=direction, unresolved=True,
+                error=unwind_info.get("err") or "unwind outcome unresolved"),
+                first_info, second_info, unwind_info, fill_edge)
+        try:
+            self._apply_fill(buy, is_buy=False, filled=unwind_fill,
+                             info=unwind_info, fallback_px=unwind_ref,
+                             fee=plan.buy_fee)
+        except ExecutionContractError as exc:
+            return finish(TwoLegExecutionResult(
+                "INVALID_UNWIND_RESULT", plan.qty,
+                leg1_filled_base=first_fill, leg2_filled_base=second_fill,
+                matched_base=matched, residual_base=residual,
+                emergency_unwind=True, final_known_residual=None,
+                direction=direction, unresolved=True, error=str(exc)),
+                first_info, second_info, unwind_info, fill_edge)
+        final_residual = max(residual - unwind_fill, 0.0)
+        final_residual = (0.0 if final_residual <= max(self._step, 1e-9)
+                          else final_residual)
+        status = ("PAIR_COMPLETED_AFTER_UNWIND"
+                  if final_residual == 0.0 else "RESIDUAL_EXPOSURE")
+        return finish(TwoLegExecutionResult(
+            status, plan.qty,
+            leg1_filled_base=first_fill, leg2_filled_base=second_fill,
+            matched_base=matched, residual_base=residual,
+            emergency_unwind=True, unwind_filled_base=unwind_fill,
+            final_known_residual=final_residual, direction=direction,
+            error=unwind_info.get("err")),
+            first_info, second_info, unwind_info, fill_edge)
 
     def _record_trade(self, direction: str, plan: ArbPlan, fill_edge,
                       status: str, ok: bool) -> None:
