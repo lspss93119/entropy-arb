@@ -65,6 +65,7 @@ venues:
     # Observed public Base-tier table value: 225 ppm = 2.25 bps.
     # Effective account tier is not universal; set this explicitly for use.
     taker_fee_bps: 2.25
+    fee_source: configured  # or account_api after explicit account-fee opt-in
     max_position_usd: 1000
     max_orders_per_min: 30
 

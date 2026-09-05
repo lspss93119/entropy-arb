@@ -140,7 +140,8 @@ class Engine:
     def _make_venue(self, vc):
         if vc.kind == "arcus":
             return ArcusVenue(vc, self.cfg.arcus_api_url, self.cfg.arcus_ws_url,
-                              self.session, self.cfg.settle_timeout_sec)
+                              self.session, self.cfg.settle_timeout_sec,
+                              environment=self.cfg.arcus_env)
         if vc.kind == "lighter":
             return LighterVenue(vc, self.session, self.cfg.settle_timeout_sec)
         return HLVenue(vc, self.cfg.hl_api_url, self.cfg.hl_ws_url,

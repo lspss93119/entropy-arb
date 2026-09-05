@@ -22,7 +22,7 @@ Threshold model (fixed numbers the user derives from recorded minute data):
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
 import yaml
@@ -32,6 +32,8 @@ HL_API_URL = "https://api.hyperliquid.xyz"
 HL_WS_URL = "wss://api.hyperliquid.xyz/ws"   # official ws — the only HL feed used
 ARCUS_API_URL = "https://api.arcus.xyz"
 ARCUS_WS_URL = "wss://api.arcus.xyz/v1/ws"
+ARCUS_TESTNET_API_URL = "https://api.testnet.arcus.xyz"
+ARCUS_TESTNET_WS_URL = "wss://api.testnet.arcus.xyz/v1/ws"
 
 SUPPORTED_VENUES = ("entropy", "lighter", "lighter-rh", "tradexyz", "arcus")
 
@@ -79,11 +81,25 @@ class HLCreds:
         return bool(self.private_key)
 
 
+@dataclass(frozen=True)
+class ArcusCreds:
+    api_key: Optional[str]
+    api_private_key: Optional[str] = field(repr=False)
+    account_address: Optional[str]
+    account_index: Optional[int]
+
+    @property
+    def complete(self) -> bool:
+        return (bool(self.api_key) and bool(self.api_private_key)
+                and bool(self.account_address)
+                and self.account_index is not None)
+
+
 @dataclass
 class VenueConf:
     key: str                  # "venue_a" | "venue_b" role
     venue_name: str           # actual supported venue identity
-    kind: str                 # "hl" | "lighter"
+    kind: str                 # "hl" | "lighter" | "arcus"
     label: str                # human name for logs, e.g. "ENTROPY", "RH"
     symbol: str
     fee_bps: float
@@ -95,6 +111,9 @@ class VenueConf:
     # lighter
     lighter_profile: Optional[LighterProfile] = None
     lighter_creds: Optional[LighterCreds] = None
+    # arcus
+    arcus_creds: Optional[ArcusCreds] = None
+    arcus_fee_source: str = "configured"
 
 
 @dataclass
@@ -140,6 +159,7 @@ class Config:
     hl_ws_url: str = HL_WS_URL
     arcus_api_url: str = ARCUS_API_URL
     arcus_ws_url: str = ARCUS_WS_URL
+    arcus_env: str = "mainnet"
 
     @property
     def creds_complete(self) -> bool:
@@ -148,6 +168,9 @@ class Config:
                 return False
             if v.kind == "lighter" and not (v.lighter_creds
                                             and v.lighter_creds.complete):
+                return False
+            if v.kind == "arcus" and not (v.arcus_creds
+                                           and v.arcus_creds.complete):
                 return False
         return True
 
@@ -186,6 +209,7 @@ _SCHEMA: Dict[str, Any] = {
             "taker_fee_bps": float,
             "max_position_usd": float,
             "max_orders_per_min": int,
+            "fee_source": str,
         },
     },
     "sizing": {
@@ -267,7 +291,12 @@ def _env_s(name: str) -> Optional[str]:
 
 def _env_i(name: str) -> Optional[int]:
     v = os.getenv(name)
-    return int(v) if v not in (None, "") else None
+    if v in (None, ""):
+        return None
+    try:
+        return int(v)
+    except ValueError as exc:
+        raise ConfigError(f"{name} must be an integer") from exc
 
 
 # Explicit venue construction map. Venue names choose protocol identity;
@@ -302,6 +331,11 @@ def build_venue_conf(name: str, role: str, symbol: str,
         raise ConfigError(
             "venues.arcus.taker_fee_bps must be explicitly configured; "
             "Arcus effective account fees are not universal")
+    arcus_fee_source = settings.get("fee_source", "configured")
+    if (name == "arcus"
+            and arcus_fee_source not in ("configured", "account_api")):
+        raise ConfigError("venues.arcus.fee_source must be configured or "
+                          "account_api")
     fee_bps = settings.get("taker_fee_bps", spec["fee_bps"])
     if fee_bps is None:
         raise ConfigError(f"venues.{name}.taker_fee_bps must be configured")
@@ -332,7 +366,14 @@ def build_venue_conf(name: str, role: str, symbol: str,
         )
 
     if spec["kind"] == "arcus":
-        return VenueConf(**common)
+        return VenueConf(
+            **common,
+            arcus_creds=ArcusCreds(
+                _env_s("ARCUS_API_KEY"),
+                _env_s("ARCUS_API_PRIVATE_KEY"),
+                _env_s("ARCUS_ACCOUNT_ADDRESS"),
+                _env_i("ARCUS_ACCOUNT_INDEX")),
+            arcus_fee_source=arcus_fee_source)
 
     return VenueConf(
         **common,
@@ -348,6 +389,13 @@ def build_venue_conf(name: str, role: str, symbol: str,
 def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
                 symbol: str, venue_a: str, venue_b: str) -> Config:
     load_dotenv(env_file)
+    arcus_env = (_env_s("ARCUS_ENV") or "mainnet").lower()
+    if arcus_env not in ("mainnet", "testnet"):
+        raise ConfigError("ARCUS_ENV must be exactly mainnet or testnet")
+    arcus_api_url = (ARCUS_TESTNET_API_URL if arcus_env == "testnet"
+                     else ARCUS_API_URL)
+    arcus_ws_url = (ARCUS_TESTNET_WS_URL if arcus_env == "testnet"
+                    else ARCUS_WS_URL)
     try:
         with open(config_file) as fh:
             raw = yaml.safe_load(fh) or {}
@@ -424,6 +472,7 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         trades_csv=_get(raw, "logging", "trades_csv", "logs/trades.csv"),
         dashboard=bool(_get(raw, "logging", "dashboard", True)),
         log_file=_get(raw, "logging", "file", "logs/engine.log"),
-        arcus_api_url=ARCUS_API_URL,
-        arcus_ws_url=ARCUS_WS_URL,
+        arcus_api_url=arcus_api_url,
+        arcus_ws_url=arcus_ws_url,
+        arcus_env=arcus_env,
     )

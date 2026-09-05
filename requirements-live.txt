@@ -6,6 +6,9 @@
 hyperliquid-python-sdk>=0.9
 eth-account>=0.10
 
+# Arcus Ed25519 API-key signing (needed for authenticated Arcus testnet paths)
+cryptography>=42.0
+
 # Lighter signing (only needed when --venue-a or --venue-b selects lighter).
 # Installs from the SDK's current main; for reproducible deploys, append a
 # known-good commit: ...lighter-python.git@<commit-sha>
