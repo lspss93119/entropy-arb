@@ -30,6 +30,7 @@ import aiohttp
 from .book import ArbPlan, floor_step, plan_arb
 from .config import Config
 from .recorder import MinuteRecorder
+from .venue_arcus import ArcusVenue
 from .venue_hl import HLVenue
 from .venue_lighter import LighterVenue
 
@@ -137,6 +138,9 @@ class Engine:
             await self.session.close()
 
     def _make_venue(self, vc):
+        if vc.kind == "arcus":
+            return ArcusVenue(vc, self.cfg.arcus_api_url, self.cfg.arcus_ws_url,
+                              self.session, self.cfg.settle_timeout_sec)
         if vc.kind == "lighter":
             return LighterVenue(vc, self.session, self.cfg.settle_timeout_sec)
         return HLVenue(vc, self.cfg.hl_api_url, self.cfg.hl_ws_url,
@@ -144,6 +148,11 @@ class Engine:
 
     async def _run_inner(self) -> None:
         cfg = self.cfg
+        if (not self.record_only
+                and any(vc.venue_name == "arcus"
+                        for vc in (cfg.venue_a, cfg.venue_b))):
+            raise RuntimeError("Arcus live execution not implemented; use "
+                               "--record-only")
         self.venue_a = self._make_venue(cfg.venue_a)
         self.venue_b = self._make_venue(cfg.venue_b)
         self.venues = {"venue_a": self.venue_a, "venue_b": self.venue_b}

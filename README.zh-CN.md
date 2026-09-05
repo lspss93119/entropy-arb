@@ -11,6 +11,7 @@ Venue A 与 Venue B：
 | `lighter` | Lighter 主网 | USDC | 0 bps | zkLighter ws（增量订单簿，异步结算） |
 | `lighter-rh` | Lighter Robinhood 链 | **USDG** | 0 bps | zkLighter ws |
 | `tradexyz` | Hyperliquid trade.xyz dex | USDC | ~1 bps | HL l2Book，IOC 同步结算 |
+| `arcus` | Arcus 永续合约 | USD | 必须显式配置 | public BBO ws，仅采集 |
 
 > **推荐链接** —— 通过以下链接注册即可支持本项目：
 > - Entropy — Tier 4 推荐，100% 返佣：<https://entropy.io/?r=yourquantguy>
@@ -72,7 +73,8 @@ cp .env.example .env                     # 密钥——交易必填
 
 交易哪个市场**不在**配置文件中——每次启动时用命令行参数显式指定
 `--symbol`、`--venue-a`、`--venue-b`。两个交易所必须不同，且名称必须是
-`entropy`、`lighter`、`lighter-rh`、`tradexyz` 之一。
+`entropy`、`lighter`、`lighter-rh`、`tradexyz`、`arcus` 之一。当前阶段 Arcus
+只支持公共行情采集，必须搭配 `--record-only`。
 
 本机器人**没有模拟盘**——要么采集数据（`--record-only`），要么实盘交易。
 请用采集的数据和最小的仓位上限来验证策略，而不是模拟成交。
@@ -154,6 +156,9 @@ python3 main.py --symbol SNDK --venue-a entropy --venue-b lighter-rh
 | `recorder.*` | 分钟数据采集器 | 开启，按交易对命名的 CSV |
 | `logging.dashboard` / `logging.file` | 终端仪表盘；开启时日志写入文件 | 开启，`logs/engine.log` |
 
+对于 `arcus`，必须显式填写 `venues.arcus.taker_fee_bps`。示例使用公开 Base
+档位表中观察到的 2.25 bps；实际账户档位可能不同。本阶段没有 Arcus 实盘执行路径。
+
 ## 密钥配置（`.env`，仅实盘需要）
 
 - **Entropy / tradexyz（Hyperliquid）** —— 当选择的交易所包含
@@ -194,6 +199,7 @@ entropy_arb/book.py      订单簿 + 含手续费的套利规模计算
 entropy_arb/feeds.py     官方 HL ws + zkLighter ws 行情
 entropy_arb/venue_hl.py  Hyperliquid dex 适配器（Entropy、tradexyz）
 entropy_arb/venue_lighter.py  zkLighter 适配器（主网、Robinhood 链）
+entropy_arb/venue_arcus.py  Arcus 公共行情适配器（仅采集）
 entropy_arb/engine.py    双交易所策略主循环
 entropy_arb/dashboard.py Rich 终端仪表盘
 entropy_arb/recorder.py  分钟级盘口数据采集

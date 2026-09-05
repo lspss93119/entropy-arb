@@ -57,6 +57,37 @@ class OrderBook:
         self.last_update_ts = time.time()
         self.touch()
 
+    def apply_bbo(self, best_bid: Optional[dict], best_ask: Optional[dict]) -> None:
+        """Replace the book with one exchange-provided top-of-book update.
+
+        A BBO update is deliberately not expanded into synthetic depth.  If
+        either side is absent, the book is cleared and remains not ready.
+        """
+        bids: Dict[float, float] = {}
+        asks: Dict[float, float] = {}
+        for label, level, side in (("bid", best_bid, bids),
+                                   ("ask", best_ask, asks)):
+            if level is None:
+                continue
+            try:
+                px = float(level["price"])
+                size = float(level["size"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError(f"BBO {label} has malformed price/size") from exc
+            if not (math.isfinite(px) and math.isfinite(size)
+                    and px > 0.0 and size > 0.0):
+                raise ValueError(f"BBO {label} has non-positive or non-finite "
+                                 "price/size")
+            side[px] = size
+        if not (bids and asks):
+            bids.clear()
+            asks.clear()
+        self.bids = bids
+        self.asks = asks
+        self.ready = bool(bids and asks)
+        self.last_update_ts = time.time()
+        self.touch()
+
     def sorted_bids(self) -> List[Level]:
         return sorted(self.bids.items(), key=lambda kv: -kv[0])
 

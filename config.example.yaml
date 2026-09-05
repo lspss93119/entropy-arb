@@ -16,6 +16,7 @@
 #   lighter-rh   Lighter Robinhood chain    (USDG, 0 bps taker)
 #   entropy      Hyperliquid HIP-3 io        (USDC, 0 bps taker)
 #   tradexyz     Hyperliquid trade.xyz dex  (USDC, ~1 bps taker)
+#   arcus        Arcus public BBO           (USD, record-only in Phase 3)
 # 交易哪个市场不在本文件中配置——每次启动时用命令行参数显式指定 A/B：
 #     python3 main.py --symbol SNDK --venue-a entropy --venue-b lighter-rh
 # A/B 必须是不同的受支持交易所。
@@ -60,6 +61,12 @@ venues:
     taker_fee_bps: 1.0
     max_position_usd: 1000
     max_orders_per_min: 120
+  arcus:
+    # Observed public Base-tier table value: 225 ppm = 2.25 bps.
+    # Effective account tier is not universal; set this explicitly for use.
+    taker_fee_bps: 2.25
+    max_position_usd: 1000
+    max_orders_per_min: 30
 
 # ========================= SIZING / 下单规模 ===============================
 sizing:

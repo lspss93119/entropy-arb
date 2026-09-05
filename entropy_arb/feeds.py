@@ -200,3 +200,84 @@ class HLBookFeed:
                 break
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, 30.0)
+
+
+class ArcusBBOFeed:
+    """Arcus public BBO stream for one market.
+
+    Arcus sends one real best bid and best ask in each ``subscribed`` or
+    ``channel_data`` message.  The feed intentionally subscribes using only
+    the documented BBO envelope and never invents depth when a side is absent.
+    """
+
+    def __init__(self, name: str, ws_url: str, market: str, book: OrderBook,
+                 notify: Callable[[], None]) -> None:
+        self.name = name
+        self.ws_url = ws_url
+        self.market = market
+        self.book = book
+        self.notify = notify
+        self.last_sequence_id: Optional[int] = None
+        self.last_global_sequence_id: Optional[int] = None
+        self.last_timestamp_us: Optional[int] = None
+
+    def handle_message(self, msg: dict) -> None:
+        """Apply one decoded Arcus message, ignoring other channels."""
+        if not isinstance(msg, dict):
+            raise ValueError("BBO message must be an object")
+        if msg.get("type") not in ("subscribed", "channel_data"):
+            return
+        if msg.get("channel") != "bbo" or msg.get("id") != self.market:
+            return
+        contents = msg.get("contents")
+        if not isinstance(contents, dict):
+            raise ValueError("BBO message is missing contents")
+        try:
+            sequence_id = int(contents["lastSequenceId"])
+            global_sequence_id = int(contents["globalSequenceId"])
+            timestamp_us = int(contents["timestamp"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("BBO message has malformed sequence/timestamp") from exc
+        if (self.last_sequence_id is not None
+                and sequence_id < self.last_sequence_id):
+            return
+        if (self.last_timestamp_us is not None
+                and timestamp_us < self.last_timestamp_us):
+            return
+        self.book.apply_bbo(contents.get("bestBid"), contents.get("bestAsk"))
+        self.last_sequence_id = sequence_id
+        self.last_global_sequence_id = global_sequence_id
+        self.last_timestamp_us = timestamp_us
+        self.notify()
+
+    async def run(self, stop: asyncio.Event) -> None:
+        backoff = 1.0
+        while not stop.is_set():
+            try:
+                async with ws_connect(self.ws_url, max_size=2**23, open_timeout=10,
+                                      ping_interval=15, ping_timeout=15) as ws:
+                    log.info("[%s] connected (Arcus BBO, %s)", self.name,
+                             self.market)
+                    self.book.clear()
+                    self.last_sequence_id = None
+                    self.last_global_sequence_id = None
+                    self.last_timestamp_us = None
+                    await ws.send(json.dumps({"type": "subscribe",
+                                              "channel": "bbo",
+                                              "id": self.market}))
+                    async for raw in ws:
+                        backoff = 1.0
+                        self.handle_message(json.loads(raw))
+                        if stop.is_set():
+                            break
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                log.warning("[%s] Arcus BBO ws error: %s — reconnect in %.0fs",
+                            self.name, e, backoff)
+            self.book.clear()
+            self.notify()
+            if stop.is_set():
+                break
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 30.0)

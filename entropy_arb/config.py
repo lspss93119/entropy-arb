@@ -30,8 +30,10 @@ from dotenv import load_dotenv
 
 HL_API_URL = "https://api.hyperliquid.xyz"
 HL_WS_URL = "wss://api.hyperliquid.xyz/ws"   # official ws — the only HL feed used
+ARCUS_API_URL = "https://api.arcus.xyz"
+ARCUS_WS_URL = "wss://api.arcus.xyz/v1/ws"
 
-SUPPORTED_VENUES = ("entropy", "lighter", "lighter-rh", "tradexyz")
+SUPPORTED_VENUES = ("entropy", "lighter", "lighter-rh", "tradexyz", "arcus")
 
 
 @dataclass(frozen=True)
@@ -136,6 +138,8 @@ class Config:
     # runtime
     hl_api_url: str = HL_API_URL
     hl_ws_url: str = HL_WS_URL
+    arcus_api_url: str = ARCUS_API_URL
+    arcus_ws_url: str = ARCUS_WS_URL
 
     @property
     def creds_complete(self) -> bool:
@@ -174,6 +178,11 @@ _SCHEMA: Dict[str, Any] = {
             "max_orders_per_min": int,
         },
         "tradexyz": {
+            "taker_fee_bps": float,
+            "max_position_usd": float,
+            "max_orders_per_min": int,
+        },
+        "arcus": {
             "taker_fee_bps": float,
             "max_position_usd": float,
             "max_orders_per_min": int,
@@ -273,6 +282,8 @@ VENUE_SPECS = {
     "lighter-rh": {"kind": "lighter", "label": "RH",
                     "fee_bps": 0.0, "cap_usd": 1000.0,
                     "orders_per_min": 30},
+    "arcus": {"kind": "arcus", "label": "ARCUS",
+              "fee_bps": None, "cap_usd": 1000.0, "orders_per_min": 30},
 }
 
 
@@ -287,13 +298,20 @@ def build_venue_conf(name: str, role: str, symbol: str,
 
     spec = VENUE_SPECS[name]
     settings = (raw_config.get("venues") or {}).get(name) or {}
+    if name == "arcus" and "taker_fee_bps" not in settings:
+        raise ConfigError(
+            "venues.arcus.taker_fee_bps must be explicitly configured; "
+            "Arcus effective account fees are not universal")
+    fee_bps = settings.get("taker_fee_bps", spec["fee_bps"])
+    if fee_bps is None:
+        raise ConfigError(f"venues.{name}.taker_fee_bps must be configured")
     common = dict(
         key=role,
         venue_name=name,
         kind=spec["kind"],
         label=spec["label"],
         symbol=symbol,
-        fee_bps=float(settings.get("taker_fee_bps", spec["fee_bps"])),
+        fee_bps=float(fee_bps),
         cap_usd=float(settings.get("max_position_usd", spec["cap_usd"])),
         orders_per_min=int(settings.get("max_orders_per_min",
                                     spec["orders_per_min"])),
@@ -312,6 +330,9 @@ def build_venue_conf(name: str, role: str, symbol: str,
             hl_dex=spec["hl_dex"],
             hl_creds=HLCreds(private_key, account_address),
         )
+
+    if spec["kind"] == "arcus":
+        return VenueConf(**common)
 
     return VenueConf(
         **common,
@@ -403,4 +424,6 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         trades_csv=_get(raw, "logging", "trades_csv", "logs/trades.csv"),
         dashboard=bool(_get(raw, "logging", "dashboard", True)),
         log_file=_get(raw, "logging", "file", "logs/engine.log"),
+        arcus_api_url=ARCUS_API_URL,
+        arcus_ws_url=ARCUS_WS_URL,
     )

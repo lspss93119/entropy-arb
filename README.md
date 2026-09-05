@@ -11,6 +11,7 @@ and Venue B from the supported venues:
 | `lighter` | Lighter mainnet | USDC | 0 bps | zkLighter ws (diff books, async settle) |
 | `lighter-rh` | Lighter Robinhood chain | **USDG** | 0 bps | zkLighter ws |
 | `tradexyz` | Hyperliquid trade.xyz dex | USDC | ~1 bps | HL l2Book, sync IOC settle |
+| `arcus` | Arcus perpetuals | USD | configure explicitly | public BBO ws, record-only |
 
 > **Referral links** — signing up through these supports this project:
 > - Entropy — Tier 4 referral, 100% rebates: <https://entropy.io/?r=yourquantguy>
@@ -80,7 +81,8 @@ cp .env.example .env                     # credentials — required to trade
 The markets are **not** in the config file — you state them explicitly on
 every start with `--symbol`, `--venue-a`, and `--venue-b`. The two venue names
 must be different and each must be one of `entropy`, `lighter`, `lighter-rh`,
-or `tradexyz`.
+`tradexyz`, or `arcus`. Arcus is public market-data only in this phase and
+must be used with `--record-only`.
 
 There is **no paper mode** — the bot either collects data (`--record-only`)
 or trades live. Validate with recorded data and tiny position caps, not with
@@ -169,6 +171,10 @@ errors), credentials in `.env`, and the markets on the command line
 | `recorder.*` | minute-data recorder | on, pair-aware `logs/minutes-<symbol>-<a>-<b>.csv` |
 | `logging.dashboard` / `logging.file` | Rich dashboard on a tty; log file while it runs | on, `logs/engine.log` |
 
+For `arcus`, `venues.arcus.taker_fee_bps` is required explicitly. The example
+uses the observed public Base-tier table value of 2.25 bps; an account's
+effective tier may differ. Arcus has no live execution path in this phase.
+
 ## Credentials (`.env`, live only)
 
 - **Entropy / tradexyz (Hyperliquid)** — when either selected venue is a
@@ -213,6 +219,7 @@ entropy_arb/book.py      order books + fee-aware crossing/sizing math
 entropy_arb/feeds.py     official HL ws + zkLighter ws book feeds
 entropy_arb/venue_hl.py  Hyperliquid dex adapter (Entropy, tradexyz)
 entropy_arb/venue_lighter.py  zkLighter adapter (mainnet, Robinhood chain)
+entropy_arb/venue_arcus.py  Arcus public market-data adapter (record-only)
 entropy_arb/engine.py    the two-venue strategy loop
 entropy_arb/dashboard.py Rich terminal dashboard
 entropy_arb/recorder.py  1-minute orderbook bars
