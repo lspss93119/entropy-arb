@@ -1,0 +1,30 @@
+[
+  {
+    "connection_id": "sanitized",
+    "type": "connected"
+  },
+  {
+    "channel": "bbo",
+    "id": "SNDK-USD",
+    "type": "subscribed",
+    "contents": {
+      "bestBid": {"price": "1762.92", "size": "0.285"},
+      "bestAsk": {"price": "1763.37", "size": "0.2821"},
+      "lastSequenceId": 93594319,
+      "globalSequenceId": 1856155925,
+      "timestamp": 1788607522677299
+    }
+  },
+  {
+    "channel": "bbo",
+    "id": "SNDK-USD",
+    "type": "channel_data",
+    "contents": {
+      "bestBid": {"price": "1762.74", "size": "1.6819938"},
+      "bestAsk": {"price": "1763.58", "size": "0.4256124"},
+      "lastSequenceId": 93594320,
+      "globalSequenceId": 1856155977,
+      "timestamp": 1788607522980011
+    }
+  }
+]
