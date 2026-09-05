@@ -2,11 +2,12 @@
 
 **[中文文档 / Chinese documentation → README.zh-CN.md](README.zh-CN.md)**
 
-Open-source two-venue perp arbitrage bot. One leg is always **Entropy**
-(the `io` builder dex on Hyperliquid); the other leg — the hedge — is one of:
+Open-source two-venue perp arbitrage bot. Each run explicitly selects Venue A
+and Venue B from the supported venues:
 
-| `--hedge` | venue | quote | taker fee | protocol |
+| venue name | venue | quote | taker fee | protocol |
 |---|---|---|---|---|
+| `entropy` | Hyperliquid HIP-3 `io` | USDC | 0 bps | HL l2Book, sync IOC settle |
 | `lighter` | Lighter mainnet | USDC | 0 bps | zkLighter ws (diff books, async settle) |
 | `lighter-rh` | Lighter Robinhood chain | **USDG** | 0 bps | zkLighter ws |
 | `tradexyz` | Hyperliquid trade.xyz dex | USDC | ~1 bps | HL l2Book, sync IOC settle |
@@ -34,15 +35,15 @@ The band is three numbers in `config.yaml`, derived by you from recorded
 data:
 
 ```
-premium_bps = (Entropy price / hedge price − 1) × 10 000
+premium_bps = (Venue A price / Venue B price − 1) × 10 000
 
-                          ┌──────────────  SELL entropy + BUY hedge
+                          ┌──────────────  SELL A + BUY B
 midline + upper  ───────────────────────────────────────────────────
                                        ▲
 midline          ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┼ ─ ─   the premium's usual level
                                        ▼
 midline − lower  ───────────────────────────────────────────────────
-                          └──────────────  BUY entropy + SELL hedge
+                          └──────────────  BUY A + SELL B
 ```
 
 - `midline_bps` — where the premium normally sits. Cross-venue premiums are
@@ -51,18 +52,18 @@ midline − lower  ────────────────────�
   never unwind. Measure where the premium actually sits and type it in.
 - `upper_bps` / `lower_bps` — the entry bands on each side of the midline.
 
-Both hurdles are applied to **executable** prices (entropy bid vs hedge ask,
+Both hurdles are applied to **executable** prices (A bid vs B ask,
 and vice versa) and are **net of both venues' taker fees** — the engine adds
 fees on top before a slice qualifies. A full round trip therefore nets
 **≥ upper + lower bps after fees by construction**.
 
-One consequence worth understanding: with `midline_bps: 5`, the buy-entropy
-hurdle is `lower − midline`, which can be **negative**. That is intentional —
-if entropy is persistently 5 bps rich, buying it at a 0 bps premium is 5 bps
+One consequence worth understanding: with `midline_bps: 5`, the buy-A hurdle
+is `lower − midline`, which can be **negative**. That is intentional —
+if Venue A is persistently 5 bps rich, buying it at a 0 bps premium is 5 bps
 cheap versus its own equilibrium, and that trade is the profitable unwind of
 an earlier sell at `midline + upper`. It also means a **wrong midline loses
 money**: if you type `midline_bps: 5` while the true premium sits at 0, the
-bot happily buys entropy at fair value all day. Measure first, then trade —
+bot happily buys Venue A at fair value all day. Measure first, then trade —
 that is what the recorder and analyzer are for.
 
 ## Quick start
@@ -77,9 +78,9 @@ cp .env.example .env                     # credentials — required to trade
 ```
 
 The markets are **not** in the config file — you state them explicitly on
-every start: `--symbol` (traded on both venues) and `--hedge` (one of
-`lighter`, `lighter-rh`, `tradexyz`; Entropy is always the
-other leg).
+every start with `--symbol`, `--venue-a`, and `--venue-b`. The two venue names
+must be different and each must be one of `entropy`, `lighter`, `lighter-rh`,
+or `tradexyz`.
 
 There is **no paper mode** — the bot either collects data (`--record-only`)
 or trades live. Validate with recorded data and tiny position caps, not with
@@ -88,16 +89,17 @@ simulated fills.
 **1. Collect data first** (no credentials needed):
 
 ```bash
-python3 main.py --record-only --symbol SNDK --hedge lighter-rh
+python3 main.py --record-only --symbol SNDK --venue-a entropy --venue-b lighter-rh
 ```
 
 Let it run for at least a few hours (a day is better — premiums have
-intraday regimes). It writes `logs/minutes.csv`.
+intraday regimes). It writes a pair-aware file such as
+`logs/minutes-SNDK-entropy-lighter-rh.csv`.
 
 **2. Analyze and set your thresholds:**
 
 ```bash
-python3 tools/analyze.py
+python3 tools/analyze.py --csv logs/minutes-SNDK-entropy-lighter-rh.csv
 ```
 
 It prints the premium distribution, how often each candidate band would have
@@ -108,7 +110,7 @@ the smallest position caps that clear the venue minimums:
 
 ```bash
 pip install -r requirements-live.txt
-python3 main.py --symbol SNDK --hedge lighter-rh
+python3 main.py --symbol SNDK --venue-a entropy --venue-b lighter-rh
 ```
 
 Running without `--record-only` sends real orders immediately once both
@@ -132,15 +134,15 @@ Once per second it samples both live books; once per minute it writes a row:
 | column | meaning |
 |---|---|
 | `minute_ts`, `time_utc` | minute start (epoch seconds, ISO UTC) |
-| `entropy_bid/ask`, `hedge_bid/ask` | last fresh top-of-book of the minute |
-| `premium_open/high/low/close/mean/std_bps` | mid-to-mid premium of Entropy over the hedge |
-| `sell_edge_mean/max_bps` | executable premium for SELL entropy (entropy bid / hedge ask − 1) |
-| `buy_edge_mean/max_bps` | executable premium for BUY entropy (hedge bid / entropy ask − 1) |
+| `venue_a`, `venue_b`, `symbol` | selected pair identity |
+| `a_bid/ask`, `b_bid/ask` | last fresh top-of-book of the minute |
+| `premium_open/high/low/close/mean/std_bps` | mid-to-mid premium of Venue A over Venue B |
+| `sell_a_edge_mean/max_bps` | executable premium for SELL A (A bid / B ask − 1) |
+| `buy_a_edge_mean/max_bps` | executable premium for BUY A (B bid / A ask − 1) |
 | `samples` | how many of the ~60 seconds both books were fresh |
 
 Recorded edges are pre-fee; the analyzer subtracts `--fees-bps` (pass the
-**sum** of both venues' taker fees — default 0.0 for the zero-fee venues,
-~1.0 with a `tradexyz` hedge) before counting firings, so its table and
+**sum** of both selected venues' taker fees) before counting firings, so its table and
 suggestions translate directly into config values. `--hours 24` restricts to
 recent data; premiums drift, so re-run it regularly and update
 `config.yaml`.
@@ -149,36 +151,37 @@ recent data; premiums drift, so re-run it regularly and update
 
 Strategy lives in `config.yaml` (validated — unknown keys are startup
 errors), credentials in `.env`, and the markets on the command line
-(`--symbol`, `--hedge`). Full commented reference:
+(`--symbol`, `--venue-a`, `--venue-b`). Full commented reference:
 [config.example.yaml](config.example.yaml). The essentials:
 
 | key | meaning | default |
 |---|---|---|
 | `thresholds.midline_bps` | premium center (measure it!) | — |
 | `thresholds.upper_bps` / `lower_bps` | entry bands (> 0) | — |
-| `entropy.dex` | Entropy's dex name on Hyperliquid | `io` |
-| `*.taker_fee_bps` | per-venue taker fee | 0.0 (tradexyz hedge: 1.0) |
-| `*.max_position_usd` | per-venue position cap | 1000 |
-| `*.max_orders_per_min` | per-venue send budget (sliding 60 s) | 120; lighter hedges 30 |
+| `venues.<name>.taker_fee_bps` | per-venue taker fee | 0.0 (`tradexyz`: 1.0) |
+| `venues.<name>.max_position_usd` | per-venue position cap | 1000 |
+| `venues.<name>.max_orders_per_min` | per-venue send budget (sliding 60 s) | 120; Lighter 30 |
 | `sizing.take_fraction` | fraction of crossable depth taken | 0.5 |
 | `sizing.max_order_notional_usd` | per-slice cap | 500 |
 | `inventory.scale_bps` / `floor_frac` | inventory ladder (extra bps past `floor_frac` of the cap) | 10 / 0.5 |
 | `execution.premium_persist_sec` | edge must persist before firing | 0.3 |
 | `execution.*` | slippage bounds, timeouts, reconcile cadence… | see file |
-| `recorder.*` | minute-data recorder | on, `logs/minutes.csv` |
+| `recorder.*` | minute-data recorder | on, pair-aware `logs/minutes-<symbol>-<a>-<b>.csv` |
 | `logging.dashboard` / `logging.file` | Rich dashboard on a tty; log file while it runs | on, `logs/engine.log` |
 
 ## Credentials (`.env`, live only)
 
-- **Entropy / tradexyz (Hyperliquid)** — create an API ("agent") wallet at
+- **Entropy / tradexyz (Hyperliquid)** — when either selected venue is a
+  Hyperliquid venue, create an API ("agent") wallet at
   <https://app.hyperliquid.xyz/API>. `HL_PRIVATE_KEY` is the **agent** key,
-  `HL_ACCOUNT_ADDRESS` your main account address. With `--hedge tradexyz`
+  `HL_ACCOUNT_ADDRESS` your main account address. With both selected venues
+  on Hyperliquid,
   both legs share this account by default (one nonce sequence is handled
   internally); set `HL_PRIVATE_KEY_XYZ` / `HL_ACCOUNT_ADDRESS_XYZ`
   to split them. Fund the dex-specific clearinghouses you trade.
 - **Lighter** — `LIGHTER_ACCOUNT_INDEX`, `LIGHTER_API_KEY_INDEX`,
-  `LIGHTER_API_PRIVATE_KEY`, registered on the **same deployment** as your
-  `--hedge` flag (mainnet and the Robinhood chain are separate accounts and
+  `LIGHTER_API_PRIVATE_KEY`, registered on the **same deployment** as the
+  selected Lighter venue (mainnet and the Robinhood chain are separate accounts and
   keys — see [lighter-python](https://github.com/elliottech/lighter-python)).
 
 ## How execution works
@@ -213,7 +216,7 @@ entropy_arb/venue_lighter.py  zkLighter adapter (mainnet, Robinhood chain)
 entropy_arb/engine.py    the two-venue strategy loop
 entropy_arb/dashboard.py Rich terminal dashboard
 entropy_arb/recorder.py  1-minute orderbook bars
-tools/analyze.py         minutes.csv -> suggested thresholds
+tools/analyze.py         pair CSV (legacy or generic) -> suggested thresholds
 tests/                   python3 -m pytest tests/
 ```
 
@@ -226,9 +229,8 @@ tests/                   python3 -m pytest tests/
   level, but a USDG *move* is real PnL.
 - **Funding**: two venues, two independent funding rates; carry is not
   modeled. Position caps bound it — keep them modest.
-- **Thin books**: Entropy depth can be tiny; `take_fraction` and notional
-  caps keep clips small, but slippage on the hedge leg after a partial fill
-  is real.
+- **Thin books**: either venue's depth can be tiny; `take_fraction` and
+  notional caps keep clips small, but slippage after a partial fill is real.
 - **Market hours**: for equity perps (e.g. SNDK), off-hours oracle regimes
   differ per venue; consider wider bands or not trading them.
 - **One-leg risk**: a leg can fail after the other filled. The bot hedges

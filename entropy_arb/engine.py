@@ -198,7 +198,10 @@ class Engine:
             tasks += v.start_tasks(self.stop, self._update_evt.set, live)
         if cfg.recorder_enabled or self.record_only:
             self.recorder = MinuteRecorder(cfg.recorder_csv, self.venue_a.book,
-                                           self.venue_b.book, cfg.staleness_sec)
+                                           self.venue_b.book, cfg.staleness_sec,
+                                           venue_a_name=cfg.venue_a.venue_name,
+                                           venue_b_name=cfg.venue_b.venue_name,
+                                           symbol=cfg.symbol)
             tasks.append(asyncio.create_task(self.recorder.run(self.stop),
                                              name="recorder"))
         if not self.record_only:

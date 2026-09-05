@@ -2,11 +2,12 @@
 
 **[English documentation / 英文文档 → README.md](README.md)**
 
-开源双交易所永续合约套利机器人。其中一条腿永远是 **Entropy**（Hyperliquid 上的
-`io` builder dex）；另一条腿（对冲腿）三选一：
+开源双交易所永续合约套利机器人。每次运行都从受支持的交易所中明确选择
+Venue A 与 Venue B：
 
-| `--hedge` | 交易所 | 计价货币 | 吃单费 | 协议 |
+| 交易所名称 | 交易所 | 计价货币 | 吃单费 | 协议 |
 |---|---|---|---|---|
+| `entropy` | Hyperliquid HIP-3 `io` | USDC | 0 bps | HL l2Book，IOC 同步结算 |
 | `lighter` | Lighter 主网 | USDC | 0 bps | zkLighter ws（增量订单簿，异步结算） |
 | `lighter-rh` | Lighter Robinhood 链 | **USDG** | 0 bps | zkLighter ws |
 | `tradexyz` | Hyperliquid trade.xyz dex | USDC | ~1 bps | HL l2Book，IOC 同步结算 |
@@ -30,15 +31,15 @@ CSV 数据**，配套的分析工具可以直接把这些数据变成策略所�
 整个信号就是 `config.yaml` 里三个数字，由你根据采集的数据自己设定：
 
 ```
-premium_bps =（Entropy 价格 / 对冲腿价格 − 1）× 10 000
+premium_bps =（Venue A 价格 / Venue B 价格 − 1）× 10 000
 
-                          ┌──────────────  卖出 Entropy + 买入对冲腿
+                          ┌──────────────  卖出 A + 买入 B
 midline + upper  ───────────────────────────────────────────────────
                                        ▲
 midline          ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┼ ─ ─   溢价的长期中枢
                                        ▼
 midline − lower  ───────────────────────────────────────────────────
-                          └──────────────  买入 Entropy + 卖出对冲腿
+                          └──────────────  买入 A + 卖出 B
 ```
 
 - `midline_bps` —— 溢价的常态水平。跨所溢价几乎从不以零为中心（预言机不同、
@@ -46,16 +47,16 @@ midline − lower  ────────────────────�
   永远无法平仓。请实际测量溢价所在的位置，然后填入。
 - `upper_bps` / `lower_bps` —— 中枢上下两侧的入场带宽。
 
-两个方向的门槛都作用于**可实际成交的价格**（Entropy 买一 对 对冲腿卖一，
+两个方向的门槛都作用于**可实际成交的价格**（A 买一 对 B 卖一，
 反之亦然），并且是**扣除双边吃单手续费之后的净门槛**——引擎会在阈值之上
 另行叠加手续费。因此一次完整往返扣费后**净赚 ≥ upper + lower bps**，这是
 结构上保证的。
 
-有一点必须理解：当 `midline_bps: 5` 时，买入 Entropy 的门槛是
-`lower − midline`，可能为**负数**。这是有意为之——如果 Entropy 长期贵 5 bps，
-那么在溢价为 0 时买入它，相对其自身均衡水平就是便宜了 5 bps，这笔交易正是
+有一点必须理解：当 `midline_bps: 5` 时，买入 A 的门槛是
+`lower − midline`，可能为**负数**。这是有意为之——如果 Venue A 长期贵 5 bps，
+那么在溢价为 0 时买入 A，相对其自身均衡水平就是便宜了 5 bps，这笔交易正是
 此前在 `midline + upper` 处卖出的获利平仓。这同时意味着**中枢填错就是亏钱
-策略**：若真实溢价中枢是 0 而你填了 5，机器人会整天以公允价买入 Entropy。
+策略**：若真实溢价中枢是 0 而你填了 5，机器人会整天以公允价买入 A。
 先测量、再交易——数据采集器和分析工具就是为此而生。
 
 ## 快速开始
@@ -69,10 +70,9 @@ cp config.example.yaml config.yaml       # 策略配置（阈值、规模、风�
 cp .env.example .env                     # 密钥——交易必填
 ```
 
-交易哪个市场**不在**配置文件中——每次启动时用命令行参数显式指定：
-`--symbol`（两个交易所共同交易的品种）和 `--hedge`（三选一：
-`lighter`、`lighter-rh`、`tradexyz`；Entropy 永远是
-另一条腿）。
+交易哪个市场**不在**配置文件中——每次启动时用命令行参数显式指定
+`--symbol`、`--venue-a`、`--venue-b`。两个交易所必须不同，且名称必须是
+`entropy`、`lighter`、`lighter-rh`、`tradexyz` 之一。
 
 本机器人**没有模拟盘**——要么采集数据（`--record-only`），要么实盘交易。
 请用采集的数据和最小的仓位上限来验证策略，而不是模拟成交。
@@ -80,16 +80,16 @@ cp .env.example .env                     # 密钥——交易必填
 **第一步：先采集数据**（不需要任何密钥）：
 
 ```bash
-python3 main.py --record-only --symbol SNDK --hedge lighter-rh
+python3 main.py --record-only --symbol SNDK --venue-a entropy --venue-b lighter-rh
 ```
 
-至少运行几个小时（最好一整天——溢价存在日内规律），数据写入
-`logs/minutes.csv`。
+至少运行几个小时（最好一整天——溢价存在日内规律），数据写入按交易对命名的
+文件，例如 `logs/minutes-SNDK-entropy-lighter-rh.csv`。
 
 **第二步：分析数据、设定阈值：**
 
 ```bash
-python3 tools/analyze.py
+python3 tools/analyze.py --csv logs/minutes-SNDK-entropy-lighter-rh.csv
 ```
 
 它会输出溢价分布、各档带宽的历史触发频率，以及可直接粘贴进
@@ -100,7 +100,7 @@ python3 tools/analyze.py
 
 ```bash
 pip install -r requirements-live.txt
-python3 main.py --symbol SNDK --hedge lighter-rh
+python3 main.py --symbol SNDK --venue-a entropy --venue-b lighter-rh
 ```
 
 不带 `--record-only` 运行时，只要两边行情就绪且溢价越过带宽，就会立即
@@ -122,49 +122,49 @@ python3 main.py --symbol SNDK --hedge lighter-rh
 | 列 | 含义 |
 |---|---|
 | `minute_ts`, `time_utc` | 分钟起点（epoch 秒 / ISO UTC） |
-| `entropy_bid/ask`, `hedge_bid/ask` | 该分钟最后一次有效盘口 |
-| `premium_open/high/low/close/mean/std_bps` | Entropy 相对对冲腿的中间价溢价 |
-| `sell_edge_mean/max_bps` | 卖出 Entropy 方向的可成交溢价（Entropy 买一 / 对冲腿卖一 − 1） |
-| `buy_edge_mean/max_bps` | 买入 Entropy 方向的可成交溢价（对冲腿买一 / Entropy 卖一 − 1） |
+| `venue_a`, `venue_b`, `symbol` | 交易对身份 |
+| `a_bid/ask`, `b_bid/ask` | 该分钟最后一次有效盘口 |
+| `premium_open/high/low/close/mean/std_bps` | Venue A 相对 Venue B 的中间价溢价 |
+| `sell_a_edge_mean/max_bps` | 卖出 A 方向的可成交溢价（A 买一 / B 卖一 − 1） |
+| `buy_a_edge_mean/max_bps` | 买入 A 方向的可成交溢价（B 买一 / A 卖一 − 1） |
 | `samples` | 该分钟约 60 秒中两边盘口同时有效的秒数 |
 
 采集的 edge 为费前口径；分析工具在统计触发频率前会先扣除 `--fees-bps`
-（请传入**两边吃单费之和**——零费交易所默认 0.0，对冲腿为 `tradexyz` 时
-约为 1.0），因此其表格与建议值可直接填入配置。`--hours 24`
+（请传入**两边吃单费之和**），因此其表格与建议值可直接填入配置。`--hours 24`
 可只分析最近数据；溢价中枢会漂移，请定期重新分析并更新 `config.yaml`。
 
 ## 配置说明
 
 策略在 `config.yaml`（严格校验——未知键名直接报错），密钥在 `.env`。
-交易市场由命令行指定（`--symbol`、`--hedge`）。完整的双语注释参考：
+交易市场由命令行指定（`--symbol`、`--venue-a`、`--venue-b`）。完整的双语注释参考：
 [config.example.yaml](config.example.yaml)。核心项：
 
 | 键 | 含义 | 默认值 |
 |---|---|---|
 | `thresholds.midline_bps` | 溢价中枢（必须实测！） | — |
 | `thresholds.upper_bps` / `lower_bps` | 入场带宽（> 0） | — |
-| `entropy.dex` | Entropy 在 Hyperliquid 上的 dex 名 | `io` |
-| `*.taker_fee_bps` | 各所吃单费 | 0.0（tradexyz 对冲腿：1.0） |
-| `*.max_position_usd` | 各所持仓上限 | 1000 |
-| `*.max_orders_per_min` | 各所每分钟下单预算（滑动 60 秒） | 120；Lighter 对冲腿 30 |
+| `venues.<name>.taker_fee_bps` | 各所吃单费 | 0.0（`tradexyz`：1.0） |
+| `venues.<name>.max_position_usd` | 各所持仓上限 | 1000 |
+| `venues.<name>.max_orders_per_min` | 各所每分钟下单预算（滑动 60 秒） | 120；Lighter 30 |
 | `sizing.take_fraction` | 吃掉可套利深度的比例 | 0.5 |
 | `sizing.max_order_notional_usd` | 单笔名义上限 | 500 |
 | `inventory.scale_bps` / `floor_frac` | 库存阶梯（仓位超过上限的 `floor_frac` 后额外加价） | 10 / 0.5 |
 | `execution.premium_persist_sec` | 信号需持续多久才触发 | 0.3 |
 | `execution.*` | 滑点保护、超时、对账周期等 | 见配置文件 |
-| `recorder.*` | 分钟数据采集器 | 开启，`logs/minutes.csv` |
+| `recorder.*` | 分钟数据采集器 | 开启，按交易对命名的 CSV |
 | `logging.dashboard` / `logging.file` | 终端仪表盘；开启时日志写入文件 | 开启，`logs/engine.log` |
 
 ## 密钥配置（`.env`，仅实盘需要）
 
-- **Entropy / tradexyz（Hyperliquid）** —— 在
+- **Entropy / tradexyz（Hyperliquid）** —— 当选择的交易所包含
+  Hyperliquid 时，在
   <https://app.hyperliquid.xyz/API> 创建 API（agent）钱包。`HL_PRIVATE_KEY`
   填 **agent 钱包私钥**，`HL_ACCOUNT_ADDRESS` 填主账户地址。当
-  `--hedge tradexyz` 时两条腿默认共用该账户（内部自动共享 nonce 序列）；
+  两条腿都是 Hyperliquid 交易所时默认共用该账户（内部自动共享 nonce 序列）；
   如需分开，设置 `HL_PRIVATE_KEY_XYZ` / `HL_ACCOUNT_ADDRESS_XYZ`。注意给
   所交易的各 dex 分别充入保证金。
 - **Lighter** —— `LIGHTER_ACCOUNT_INDEX`、`LIGHTER_API_KEY_INDEX`、
-  `LIGHTER_API_PRIVATE_KEY`，必须注册在与启动参数 `--hedge` **相同的部署**上
+  `LIGHTER_API_PRIVATE_KEY`，必须注册在与所选 Lighter 交易所**相同的部署**上
   （主网与 Robinhood 链是两套独立的账户和密钥——参见
   [lighter-python](https://github.com/elliottech/lighter-python)）。
 
@@ -197,7 +197,7 @@ entropy_arb/venue_lighter.py  zkLighter 适配器（主网、Robinhood 链）
 entropy_arb/engine.py    双交易所策略主循环
 entropy_arb/dashboard.py Rich 终端仪表盘
 entropy_arb/recorder.py  分钟级盘口数据采集
-tools/analyze.py         minutes.csv -> 阈值建议
+tools/analyze.py         pair CSV（legacy 或 generic）-> 阈值建议
 tests/                   python3 -m pytest tests/
 ```
 
@@ -209,8 +209,8 @@ tests/                   python3 -m pytest tests/
   一部分是稳定币本身的基差；midline 吸收其水平，但 USDG 的*变动*是真实盈亏。
 - **资金费**：两个交易所、两套独立的资金费率，持仓成本未建模——仓位上限
   请设小一些。
-- **薄盘口**：Entropy 深度可能很小；`take_fraction` 与名义上限控制单笔规模，
-  但部分成交后对冲腿的滑点是真实存在的。
+- **薄盘口**：任一交易所深度都可能很小；`take_fraction` 与名义上限控制单笔规模，
+  但部分成交后的滑点是真实存在的。
 - **交易时段**：股票类永续（如 SNDK）盘后各所预言机行为不同，建议加宽带宽
   或避开盘后。
 - **单腿风险**：一条腿成交后另一条可能失败。机器人会自动对冲并对账，但

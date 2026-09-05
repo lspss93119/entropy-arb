@@ -30,7 +30,8 @@
 # full round trip nets >= upper + lower bps after fees by construction.
 #
 # midline_bps is a number YOU derive from recorded data. Run the bot
-# (--record-only) to collect a pair-aware CSV, then: python3 tools/analyze.py
+# (--record-only) to collect a pair-aware CSV, then analyze it with:
+#   python3 tools/analyze.py --csv logs/minutes-SNDK-entropy-lighter-rh.csv
 #
 # midline_bps 是你根据采集数据设定的值。先运行机器人（--record-only）采集
 # pair-aware CSV，再运行 python3 tools/analyze.py 获取建议值。

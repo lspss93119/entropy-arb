@@ -79,8 +79,8 @@ _ZH = {
     "mid premium ": "中间价溢价 ",
     "   midline ": "   中枢 ",
     "   band ": "   区间 ",
-    "SELL entropy → buy {h}": "卖出 entropy → 买入 {h}",
-    "BUY entropy → sell {h}": "买入 entropy → 卖出 {h}",
+    "SELL A ({a}) → BUY B ({b})": "卖出 A ({a}) → 买入 B ({b})",
+    "BUY A ({a}) → SELL B ({b})": "买入 A ({a}) → 卖出 B ({b})",
     "direction": "方向",
     "exec prem bps": "可成交溢价 bps",
     "hurdle bps": "门槛 bps",
@@ -348,10 +348,12 @@ class Dashboard:
         t.add_column(self._t("hurdle bps"), justify="right")
         t.add_column(self._t("gap bps"), justify="right")
         t.add_column("", justify="left")
-        self._dir_row(t, self._t("SELL entropy → buy {h}", h=eng.venue_b.name),
+        self._dir_row(t, self._t("SELL A ({a}) → BUY B ({b})",
+                                a=eng.venue_a.name, b=eng.venue_b.name),
                       eng.venue_b, eng.venue_a,
                       cfg.midline_bps + cfg.upper_bps, SELL_A_BUY_B)
-        self._dir_row(t, self._t("BUY entropy → sell {h}", h=eng.venue_b.name),
+        self._dir_row(t, self._t("BUY A ({a}) → SELL B ({b})",
+                                a=eng.venue_a.name, b=eng.venue_b.name),
                       eng.venue_a, eng.venue_b,
                       cfg.lower_bps - cfg.midline_bps, BUY_A_SELL_B)
         return Panel(Group(head, t),

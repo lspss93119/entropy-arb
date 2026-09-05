@@ -2,13 +2,13 @@
 # 实盘依赖（交易签名 SDK）
 -r requirements.txt
 
-# Hyperliquid signing (Entropy leg, and the tradexyz hedge)
+# Hyperliquid signing (needed when Venue A or Venue B selects a Hyperliquid venue)
 hyperliquid-python-sdk>=0.9
 eth-account>=0.10
 
-# Lighter signing (only needed with --hedge lighter / lighter-rh).
+# Lighter signing (only needed when --venue-a or --venue-b selects lighter).
 # Installs from the SDK's current main; for reproducible deploys, append a
 # known-good commit: ...lighter-python.git@<commit-sha>
-# 仅当 --hedge 为 lighter / lighter-rh 时需要。默认安装 SDK 最新主分支；
+# 仅当 --venue-a 或 --venue-b 选择 lighter / lighter-rh 时需要。默认安装 SDK 最新主分支；
 # 如需可复现部署，可在末尾固定 commit：...lighter-python.git@<commit-sha>
 lighter-sdk @ git+https://github.com/elliottech/lighter-python.git

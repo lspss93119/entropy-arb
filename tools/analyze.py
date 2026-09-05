@@ -14,6 +14,9 @@ and prints:
 Usage:
     python3 tools/analyze.py                    # logs/minutes.csv
     python3 tools/analyze.py --csv path.csv --hours 24 --min-samples 10
+
+Both the legacy Entropy/hedge columns and the generic Venue A/B columns are
+accepted. The fixed threshold model is unchanged.
 """
 from __future__ import annotations
 
@@ -38,6 +41,15 @@ def pctl(sorted_vals: list, q: float) -> float:
     return sorted_vals[lo] * (hi - k) + sorted_vals[hi] * (k - lo)
 
 
+def _field(row: dict, *names: str) -> str:
+    """Return the first present non-empty field from either CSV schema."""
+    for name in names:
+        value = row.get(name)
+        if value not in (None, ""):
+            return value
+    raise KeyError(names[0])
+
+
 def load_rows(path: str, hours: float, min_samples: int) -> list:
     cutoff = time.time() - hours * 3600 if hours > 0 else 0.0
     rows = []
@@ -52,8 +64,10 @@ def load_rows(path: str, hours: float, min_samples: int) -> list:
                     "ts": float(r["minute_ts"]),
                     "prem": float(r["premium_close_bps"]),
                     "prem_mean": float(r["premium_mean_bps"]),
-                    "sell_max": float(r["sell_edge_max_bps"]),
-                    "buy_max": float(r["buy_edge_max_bps"]),
+                    "sell_max": float(_field(r, "sell_a_edge_max_bps",
+                                               "sell_edge_max_bps")),
+                    "buy_max": float(_field(r, "buy_a_edge_max_bps",
+                                              "buy_edge_max_bps")),
                 })
             except (KeyError, ValueError):
                 continue
@@ -72,7 +86,7 @@ def main() -> None:
                    help="SUM of both venues' taker fees in bps (each crossing "
                         "pays both legs); recorded edges are pre-fee, so this "
                         "is subtracted before counting firings (default 0.0 — "
-                        "pass ~1.0 with a tradexyz hedge)")
+                   "pass the sum of the selected venues' fees)")
     args = p.parse_args()
 
     try:
@@ -96,8 +110,8 @@ def main() -> None:
     median = pctl(prem, 50)
 
     print(f"\n=== {args.csv}: {len(rows)} minutes over {span_h:.1f}h ===\n")
-    print("premium of Entropy over hedge, minute close (bps) / "
-          "Entropy 相对对冲腿的溢价:")
+    print("premium of Venue A over Venue B, minute close (bps) / "
+          "Venue A 相对 Venue B 的溢价:")
     print(f"  mean {mean:+.2f}   std {math.sqrt(var):.2f}   "
           f"median {median:+.2f}")
     print(f"  p5 {pctl(prem, 5):+.2f}   p25 {pctl(prem, 25):+.2f}   "
@@ -116,7 +130,7 @@ def main() -> None:
     print(f"\nwith midline_bps = {midline:+.1f} (median) and {fees:.1f} bps "
           f"round-trip taker fees, minutes each band would have fired / "
           f"各档净阈值触发的分钟数:")
-    print(f"  {'band bps':>9} | {'SELL entropy':>17} | {'BUY entropy':>17}")
+    print(f"  {'band bps':>9} | {'SELL A':>17} | {'BUY A':>17}")
     print(f"  {'':>9} | {'minutes':>8} {'per day':>8} | "
           f"{'minutes':>8} {'per day':>8}")
     per_day = 24.0 / span_h if span_h > 0 else 0.0
