@@ -113,7 +113,12 @@ class VenueConf:
     lighter_creds: Optional[LighterCreds] = None
     # arcus
     arcus_creds: Optional[ArcusCreds] = None
-    arcus_fee_source: str = "configured"
+    fee_source: str = "configured"
+
+    @property
+    def arcus_fee_source(self) -> str:
+        """Backward-compatible alias for older Arcus-specific callers."""
+        return self.fee_source
 
 
 @dataclass
@@ -187,21 +192,25 @@ _SCHEMA: Dict[str, Any] = {
     "venues": {
         "entropy": {
             "taker_fee_bps": float,
+            "fee_source": str,
             "max_position_usd": float,
             "max_orders_per_min": int,
         },
         "lighter": {
             "taker_fee_bps": float,
+            "fee_source": str,
             "max_position_usd": float,
             "max_orders_per_min": int,
         },
         "lighter-rh": {
             "taker_fee_bps": float,
+            "fee_source": str,
             "max_position_usd": float,
             "max_orders_per_min": int,
         },
         "tradexyz": {
             "taker_fee_bps": float,
+            "fee_source": str,
             "max_position_usd": float,
             "max_orders_per_min": int,
         },
@@ -331,11 +340,12 @@ def build_venue_conf(name: str, role: str, symbol: str,
         raise ConfigError(
             "venues.arcus.taker_fee_bps must be explicitly configured; "
             "Arcus effective account fees are not universal")
-    arcus_fee_source = settings.get("fee_source", "configured")
-    if (name == "arcus"
-            and arcus_fee_source not in ("configured", "account_api")):
-        raise ConfigError("venues.arcus.fee_source must be configured or "
-                          "account_api")
+    fee_source = settings.get("fee_source", "configured")
+    allowed_fee_sources = (("configured", "account_api")
+                           if name == "arcus" else ("configured",))
+    if fee_source not in allowed_fee_sources:
+        allowed = " or ".join(allowed_fee_sources)
+        raise ConfigError(f"venues.{name}.fee_source must be {allowed}")
     fee_bps = settings.get("taker_fee_bps", spec["fee_bps"])
     if fee_bps is None:
         raise ConfigError(f"venues.{name}.taker_fee_bps must be configured")
@@ -349,6 +359,7 @@ def build_venue_conf(name: str, role: str, symbol: str,
         cap_usd=float(settings.get("max_position_usd", spec["cap_usd"])),
         orders_per_min=int(settings.get("max_orders_per_min",
                                     spec["orders_per_min"])),
+        fee_source=fee_source,
     )
     if spec["kind"] == "hl":
         if name == "tradexyz":
@@ -372,8 +383,7 @@ def build_venue_conf(name: str, role: str, symbol: str,
                 _env_s("ARCUS_API_KEY"),
                 _env_s("ARCUS_API_PRIVATE_KEY"),
                 _env_s("ARCUS_ACCOUNT_ADDRESS"),
-                _env_i("ARCUS_ACCOUNT_INDEX")),
-            arcus_fee_source=arcus_fee_source)
+                _env_i("ARCUS_ACCOUNT_INDEX")))
 
     return VenueConf(
         **common,

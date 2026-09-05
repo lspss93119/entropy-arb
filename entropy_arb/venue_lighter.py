@@ -155,7 +155,11 @@ class LighterVenue:
         self.equity = None
         self.free = None
         self.start_equity = None
-        self.fee_bps = conf.fee_bps
+        self.fee_source = conf.fee_source
+        self.effective_taker_fee_bps = conf.fee_bps
+        # Preserve the legacy runtime attribute for adapter consumers outside
+        # the engine; strategy math uses effective_taker_fee_bps.
+        self.fee_bps = self.effective_taker_fee_bps
         self.cap_usd = conf.cap_usd
         self.orders_per_min = conf.orders_per_min
         self.last_traded_ts = 0.0
@@ -237,6 +241,13 @@ class LighterVenue:
 
     def ready_to_trade(self) -> bool:
         return self.orders_feed is not None and self.orders_feed.ready.is_set()
+
+    async def resolve_effective_fee(self, *, live: bool) -> float:
+        """Resolve the configured static taker fee for this venue."""
+        if self.fee_source != "configured":
+            raise RuntimeError(f"[{self.name}] effective fee unavailable: "
+                               f"unsupported source {self.fee_source!r}")
+        return self.effective_taker_fee_bps
 
     async def warm_http(self) -> None:
         """Keep the order-path HTTPS connections warm (a cold TLS handshake

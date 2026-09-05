@@ -47,18 +47,22 @@ thresholds:
 venues:
   entropy:
     taker_fee_bps: 0.0       # taker fee / 吃单手续费
+    fee_source: configured
     max_position_usd: 1000   # position cap / 持仓上限（美元）
     max_orders_per_min: 120  # order-send budget, sliding 60s / 每分钟下单预算
   lighter-rh:
     taker_fee_bps: 0.0
+    fee_source: configured
     max_position_usd: 1000
     max_orders_per_min: 30   # Lighter's ceiling is ~40/min / Lighter 上限约 40/分钟
   lighter:
     taker_fee_bps: 0.0
+    fee_source: configured
     max_position_usd: 1000
     max_orders_per_min: 30
   tradexyz:
     taker_fee_bps: 1.0
+    fee_source: configured
     max_position_usd: 1000
     max_orders_per_min: 120
   arcus:

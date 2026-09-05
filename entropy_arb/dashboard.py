@@ -315,7 +315,13 @@ class Dashboard:
         inventory surcharge included)."""
         eng = self.eng
         ba, sb = buy.book.best_ask(), sell.book.best_bid()
-        hurdle = (hurdle_bps + buy.fee_bps + sell.fee_bps
+        buy_fee = getattr(buy, "effective_taker_fee_bps", None)
+        sell_fee = getattr(sell, "effective_taker_fee_bps", None)
+        if buy_fee is None or sell_fee is None:
+            t.add_row(label, Text("—", style="dim"), "—",
+                      Text("fee unavailable", style="yellow"), "")
+            return
+        hurdle = (hurdle_bps + buy_fee + sell_fee
                   + eng._inv_add_bps(buy, sell))
         if not (ba and sb):
             t.add_row(label, Text("—", style="dim"),

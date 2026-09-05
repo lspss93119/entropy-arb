@@ -173,6 +173,13 @@ class Engine:
             self.venue_b.init_signer()
             if self.venue_a.kind == "hl" and self.venue_b.kind == "hl":
                 self.venue_a.share_nonces_with(self.venue_b)
+            fee_tasks = [
+                v.resolve_effective_fee(live=True)
+                for v in self.venues.values()
+                if v.conf.fee_source == "account_api"
+            ]
+            if fee_tasks:
+                await asyncio.gather(*fee_tasks)
         if (self.venue_a.kind == "hl" and self.venue_b.kind == "hl"
                 and self.venue_a._query_address()
                 and self.venue_a._query_address() == self.venue_b._query_address()):
@@ -184,11 +191,15 @@ class Engine:
                              self._step)
         self._min_notional = max(cfg.min_order_notional,
                                  self.venue_a.min_quote, self.venue_b.min_quote)
+        a_fee = getattr(self.venue_a, "effective_taker_fee_bps", None)
+        b_fee = getattr(self.venue_b, "effective_taker_fee_bps", None)
         log.info("pair %s(%s)-%s(%s): midline=%+.2fbps band=[-%.2f, +%.2f] "
-                 "fees=%.2f+%.2f step=%g min_ntl=$%g",
+                 "fees=%s(%s)+%s(%s) step=%g min_ntl=$%g",
                  self.venue_a.name, self.venue_a.conf.symbol, self.venue_b.name,
                  self.venue_b.conf.symbol, cfg.midline_bps, cfg.lower_bps,
-                 cfg.upper_bps, self.venue_a.fee_bps, self.venue_b.fee_bps,
+                 cfg.upper_bps, a_fee,
+                 getattr(self.venue_a, "fee_source", "configured"), b_fee,
+                 getattr(self.venue_b, "fee_source", "configured"),
                  self._step, self._min_notional)
 
         if self.record_only:
@@ -286,7 +297,8 @@ class Engine:
         return plan_arb(
             buy.book, sell.book,
             threshold_bps=self._eff_threshold(buy, sell),
-            buy_fee_bps=buy.fee_bps, sell_fee_bps=sell.fee_bps,
+            buy_fee_bps=buy.effective_taker_fee_bps,
+            sell_fee_bps=sell.effective_taker_fee_bps,
             take_fraction=self.cfg.take_fraction,
             cap_notional=cap_notional,
             min_base=self._min_base,
@@ -577,7 +589,7 @@ class Engine:
                     v.position += -fill if is_sell else fill
                     if fill:
                         px = info.get("avg_px") or limit
-                        fee = v.fee_bps / 1e4
+                        fee = v.effective_taker_fee_bps / 1e4
                         v.cash += fill * px * (1 - fee) if is_sell \
                             else -fill * px * (1 + fee)
                         v.volume_usd += fill * px

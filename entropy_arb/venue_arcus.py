@@ -116,8 +116,12 @@ class ArcusVenue:
         self.equity = None
         self.free = None
         self.start_equity = None
-        self.fee_bps = conf.fee_bps
-        self.fee_source = conf.arcus_fee_source
+        self.fee_source = conf.fee_source
+        self.effective_taker_fee_bps = (
+            conf.fee_bps if self.fee_source == "configured" else None)
+        # Keep the legacy runtime attribute as a compatibility alias.  It is
+        # deliberately None until an account_api fee is resolved.
+        self.fee_bps = self.effective_taker_fee_bps
         self.cap_usd = conf.cap_usd
         self.orders_per_min = conf.orders_per_min
         self.last_traded_ts = 0.0
@@ -302,8 +306,37 @@ class ArcusVenue:
             name=f"book-{self.key}")]
 
     def ready_to_trade(self) -> bool:
-        """Expose market-data readiness; engine live execution stays blocked."""
-        return self.book.ready
+        """Expose book and effective-fee readiness for strategy scans."""
+        return (self.book.ready
+                and self.effective_taker_fee_bps is not None)
+
+    async def resolve_effective_fee(self, *, live: bool) -> Optional[float]:
+        """Resolve this venue's configured or authenticated taker fee.
+
+        Account fees are intentionally not fetched in record-only mode: public
+        recording must remain credential-less, while a live path must fail
+        closed if the authenticated fee cannot be resolved.
+        """
+        if self.fee_source == "configured":
+            self.effective_taker_fee_bps = self.conf.fee_bps
+            self.fee_bps = self.effective_taker_fee_bps
+            return self.effective_taker_fee_bps
+        if self.fee_source != "account_api":
+            raise RuntimeError(f"[{self.name}] effective fee unavailable: "
+                               f"unsupported source {self.fee_source!r}")
+        if not live:
+            return None
+        try:
+            fee = await self.fetch_fee_tier()
+            resolved = float(fee["taker_fee_bps"])
+        except Exception as exc:
+            self.effective_taker_fee_bps = None
+            self.fee_bps = None
+            raise RuntimeError(f"[{self.name}] effective fee unavailable: "
+                               f"{exc}") from exc
+        self.effective_taker_fee_bps = resolved
+        self.fee_bps = resolved
+        return resolved
 
     def init_signer(self) -> None:
         """Load the key only for an explicitly selected Arcus testnet path."""
@@ -885,13 +918,11 @@ class ArcusVenue:
         }
 
     async def refresh_fee(self) -> float:
-        """Use account fees only when the YAML explicitly opts in."""
-        if self.conf.arcus_fee_source != "account_api":
-            return self.fee_bps
-        fee = await self.fetch_fee_tier()
-        self.fee_bps = fee["taker_fee_bps"]
-        self.fee_source = "account_api"
-        return self.fee_bps
+        """Compatibility wrapper for the normalized fee resolver."""
+        resolved = await self.resolve_effective_fee(live=True)
+        if resolved is None:
+            raise RuntimeError(f"[{self.name}] effective fee unavailable")
+        return resolved
 
     async def fetch_rate_limit_usage(self) -> dict:
         payload = await self._get(
