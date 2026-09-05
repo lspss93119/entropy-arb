@@ -498,6 +498,12 @@ class ArcusVenue:
 
         status = str(payload.get("status", "")).upper()
         state = str(payload.get("state", "")).upper()
+        rejection_reason = str(payload.get("rejectionReason", "")).upper()
+        if rejection_reason in {"IOC_CANCELED", "FOK_FAILED"}:
+            if filled > 0:
+                return self._result("partially-filled",
+                                    filled_base=float(filled), avg_px=average)
+            return self._result("canceled")
         if status == "REJECTED" or state == "REJECTED":
             return self._result("rejected", err="Arcus order rejected")
         if status == "FILLED":

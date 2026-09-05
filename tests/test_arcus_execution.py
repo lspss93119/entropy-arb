@@ -262,6 +262,8 @@ def test_send_taker_distinguishes_rejected_zero_partial_and_full_outcomes(
               "rejectionReason": "UNDERCOLLATERALIZED"}, 200),
             ({"status": "FILLED", "orderId": "order-4",
               "filledSize": "0.01", "avgFillPrice": "1762.90"}, 200),
+            ({"status": "REJECTED", "orderId": "order-5",
+              "rejectionReason": "IOC_CANCELED", "filledSize": "0"}, 200),
         ]})
     partial = asyncio.run(venue.send_taker(
         is_buy=True, qty=Decimal("0.01"), limit_px=Decimal("1762.92")))
@@ -270,6 +272,8 @@ def test_send_taker_distinguishes_rejected_zero_partial_and_full_outcomes(
     rejected = asyncio.run(venue.send_taker(
         is_buy=True, qty=Decimal("0.01"), limit_px=Decimal("1762.92")))
     filled = asyncio.run(venue.send_taker(
+        is_buy=True, qty=Decimal("0.01"), limit_px=Decimal("1762.92")))
+    zero_rejected = asyncio.run(venue.send_taker(
         is_buy=True, qty=Decimal("0.01"), limit_px=Decimal("1762.92")))
     assert partial == {"status": "partially-filled", "filled_base": 0.004,
                        "avg_px": 1762.91, "err": None, "unresolved": False}
@@ -280,6 +284,9 @@ def test_send_taker_distinguishes_rejected_zero_partial_and_full_outcomes(
     assert rejected["filled_base"] == 0.0
     assert filled == {"status": "filled", "filled_base": 0.01,
                       "avg_px": 1762.90, "err": None, "unresolved": False}
+    assert zero_rejected == {"status": "canceled", "filled_base": 0.0,
+                             "avg_px": None, "err": None,
+                             "unresolved": False}
 
 
 def test_send_taker_reconciles_from_fills_when_order_status_is_unavailable(
