@@ -19,7 +19,7 @@ from entropy_arb.engine import Engine  # noqa: E402
 NO_ENV = os.path.join(tempfile.gettempdir(), "entropy-arb-no-such.env")
 
 
-def make_cfg():
+def make_cfg(venue_a="entropy", venue_b="lighter-rh"):
     f = tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False)
     f.write("""
 thresholds:
@@ -29,7 +29,7 @@ thresholds:
 """)
     f.close()
     return load_config(f.name, NO_ENV,
-                       symbol="SNDK", hedge_venue="lighter-rh")
+                       symbol="SNDK", venue_a=venue_a, venue_b=venue_b)
 
 
 class StubVenue:
@@ -86,7 +86,7 @@ def test_renders_key_numbers():
         "notional": 50.0, "prem_bps": 15.0, "exp": 0.07, "fill": 0.05,
         "status": "filled/filled", "ok": True})
     out = render(eng)
-    for needle in ("ENTROPY", "RH", "SELL entropy", "BUY entropy",
+    for needle in ("ENTROPY", "RH", "SELL A (ENTROPY)", "BUY A (ENTROPY)",
                    "100.14", "99.99", "mid premium", "midline",
                    "7 / 1", "sell_a_buy_b", "filled/filled",
                    "$+10.00", "LIVE", "s ago"):
@@ -107,7 +107,8 @@ def test_renders_in_chinese():
     out = render(eng, lang="zh")
     for needle in ("实盘", "运行中", "交易所", "买一 / 卖一", "持仓", "会话",
                    "盈亏 (MTM)", "净敞口", "中间价溢价", "中枢", "区间",
-                   "卖出 entropy → 买入 RH", "买入 entropy → 卖出 RH",
+                   "卖出 A (ENTROPY) → 买入 B (RH)",
+                   "买入 A (ENTROPY) → 卖出 B (RH)",
                    "门槛 bps", "暂无执行", "日志事件", "秒前"):
         assert needle in out, f"{needle!r} missing from zh render"
     # numbers unchanged by translation: sell hurdle midline+upper = +6
@@ -135,6 +136,21 @@ def test_renders_record_only_and_empty_books():
     out = render(eng)                      # books empty: everything is "—"
     assert "RECORD-ONLY" in out
     assert "render error" not in out
+
+
+def test_renders_non_entropy_pair_labels():
+    eng = Engine(make_cfg(venue_a="lighter-rh", venue_b="tradexyz"))
+    eng.venue_a = StubVenue("venue_a", "RH")
+    eng.venue_b = StubVenue("venue_b", "XYZ")
+    eng.venues = {"venue_a": eng.venue_a, "venue_b": eng.venue_b}
+    eng.markets_ready = True
+    eng.venue_a.set_book(100.14, 100.16)
+    eng.venue_b.set_book(99.99, 100.01)
+    out = render(eng)
+    assert "RH" in out and "XYZ" in out
+    assert "SELL A (RH)" in out
+    assert "BUY A (RH)" in out
+    assert "Entropy" not in out
 
 
 if __name__ == "__main__":

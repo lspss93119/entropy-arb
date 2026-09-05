@@ -10,7 +10,7 @@ import tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from entropy_arb.book import OrderBook, plan_arb  # noqa: E402
-from entropy_arb.config import load_config  # noqa: E402
+from entropy_arb.config import HLCreds, LighterCreds, load_config  # noqa: E402
 from entropy_arb.engine import Engine  # noqa: E402
 
 NO_ENV = os.path.join(tempfile.gettempdir(), "entropy-arb-no-such.env")
@@ -18,7 +18,8 @@ SELL_A_BUY_B = "sell_a_buy_b"
 BUY_A_SELL_B = "buy_a_sell_b"
 
 
-def make_cfg(midline=5.0, upper=4.0, lower=3.0, persist=0.0):
+def make_cfg(midline=5.0, upper=4.0, lower=3.0, persist=0.0,
+             venue_a="entropy", venue_b="lighter-rh", extra=""):
     f = tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False)
     f.write(f"""
 thresholds:
@@ -27,10 +28,11 @@ thresholds:
   lower_bps: {lower}
 execution:
   premium_persist_sec: {persist}
+{extra}
 """)
     f.close()
     return load_config(f.name, NO_ENV,
-                       symbol="SNDK", hedge_venue="lighter-rh")
+                       symbol="SNDK", venue_a=venue_a, venue_b=venue_b)
 
 
 class StubVenue:
@@ -54,8 +56,12 @@ class StubVenue:
 def make_engine(**thr):
     cfg = make_cfg(**thr)
     eng = Engine(cfg)
-    eng.venue_a = StubVenue("venue_a", "ENTROPY")
-    eng.venue_b = StubVenue("venue_b", "RH")
+    # Keep the original math fixture's $10k cap while sourcing fees from the
+    # selected venue configs.
+    eng.venue_a = StubVenue("venue_a", cfg.venue_a.label,
+                            cap=10000.0, fee=cfg.venue_a.fee_bps)
+    eng.venue_b = StubVenue("venue_b", cfg.venue_b.label,
+                            cap=10000.0, fee=cfg.venue_b.fee_bps)
     eng.venues = {"venue_a": eng.venue_a, "venue_b": eng.venue_b}
     eng._step, eng._min_base, eng._min_notional = 1e-4, 1e-4, 10.0
     return eng
@@ -75,9 +81,9 @@ def test_engine_initializes_generic_pair_roles():
 def test_eff_threshold_directions():
     eng = make_engine(midline=5.0, upper=4.0, lower=3.0)
     a, b = eng.venue_a, eng.venue_b
-    # sell entropy: hurdle = midline + upper = 9
+    # sell venue A: hurdle = midline + upper = 9
     approx(eng._eff_threshold(buy=b, sell=a), 9.0)
-    # buy entropy: hurdle = lower - midline = -2 (unwind side of a positive
+    # buy venue A: hurdle = lower - midline = -2 (unwind side of a positive
     # midline is deliberately cheap — that's what completes the round trip)
     approx(eng._eff_threshold(buy=a, sell=b), -2.0)
     # round trip nets upper + lower regardless of midline sign
@@ -108,6 +114,17 @@ def test_premium_uses_venue_a_as_numerator():
     eng.venue_a.set_book(100.04, 100.06)
     eng.venue_b.set_book(99.99, 100.01)
     approx(eng.premium_bps(), 5.0, tol=1e-6)
+
+
+def test_non_entropy_pair_uses_the_same_role_math():
+    eng = make_engine(venue_a="lighter-rh", venue_b="tradexyz")
+    eng.venue_a.set_book(100.14, 100.16)
+    eng.venue_b.set_book(99.99, 100.01)
+    approx(eng.premium_bps(), 15.0, tol=1e-6)
+    best = run_scan(eng)
+    assert best is not None
+    buy, sell, _ = best
+    assert buy is eng.venue_b and sell is eng.venue_a
 
 
 def test_plan_keeps_original_executable_a_b_orientation():
@@ -197,6 +214,83 @@ def test_scan_respects_position_caps():
     eng.venue_b.position = 100.0
     eng.venue_b.cap_usd = 10000.0
     assert run_scan(eng) is None
+
+
+class LifecycleVenue:
+    def __init__(self, key, name, kind, conf):
+        self.key, self.name, self.kind, self.conf = key, name, kind, conf
+        self.signer_calls = 0
+        self.shared_with = []
+        self.query_address_calls = 0
+        self.position = self.cash = self.volume_usd = 0.0
+        self.last_traded_ts = __import__("time").time()
+        self.size_decimals, self.min_base, self.min_quote = 4, 1e-4, 10.0
+        self.cap_usd, self.fee_bps = 1000.0, 0.0
+        self.orders_per_min = 30
+        self.equity = self.free = self.start_equity = None
+        self.include_core_equity = True
+        self.book = OrderBook()
+
+    async def load_market(self):
+        return None
+
+    def init_signer(self):
+        self.signer_calls += 1
+
+    def share_nonces_with(self, other):
+        self.shared_with.append(other)
+
+    def _query_address(self):
+        self.query_address_calls += 1
+        return f"address-{self.key}"
+
+    def start_tasks(self, stop, on_update, live):
+        return []
+
+    async def close(self):
+        return None
+
+
+class LighterLifecycleVenue(LifecycleVenue):
+    def __getattribute__(self, name):
+        if name in {"share_nonces_with", "_query_address"}:
+            raise AttributeError(name)
+        return super().__getattribute__(name)
+
+
+def test_only_hl_pair_uses_shared_hyperliquid_lifecycle(monkeypatch):
+    cfg = make_cfg(venue_a="entropy", venue_b="tradexyz")
+    cfg.venue_a.hl_creds = HLCreds("test-key", None)
+    cfg.venue_b.hl_creds = HLCreds("test-key", None)
+    cfg.recorder_enabled = False
+    a = LifecycleVenue("venue_a", "ENTROPY", "hl", cfg.venue_a)
+    b = LifecycleVenue("venue_b", "XYZ", "hl", cfg.venue_b)
+    eng = Engine(cfg)
+    monkeypatch.setattr(eng, "_make_venue",
+                        lambda vc: a if vc.venue_name == "entropy" else b)
+    eng.stop.set()
+    asyncio.run(eng._run_inner())
+    assert a.signer_calls == b.signer_calls == 1
+    assert b in a.shared_with
+    assert a.query_address_calls > 0 and b.query_address_calls > 0
+
+
+def test_lighter_plus_hl_does_not_call_hl_only_methods(monkeypatch):
+    cfg = make_cfg(venue_a="lighter-rh", venue_b="tradexyz")
+    cfg.venue_a.lighter_creds = LighterCreds(1, 1, "test-key")
+    cfg.venue_b.hl_creds = HLCreds("test-key", None)
+    cfg.recorder_enabled = False
+    # The real Lighter adapter has no Hyperliquid-only methods. Deliberately
+    # omit them from this fake so an accidental call fails immediately.
+    a = LighterLifecycleVenue("venue_a", "RH", "lighter", cfg.venue_a)
+    b = LifecycleVenue("venue_b", "XYZ", "hl", cfg.venue_b)
+    eng = Engine(cfg)
+    monkeypatch.setattr(eng, "_make_venue",
+                        lambda vc: a if vc.venue_name == "lighter-rh" else b)
+    eng.stop.set()
+    asyncio.run(eng._run_inner())
+    assert b.shared_with == []
+    assert a.signer_calls == b.signer_calls == 1
 
 
 if __name__ == "__main__":
