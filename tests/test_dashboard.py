@@ -57,9 +57,9 @@ def render(eng, lang="en") -> str:
 
 def make_engine():
     eng = Engine(make_cfg())
-    eng.entropy = StubVenue("entropy", "ENTROPY")
-    eng.hedge = StubVenue("hedge", "RH")
-    eng.venues = {"entropy": eng.entropy, "hedge": eng.hedge}
+    eng.venue_a = StubVenue("venue_a", "ENTROPY")
+    eng.venue_b = StubVenue("venue_b", "RH")
+    eng.venues = {"venue_a": eng.venue_a, "venue_b": eng.venue_b}
     eng.markets_ready = True
     return eng
 
@@ -72,23 +72,23 @@ def test_renders_before_markets_resolve():
 
 def test_renders_key_numbers():
     eng = make_engine()
-    eng.entropy.set_book(100.14, 100.16)   # ~+15 bps rich vs hedge
-    eng.hedge.set_book(99.99, 100.01)
+    eng.venue_a.set_book(100.14, 100.16)   # ~+15 bps rich vs venue B
+    eng.venue_b.set_book(99.99, 100.01)
     # regression: a set last_trade_ts renders the "{s}s ago" cell — this
     # once collided with _t()'s own parameter name and crashed every frame
     eng.last_trade_ts = time.time() - 42
-    eng.entropy.position, eng.hedge.position = 0.5, -0.5
-    eng.entropy.equity, eng.entropy.start_equity = 1000.0, 990.0
-    eng.hedge.equity, eng.hedge.start_equity = 500.0, 500.0
+    eng.venue_a.position, eng.venue_b.position = 0.5, -0.5
+    eng.venue_a.equity, eng.venue_a.start_equity = 1000.0, 990.0
+    eng.venue_b.equity, eng.venue_b.start_equity = 500.0, 500.0
     eng.trades, eng.hedges = 7, 1
     eng.recent_trades.append({
-        "ts": time.time(), "direction": "sell_entropy", "qty": 0.5,
+        "ts": time.time(), "direction": "sell_a_buy_b", "qty": 0.5,
         "notional": 50.0, "prem_bps": 15.0, "exp": 0.07, "fill": 0.05,
         "status": "filled/filled", "ok": True})
     out = render(eng)
     for needle in ("ENTROPY", "RH", "SELL entropy", "BUY entropy",
                    "100.14", "99.99", "mid premium", "midline",
-                   "7 / 1", "sell_entropy", "filled/filled",
+                   "7 / 1", "sell_a_buy_b", "filled/filled",
                    "$+10.00", "LIVE", "s ago"):
         assert needle in out, f"{needle!r} missing from render"
     assert "render error" not in out
@@ -100,8 +100,8 @@ def test_renders_key_numbers():
 
 def test_renders_in_chinese():
     eng = make_engine()
-    eng.entropy.set_book(100.14, 100.16)
-    eng.hedge.set_book(99.99, 100.01)
+    eng.venue_a.set_book(100.14, 100.16)
+    eng.venue_b.set_book(99.99, 100.01)
     eng.trades, eng.hedges = 7, 1
     eng.last_trade_ts = time.time() - 42
     out = render(eng, lang="zh")
@@ -128,9 +128,9 @@ def test_zh_stop_summary():
 
 def test_renders_record_only_and_empty_books():
     eng = Engine(make_cfg(), record_only=True)
-    eng.entropy = StubVenue("entropy", "ENTROPY")
-    eng.hedge = StubVenue("hedge", "MAIN")
-    eng.venues = {"entropy": eng.entropy, "hedge": eng.hedge}
+    eng.venue_a = StubVenue("venue_a", "ENTROPY")
+    eng.venue_b = StubVenue("venue_b", "MAIN")
+    eng.venues = {"venue_a": eng.venue_a, "venue_b": eng.venue_b}
     eng.markets_ready = True
     out = render(eng)                      # books empty: everything is "—"
     assert "RECORD-ONLY" in out
