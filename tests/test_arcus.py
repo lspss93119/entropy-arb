@@ -333,6 +333,8 @@ class LifecycleVenue:
         self.book = OrderBook()
         self.position = self.cash = self.volume_usd = 0.0
         self.equity = self.free = self.start_equity = None
+        self.fee_source = conf.fee_source
+        self.effective_taker_fee_bps = conf.fee_bps
         self.fee_bps = conf.fee_bps
         self.cap_usd = conf.cap_usd
         self.orders_per_min = conf.orders_per_min

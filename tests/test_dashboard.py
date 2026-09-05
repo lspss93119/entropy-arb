@@ -35,7 +35,10 @@ thresholds:
 class StubVenue:
     def __init__(self, key, label):
         self.key, self.name = key, label
-        self.cap_usd, self.fee_bps = 1000.0, 0.0
+        self.cap_usd = 1000.0
+        self.fee_source = "configured"
+        self.effective_taker_fee_bps = 0.0
+        self.fee_bps = 0.0
         self.size_decimals, self.min_base, self.min_quote = 4, 1e-4, 10.0
         self.position, self.cash, self.volume_usd = 0.0, 0.0, 0.0
         self.equity = self.free = self.start_equity = None

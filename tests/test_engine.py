@@ -38,7 +38,10 @@ execution:
 class StubVenue:
     def __init__(self, key, label, cap=10000.0, fee=0.0):
         self.key, self.name = key, label
-        self.cap_usd, self.fee_bps = cap, fee
+        self.cap_usd = cap
+        self.fee_source = "configured"
+        self.effective_taker_fee_bps = fee
+        self.fee_bps = fee
         self.size_decimals, self.min_base, self.min_quote = 4, 1e-4, 10.0
         self.position, self.cash = 0.0, 0.0
         self.orders_per_min = 30
@@ -149,6 +152,31 @@ def test_plan_keeps_original_executable_a_b_orientation():
         approx(getattr(actual, field), getattr(expected, field), tol=1e-9)
 
 
+def test_plan_uses_effective_taker_fee_not_stale_configured_fee():
+    eng = make_engine(midline=0.0, upper=4.0, lower=4.0)
+    a, b = eng.venue_a, eng.venue_b
+    a.fee_bps, a.effective_taker_fee_bps = 2.25, 4.5
+    b.fee_bps, b.effective_taker_fee_bps = 0.0, 0.0
+    a.set_book(100.19, 100.20)
+    b.set_book(100.00, 100.01)
+
+    expected, reason = plan_arb(
+        b.book, a.book,
+        threshold_bps=eng._eff_threshold(b, a),
+        buy_fee_bps=b.effective_taker_fee_bps,
+        sell_fee_bps=a.effective_taker_fee_bps,
+        take_fraction=eng.cfg.take_fraction,
+        cap_notional=eng.cfg.max_order_notional,
+        min_base=eng._min_base, min_notional=eng._min_notional,
+        size_step=eng._step)
+    actual, actual_reason = eng._plan(b, a, eng.cfg.max_order_notional)
+    assert reason == actual_reason == "ok"
+    assert actual is not None and expected is not None
+    approx(actual.sell_fee, 4.5 / 1e4)
+    approx(actual.sell_fee, expected.sell_fee)
+    approx(actual.exp_edge_usd, expected.exp_edge_usd)
+
+
 def run_scan(eng):
     async def go():
         # first pass arms the direction, second passes the persistence gate
@@ -226,7 +254,10 @@ class LifecycleVenue:
         self.position = self.cash = self.volume_usd = 0.0
         self.last_traded_ts = __import__("time").time()
         self.size_decimals, self.min_base, self.min_quote = 4, 1e-4, 10.0
-        self.cap_usd, self.fee_bps = 1000.0, 0.0
+        self.cap_usd = 1000.0
+        self.fee_source = conf.fee_source
+        self.effective_taker_fee_bps = 0.0
+        self.fee_bps = 0.0
         self.orders_per_min = 30
         self.equity = self.free = self.start_equity = None
         self.include_core_equity = True
