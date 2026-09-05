@@ -1,0 +1,29 @@
+{
+  "accountIndex": 2,
+  "address": "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
+  "netQuoteBalance": "1234.56",
+  "equity": "1240.00",
+  "freeCollateral": "1000.00",
+  "netDeposits": "1500.00",
+  "pendingDeposits": "0",
+  "pendingWithdrawals": "0",
+  "positions": {
+    "33": {
+      "address": "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
+      "accountIndex": 2,
+      "marketId": 33,
+      "marketDisplayName": "SNDK-USD",
+      "side": "SHORT",
+      "size": "-0.25",
+      "averageEntryPrice": "1763.00",
+      "leverage": "5",
+      "marginMode": "CROSS",
+      "borrowedCapital": "440.75",
+      "marginUsed": "88.15",
+      "positionValueNotional": "-440.75",
+      "unrealizedPnl": "-1.25",
+      "markPx": "1763.00"
+    }
+  },
+  "sequenceNumber": 123
+}

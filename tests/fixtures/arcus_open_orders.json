@@ -1,0 +1,20 @@
+{
+  "orders": [
+    {
+      "orderId": "order-sanitized-1",
+      "clientId": "client-sanitized-1",
+      "marketId": 33,
+      "marketDisplayName": "SNDK-USD",
+      "side": "BUY",
+      "type": "LIMIT",
+      "status": "OPEN",
+      "price": "1762.50",
+      "originalSize": "0.010",
+      "filledSize": "0",
+      "remainingSize": "0.010",
+      "timeInForce": "GTT",
+      "goodTilTime": "1788608661000000",
+      "updatedAt": "1788608660000000"
+    }
+  ]
+}

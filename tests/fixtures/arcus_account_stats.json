@@ -1,0 +1,8 @@
+{
+  "address": "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
+  "tradingFeeTier": {
+    "level": 0,
+    "makerFeePpm": 150,
+    "takerFeePpm": 450
+  }
+}

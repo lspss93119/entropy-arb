@@ -1,0 +1,20 @@
+{
+  "fills": [
+    {
+      "tradeId": "trade-sanitized-1",
+      "orderId": "order-sanitized-2",
+      "address": "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
+      "accountIndex": 2,
+      "marketId": 33,
+      "marketDisplayName": "SNDK-USD",
+      "clientId": "client-sanitized-2",
+      "side": "SELL",
+      "originalSize": "0.010",
+      "size": "0.010",
+      "price": "1763.10",
+      "fee": "0.0793",
+      "role": "TAKER",
+      "createdAt": "1788608660000000"
+    }
+  ]
+}
