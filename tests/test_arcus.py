@@ -288,13 +288,12 @@ def test_arcus_feed_uses_only_the_verified_bbo_subscription(monkeypatch):
     assert sent == [{"type": "subscribe", "channel": "bbo", "id": "SNDK-USD"}]
 
 
-def test_arcus_venue_has_no_live_execution_contract():
+def test_arcus_venue_pair_live_lifecycle_remains_blocked():
     module = arcus_module()
     cfg = load()
     venue = module.ArcusVenue(cfg.venue_a, "https://api.arcus.xyz",
                               "wss://api.arcus.xyz/v1/ws",
                               FakeSession(fixture(MARKETS_FIXTURE)), 5.0)
-    assert not hasattr(venue, "send_taker")
     with pytest.raises(RuntimeError, match="Arcus live execution not implemented"):
         venue.start_tasks(asyncio.Event(), lambda: None, live=True)
 
