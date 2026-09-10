@@ -186,7 +186,7 @@ class Dashboard:
             return Group(Panel(Text(self._t("starting — resolving markets…"),
                                     style="yellow"), title="entropy-arb",
                                box=box.ROUNDED), self._events_panel())
-        if self.console.width >= 100:
+        if self.console.width >= 140:
             mid = Table.grid(expand=True)
             mid.add_column(ratio=5)
             mid.add_column(ratio=3)

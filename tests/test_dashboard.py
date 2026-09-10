@@ -50,9 +50,12 @@ class StubVenue:
 
 def render(eng, lang="en") -> str:
     dash = Dashboard(eng, BufferLogHandler(), "logs/engine.log", lang=lang)
-    console = Console(record=True, width=120, force_terminal=True)
-    console.print(dash._safe_render())
-    return console.export_text()
+    # Rich ignores an explicit width when force_terminal=True and uses the
+    # actual terminal width instead. Inject a deterministic console so the
+    # dashboard layout is not dependent on the test runner's TTY size.
+    dash.console = Console(record=True, width=120, force_terminal=False)
+    dash.console.print(dash._safe_render())
+    return dash.console.export_text()
 
 
 def make_engine():
