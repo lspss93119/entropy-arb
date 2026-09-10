@@ -102,6 +102,78 @@ def test_nonpositive_band():
                  "must be > 0")
 
 
+def test_lighter_credentials_are_selected_by_deployment(monkeypatch):
+    for name in (
+        "LIGHTER_MAINNET_ACCOUNT_INDEX",
+        "LIGHTER_MAINNET_API_KEY_INDEX",
+        "LIGHTER_MAINNET_API_PRIVATE_KEY",
+        "LIGHTER_RH_ACCOUNT_INDEX",
+        "LIGHTER_RH_API_KEY_INDEX",
+        "LIGHTER_RH_API_PRIVATE_KEY",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    monkeypatch.setenv("LIGHTER_MAINNET_ACCOUNT_INDEX", "101")
+    monkeypatch.setenv("LIGHTER_MAINNET_API_KEY_INDEX", "7")
+    monkeypatch.setenv("LIGHTER_MAINNET_API_PRIVATE_KEY", "mainnet-test-key")
+    monkeypatch.setenv("LIGHTER_RH_ACCOUNT_INDEX", "202")
+    monkeypatch.setenv("LIGHTER_RH_API_KEY_INDEX", "8")
+    monkeypatch.setenv("LIGHTER_RH_API_PRIVATE_KEY", "rh-test-key")
+
+    mainnet = load(MINIMAL, hedge="lighter")
+    robinhood = load(MINIMAL, hedge="lighter-rh")
+
+    main_creds = mainnet.hedge.lighter_creds
+    rh_creds = robinhood.hedge.lighter_creds
+    assert (main_creds.account_index, main_creds.api_key_index,
+            main_creds.api_private_key) == (101, 7, "mainnet-test-key")
+    assert (rh_creds.account_index, rh_creds.api_key_index,
+            rh_creds.api_private_key) == (202, 8, "rh-test-key")
+
+
+def test_lighter_credentials_never_fall_back_across_deployments(monkeypatch):
+    for name in (
+        "LIGHTER_MAINNET_ACCOUNT_INDEX",
+        "LIGHTER_MAINNET_API_KEY_INDEX",
+        "LIGHTER_MAINNET_API_PRIVATE_KEY",
+        "LIGHTER_RH_ACCOUNT_INDEX",
+        "LIGHTER_RH_API_KEY_INDEX",
+        "LIGHTER_RH_API_PRIVATE_KEY",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    monkeypatch.setenv("LIGHTER_MAINNET_ACCOUNT_INDEX", "101")
+    monkeypatch.setenv("LIGHTER_MAINNET_API_KEY_INDEX", "7")
+    monkeypatch.setenv("LIGHTER_MAINNET_API_PRIVATE_KEY", "mainnet-test-key")
+
+    robinhood = load(MINIMAL, hedge="lighter-rh")
+    creds = robinhood.hedge.lighter_creds
+    assert creds.account_index is None
+    assert creds.api_key_index is None
+    assert creds.api_private_key is None
+    assert not creds.complete
+
+
+def test_one_selected_lighter_namespace_does_not_require_the_other(monkeypatch):
+    for name in (
+        "LIGHTER_MAINNET_ACCOUNT_INDEX",
+        "LIGHTER_MAINNET_API_KEY_INDEX",
+        "LIGHTER_MAINNET_API_PRIVATE_KEY",
+        "LIGHTER_RH_ACCOUNT_INDEX",
+        "LIGHTER_RH_API_KEY_INDEX",
+        "LIGHTER_RH_API_PRIVATE_KEY",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    monkeypatch.setenv("LIGHTER_RH_ACCOUNT_INDEX", "202")
+    monkeypatch.setenv("LIGHTER_RH_API_KEY_INDEX", "8")
+    monkeypatch.setenv("LIGHTER_RH_API_PRIVATE_KEY", "rh-test-key")
+
+    cfg = load(MINIMAL, hedge="lighter-rh")
+    assert cfg.hedge.lighter_creds.complete
+    assert cfg.hedge.lighter_creds.account_index == 202
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):

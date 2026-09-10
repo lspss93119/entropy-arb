@@ -54,6 +54,11 @@ LIGHTER_PROFILES: Dict[str, LighterProfile] = {
         "wss://api.rh.lighter.xyz/stream", 466324),
 }
 
+LIGHTER_CRED_PREFIXES = {
+    "lighter": "LIGHTER_MAINNET",
+    "lighter-rh": "LIGHTER_RH",
+}
+
 
 @dataclass
 class LighterCreds:
@@ -250,6 +255,15 @@ def _env_i(name: str) -> Optional[int]:
     return int(v) if v not in (None, "") else None
 
 
+def _lighter_creds_for(hedge_venue: str) -> LighterCreds:
+    prefix = LIGHTER_CRED_PREFIXES[hedge_venue]
+    return LighterCreds(
+        _env_i(f"{prefix}_ACCOUNT_INDEX"),
+        _env_i(f"{prefix}_API_KEY_INDEX"),
+        _env_s(f"{prefix}_API_PRIVATE_KEY"),
+    )
+
+
 # -------------------------------------------------------------------- loading
 
 def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
@@ -329,9 +343,7 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
             cap_usd=float(_get(raw, "hedge", "max_position_usd", 1000.0)),
             orders_per_min=int(_get(raw, "hedge", "max_orders_per_min", 30)),
             lighter_profile=LIGHTER_PROFILES[hedge_venue],
-            lighter_creds=LighterCreds(_env_i("LIGHTER_ACCOUNT_INDEX"),
-                                       _env_i("LIGHTER_API_KEY_INDEX"),
-                                       _env_s("LIGHTER_API_PRIVATE_KEY")),
+            lighter_creds=_lighter_creds_for(hedge_venue),
         )
 
     return Config(
