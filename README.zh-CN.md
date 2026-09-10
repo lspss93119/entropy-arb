@@ -163,10 +163,14 @@ python3 main.py --symbol SNDK --hedge lighter-rh
   `--hedge tradexyz` 时两条腿默认共用该账户（内部自动共享 nonce 序列）；
   如需分开，设置 `HL_PRIVATE_KEY_XYZ` / `HL_ACCOUNT_ADDRESS_XYZ`。注意给
   所交易的各 dex 分别充入保证金。
-- **Lighter** —— `LIGHTER_ACCOUNT_INDEX`、`LIGHTER_API_KEY_INDEX`、
-  `LIGHTER_API_PRIVATE_KEY`，必须注册在与启动参数 `--hedge` **相同的部署**上
-  （主网与 Robinhood 链是两套独立的账户和密钥——参见
-  [lighter-python](https://github.com/elliottech/lighter-python)）。
+- **Lighter** —— 密钥按部署分开命名：
+  - `--hedge lighter` 读取 `LIGHTER_MAINNET_ACCOUNT_INDEX`、
+    `LIGHTER_MAINNET_API_KEY_INDEX`、`LIGHTER_MAINNET_API_PRIVATE_KEY`。
+  - `--hedge lighter-rh` 读取 `LIGHTER_RH_ACCOUNT_INDEX`、
+    `LIGHTER_RH_API_KEY_INDEX`、`LIGHTER_RH_API_PRIVATE_KEY`。
+  两组可以同时填写在同一个 `.env` 中，但账户 index、API key index 和私钥必须
+  属于对应部署，不可混用。参见
+  [lighter-python](https://github.com/elliottech/lighter-python)。
 
 ## 执行机制
 

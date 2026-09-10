@@ -176,10 +176,14 @@ errors), credentials in `.env`, and the markets on the command line
   both legs share this account by default (one nonce sequence is handled
   internally); set `HL_PRIVATE_KEY_XYZ` / `HL_ACCOUNT_ADDRESS_XYZ`
   to split them. Fund the dex-specific clearinghouses you trade.
-- **Lighter** — `LIGHTER_ACCOUNT_INDEX`, `LIGHTER_API_KEY_INDEX`,
-  `LIGHTER_API_PRIVATE_KEY`, registered on the **same deployment** as your
-  `--hedge` flag (mainnet and the Robinhood chain are separate accounts and
-  keys — see [lighter-python](https://github.com/elliottech/lighter-python)).
+- **Lighter** — credentials are namespaced by deployment:
+  - `--hedge lighter` reads `LIGHTER_MAINNET_ACCOUNT_INDEX`,
+    `LIGHTER_MAINNET_API_KEY_INDEX`, and `LIGHTER_MAINNET_API_PRIVATE_KEY`.
+  - `--hedge lighter-rh` reads `LIGHTER_RH_ACCOUNT_INDEX`,
+    `LIGHTER_RH_API_KEY_INDEX`, and `LIGHTER_RH_API_PRIVATE_KEY`.
+  Both blocks may be filled in the same `.env`, but each account index, API-key
+  index, and private key must belong to the matching deployment. See
+  [lighter-python](https://github.com/elliottech/lighter-python).
 
 ## How execution works
 
