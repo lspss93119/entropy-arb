@@ -29,10 +29,12 @@
 # full round trip nets >= upper + lower bps after fees by construction.
 #
 # midline_bps is a number YOU derive from recorded data. Run the bot
-# (--record-only) to collect logs/minutes.csv, then:  python3 tools/analyze.py
+# (--record-only) to collect logs/record/minutes-SYMBOL-HEDGE.csv, then:
+#   python3 tools/analyze.py --csv logs/record/minutes-SYMBOL-HEDGE.csv
 #
 # midline_bps 是你根据采集数据设定的值。先运行机器人（--record-only）采集
-# logs/minutes.csv，再运行 python3 tools/analyze.py 获取建议值。
+# logs/record/minutes-SYMBOL-HEDGE.csv，再运行
+# python3 tools/analyze.py --csv logs/record/minutes-SYMBOL-HEDGE.csv 获取建议值。
 # 两个方向的门槛都已扣除手续费（引擎会在此之上另加手续费），因此一次完整往返
 # 扣费后净赚 >= upper + lower bps。
 thresholds:
@@ -90,7 +92,8 @@ execution:
 # 供 tools/analyze.py 分析并设定上方 thresholds。
 recorder:
   enabled: true
-  csv: logs/minutes.csv
+  # Runtime appends -SYMBOL-HEDGE before the extension.
+  csv: logs/record/minutes.csv
 
 # ==================== LOGGING & DASHBOARD / 日志与仪表盘 ====================
 # On a terminal the bot shows a live Rich dashboard (books, signal, positions,
@@ -103,6 +106,10 @@ recorder:
 logging:
   level: INFO
   status_interval_sec: 30.0
-  trades_csv: logs/trades.csv
+  # Every process start also appends effective strategy parameters to
+  # logs/engine/runs-SYMBOL-HEDGE.csv; trades carry the matching run_id.
+  # Runtime appends -SYMBOL-HEDGE before the extension.
+  trades_csv: logs/trades/trades.csv
   dashboard: true
-  file: logs/engine.log
+  # Runtime appends -SYMBOL-HEDGE before the extension.
+  file: logs/engine/engine.log

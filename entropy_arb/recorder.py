@@ -37,8 +37,9 @@ from .book import OrderBook
 
 log = logging.getLogger("recorder")
 
-HEADER = ["minute_ts", "time_utc",
-          "entropy_bid", "entropy_ask", "hedge_bid", "hedge_ask",
+HEADER = ["symbol", "hedge", "minute_ts", "time_utc",
+          "entropy_bid", "entropy_ask", "entropy_bid_qty", "entropy_ask_qty",
+          "hedge_bid", "hedge_ask", "hedge_bid_qty", "hedge_ask_qty",
           "premium_open_bps", "premium_high_bps", "premium_low_bps",
           "premium_close_bps", "premium_mean_bps", "premium_std_bps",
           "sell_edge_mean_bps", "sell_edge_max_bps",
@@ -48,7 +49,8 @@ HEADER = ["minute_ts", "time_utc",
 class _MinuteAgg:
     __slots__ = ("minute", "n", "p_open", "p_high", "p_low", "p_close",
                  "p_sum", "p_sumsq", "s_sum", "s_max", "b_sum", "b_max",
-                 "e_bid", "e_ask", "h_bid", "h_ask")
+                 "e_bid", "e_ask", "e_bid_qty", "e_ask_qty",
+                 "h_bid", "h_ask", "h_bid_qty", "h_ask_qty")
 
     def __init__(self, minute: int) -> None:
         self.minute = minute
@@ -60,8 +62,12 @@ class _MinuteAgg:
         self.b_sum = 0.0
         self.b_max = -math.inf
         self.e_bid = self.e_ask = self.h_bid = self.h_ask = 0.0
+        self.e_bid_qty = self.e_ask_qty = 0.0
+        self.h_bid_qty = self.h_ask_qty = 0.0
 
-    def add(self, e_bid: float, e_ask: float, h_bid: float, h_ask: float) -> None:
+    def add(self, e_bid: float, e_ask: float, e_bid_qty: float,
+            e_ask_qty: float, h_bid: float, h_ask: float,
+            h_bid_qty: float, h_ask_qty: float) -> None:
         e_mid = (e_bid + e_ask) / 2.0
         h_mid = (h_bid + h_ask) / 2.0
         prem = (e_mid / h_mid - 1.0) * 1e4
@@ -79,17 +85,22 @@ class _MinuteAgg:
         self.s_max = max(self.s_max, sell_edge)
         self.b_sum += buy_edge
         self.b_max = max(self.b_max, buy_edge)
-        self.e_bid, self.e_ask, self.h_bid, self.h_ask = e_bid, e_ask, h_bid, h_ask
+        self.e_bid, self.e_ask = e_bid, e_ask
+        self.e_bid_qty, self.e_ask_qty = e_bid_qty, e_ask_qty
+        self.h_bid, self.h_ask = h_bid, h_ask
+        self.h_bid_qty, self.h_ask_qty = h_bid_qty, h_ask_qty
 
-    def row(self) -> list:
+    def row(self, symbol: str, hedge: str) -> list:
         mean = self.p_sum / self.n
         var = max(self.p_sumsq / self.n - mean * mean, 0.0)
         ts = self.minute * 60
-        return [ts,
+        return [symbol, hedge, ts,
                 datetime.fromtimestamp(ts, tz=timezone.utc)
                 .strftime("%Y-%m-%dT%H:%M:%SZ"),
                 f"{self.e_bid:.10g}", f"{self.e_ask:.10g}",
+                f"{self.e_bid_qty:.10g}", f"{self.e_ask_qty:.10g}",
                 f"{self.h_bid:.10g}", f"{self.h_ask:.10g}",
+                f"{self.h_bid_qty:.10g}", f"{self.h_ask_qty:.10g}",
                 f"{self.p_open:.3f}", f"{self.p_high:.3f}",
                 f"{self.p_low:.3f}", f"{self.p_close:.3f}",
                 f"{mean:.3f}", f"{math.sqrt(var):.3f}",
@@ -100,12 +111,15 @@ class _MinuteAgg:
 
 class MinuteRecorder:
     def __init__(self, path: str, entropy_book: OrderBook, hedge_book: OrderBook,
-                 staleness_sec: float, interval_sec: float = 1.0) -> None:
+                 staleness_sec: float, interval_sec: float = 1.0,
+                 symbol: str = "", hedge: str = "") -> None:
         self.path = path
         self.entropy_book = entropy_book
         self.hedge_book = hedge_book
         self.staleness_sec = staleness_sec
         self.interval_sec = interval_sec
+        self.symbol = symbol
+        self.hedge = hedge
         self.rows_written = 0
         self._agg: Optional[_MinuteAgg] = None
         self._fh = None
@@ -136,7 +150,7 @@ class MinuteRecorder:
             return
         if self._writer is None:
             self._open()
-        self._writer.writerow(self._agg.row())
+        self._writer.writerow(self._agg.row(self.symbol, self.hedge))
         self._fh.flush()
         self.rows_written += 1
         self._agg = None
@@ -154,9 +168,14 @@ class MinuteRecorder:
         h_bid, h_ask = self.hedge_book.best_bid(), self.hedge_book.best_ask()
         if None in (e_bid, e_ask, h_bid, h_ask):
             return
+        e_bid_qty, e_ask_qty = (self.entropy_book.bids[e_bid],
+                                self.entropy_book.asks[e_ask])
+        h_bid_qty, h_ask_qty = (self.hedge_book.bids[h_bid],
+                                self.hedge_book.asks[h_ask])
         if self._agg is None:
             self._agg = _MinuteAgg(minute)
-        self._agg.add(e_bid, e_ask, h_bid, h_ask)
+        self._agg.add(e_bid, e_ask, e_bid_qty, e_ask_qty,
+                      h_bid, h_ask, h_bid_qty, h_ask_qty)
 
     def close(self) -> None:
         """Flush the partial minute and close the file (call on shutdown)."""

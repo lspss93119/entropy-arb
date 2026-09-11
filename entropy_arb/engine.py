@@ -32,12 +32,49 @@ from .venue_lighter import LighterVenue
 
 log = logging.getLogger("engine")
 
-CSV_HEADER = ["ts", "direction", "buy_venue", "sell_venue", "qty",
-              "buy_limit", "sell_limit", "buy_notional", "sell_notional",
-              "exp_edge_usd", "gross_edge_usd", "marginal_premium_bps",
-              "midline_bps", "inv_add_bps", "ok", "buy_fill", "sell_fill",
-              "buy_status", "sell_status", "fill_edge_usd"]
+CSV_HEADER = [
+    "ts", "signal_ts", "run_id", "event_id", "symbol", "hedge",
+    "execution_ms", "leg_settle_gap_ms",
+    "direction", "buy_venue", "sell_venue", "qty",
+    "buy_bbo_px", "buy_bbo_qty", "sell_bbo_px", "sell_bbo_qty",
+    "buy_quote_age_ms", "sell_quote_age_ms",
+    "buy_limit", "sell_limit", "buy_protect_limit", "sell_protect_limit",
+    "buy_notional", "sell_notional", "exp_edge_usd", "gross_edge_usd",
+    "marginal_premium_bps", "midline_bps", "inv_add_bps",
+    "buy_fill", "sell_fill", "buy_avg_px", "sell_avg_px",
+    "matched_qty", "residual_qty", "buy_status", "sell_status",
+    "unresolved", "ok", "error", "hedge_status", "hedge_venue",
+    "hedge_side", "hedge_fill", "hedge_avg_px", "hedge_notional",
+    "hedge_duration_ms", "remaining_net_qty", "fill_edge_usd",
+]
+RUN_CONFIG_HEADER = [
+    "run_id", "start_ts", "mode", "symbol", "hedge",
+    "midline_bps", "upper_bps", "lower_bps",
+    "premium_persist_sec", "cooldown_sec",
+    "leg_slippage_bps", "hedge_slippage_bps",
+    "take_fraction", "max_order_notional_usd", "inventory_scale_bps",
+]
 BALANCE_POLL_SEC = 30.0
+
+
+def _csv_num(value, digits: int = 8) -> str:
+    """Format an optional numeric value without writing a fake zero."""
+    if value is None:
+        return ""
+    return f"{float(value):.{digits}g}"
+
+
+def _csv_error(*items) -> str:
+    """Keep execution errors useful in CSV without multiline log payloads."""
+    errors = []
+    for item in items:
+        if isinstance(item, dict):
+            error = item.get("err") or item.get("error")
+        else:
+            error = item
+        if error:
+            errors.append(str(error).replace("\r", " ").replace("\n", " ")[:200])
+    return " | ".join(errors)
 
 
 class Engine:
@@ -85,6 +122,9 @@ class Engine:
         self._venue_fetch_fails: Dict[str, int] = {}
         # per-execution records for the dashboard (newest last)
         self.recent_trades: deque = deque(maxlen=50)
+        self._event_seq = 0
+        self.run_id = f"{self.cfg.symbol}-{self.cfg.hedge_venue}-" \
+                      f"{int(self.start_ts * 1000)}"
 
     # ------------------------------------------------------------- utilities
 
@@ -113,6 +153,47 @@ class Engine:
     def _record_send(self, v) -> None:
         self._sends.setdefault(v.key, deque()).append(time.time())
 
+    def _run_config_path(self) -> str:
+        directory = os.path.dirname(self.cfg.log_file) or "logs/engine"
+        return os.path.join(
+            directory, f"runs-{self.cfg.symbol}-{self.cfg.hedge_venue}.csv")
+
+    def _write_run_config(self) -> None:
+        """Append one effective strategy snapshot for this process run."""
+        try:
+            path = self._run_config_path()
+            directory = os.path.dirname(path)
+            if directory:
+                os.makedirs(directory, exist_ok=True)
+            if os.path.exists(path):
+                with open(path) as fh0:
+                    if fh0.readline().strip() != ",".join(RUN_CONFIG_HEADER):
+                        os.replace(path, path + ".old")
+            new = not os.path.exists(path)
+            with open(path, "a", newline="") as fh:
+                writer = csv.writer(fh)
+                if new:
+                    writer.writerow(RUN_CONFIG_HEADER)
+                writer.writerow([
+                    self.run_id,
+                    f"{self.start_ts:.3f}",
+                    "record-only" if self.record_only else "live",
+                    self.cfg.symbol,
+                    self.cfg.hedge_venue,
+                    f"{self.cfg.midline_bps:.6g}",
+                    f"{self.cfg.upper_bps:.6g}",
+                    f"{self.cfg.lower_bps:.6g}",
+                    f"{self.cfg.premium_persist_sec:.6g}",
+                    f"{self.cfg.cooldown_sec:.6g}",
+                    f"{self.cfg.leg_slippage_bps:.6g}",
+                    f"{self.cfg.hedge_slippage_bps:.6g}",
+                    f"{self.cfg.take_fraction:.6g}",
+                    f"{self.cfg.max_order_notional:.6g}",
+                    f"{self.cfg.inventory_scale_bps:.6g}",
+                ])
+        except Exception:
+            log.exception("run config write failed")
+
     def request_stop(self) -> None:
         self.stop.set()
         self._update_evt.set()
@@ -121,6 +202,8 @@ class Engine:
     # ------------------------------------------------------------- lifecycle
 
     async def run(self) -> None:
+        if not self.record_only:
+            self._write_run_config()
         # Long keepalive so order-path connections survive quiet spells; the
         # keepalive loop pings inside this window to hold them open.
         self.session = aiohttp.ClientSession(connector=aiohttp.TCPConnector(
@@ -191,7 +274,9 @@ class Engine:
             tasks += v.start_tasks(self.stop, self._update_evt.set, live)
         if cfg.recorder_enabled or self.record_only:
             self.recorder = MinuteRecorder(cfg.recorder_csv, self.entropy.book,
-                                           self.hedge.book, cfg.staleness_sec)
+                                           self.hedge.book, cfg.staleness_sec,
+                                           symbol=cfg.symbol,
+                                           hedge=cfg.hedge_venue)
             tasks.append(asyncio.create_task(self.recorder.run(self.stop),
                                              name="recorder"))
         if not self.record_only:
@@ -336,9 +421,9 @@ class Engine:
         caller), then release them and settle the aftermath: unresolved
         outcomes escalate to reconcile, everything else gets a net-delta
         check."""
-        unresolved = False
+        execution = None
         try:
-            unresolved = await self._execute(buy, sell, plan)
+            execution = await self._execute(buy, sell, plan)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -346,10 +431,24 @@ class Engine:
         finally:
             self._vlock(buy.key).release()
             self._vlock(sell.key).release()
-        if unresolved:
-            self._reconcile_evt.set()
-        else:
-            await self._maybe_hedge()
+        if execution is not None:
+            if execution["unresolved"]:
+                hedge = {
+                    "status": "not_attempted",
+                    "venue": "",
+                    "side": "",
+                    "filled_qty": 0.0,
+                    "avg_px": None,
+                    "notional": None,
+                    "duration_ms": 0.0,
+                    "remaining_net_qty": sum(v.position
+                                              for v in self.venues.values()),
+                    "error": "primary_execution_unresolved",
+                }
+                self._reconcile_evt.set()
+            else:
+                hedge = await self._maybe_hedge()
+            self._log_csv(execution, hedge)
         self._update_evt.set()  # freed venues may have a queued opportunity
 
     def _scan(self, now: float):
@@ -408,16 +507,28 @@ class Engine:
 
     # ------------------------------------------------------------- execution
 
-    async def _execute(self, buy, sell, plan: ArbPlan) -> bool:
+    async def _execute(self, buy, sell, plan: ArbPlan) -> Optional[dict]:
         """Send both legs and settle the fills. Both venue locks are held by
-        the caller. Returns True when an outcome is unresolved and the caller
-        must escalate to reconcile."""
+        the caller. Returns the execution record, or None when halted."""
         if self.halted:
-            return False
+            return None
         cfg = self.cfg
+        signal_ts = time.time()
+        self._event_seq += 1
+        event_id = f"{int(self.start_ts * 1000)}-{self._event_seq:06d}"
+        buy_bbo_px = buy.book.best_ask()
+        buy_bbo_qty = (buy.book.asks.get(buy_bbo_px)
+                       if buy_bbo_px is not None else None)
+        sell_bbo_px = sell.book.best_bid()
+        sell_bbo_qty = (sell.book.bids.get(sell_bbo_px)
+                        if sell_bbo_px is not None else None)
+        buy_quote_age_ms = (max(0.0, signal_ts - buy.book.last_update_ts) * 1000.0
+                            if buy.book.last_update_ts else None)
+        sell_quote_age_ms = (max(0.0, signal_ts - sell.book.last_update_ts) * 1000.0
+                             if sell.book.last_update_ts else None)
         inv_bps = self._inv_add_bps(buy, sell)
         direction = "sell_entropy" if sell.key == "entropy" else "buy_entropy"
-        self.last_trade_ts = time.time()
+        self.last_trade_ts = signal_ts
         log.info("[ARB] %s: BUY %s %.6g @<=%.6g | SELL %s @>=%.6g | "
                  "take $%.0f of $%.0f | prem %.2fbps | exp $%.4f",
                  direction, buy.name, plan.qty, plan.buy_limit, sell.name,
@@ -428,14 +539,32 @@ class Engine:
         sell_bound = sell.px_round(plan.sell_limit * (1 - slip), round_up=True)
         self._record_send(buy)
         self._record_send(sell)
+
+        async def send_with_completion_ts(venue, *, is_buy, qty, limit_px):
+            info = await venue.send_taker(is_buy=is_buy, qty=qty,
+                                           limit_px=limit_px)
+            return info, time.time()
+
         res = await asyncio.gather(
-            buy.send_taker(is_buy=True, qty=plan.qty, limit_px=buy_bound),
-            sell.send_taker(is_buy=False, qty=plan.qty, limit_px=sell_bound),
+            send_with_completion_ts(buy, is_buy=True, qty=plan.qty,
+                                    limit_px=buy_bound),
+            send_with_completion_ts(sell, is_buy=False, qty=plan.qty,
+                                    limit_px=sell_bound),
             return_exceptions=True)
-        binfo, sinfo = (r if isinstance(r, dict) else
-                        {"status": "send-failed", "filled_base": 0.0,
-                         "avg_px": None, "err": repr(r), "unresolved": False}
-                        for r in res)
+
+        def unpack_send_result(result):
+            if (isinstance(result, tuple) and len(result) == 2
+                    and isinstance(result[0], dict)):
+                return result
+            return ({"status": "send-failed", "filled_base": 0.0,
+                     "avg_px": None, "err": repr(result),
+                     "unresolved": False}, None)
+
+        (binfo, buy_done_ts), (sinfo, sell_done_ts) = (
+            unpack_send_result(result) for result in res)
+        leg_settle_gap_ms = (
+            abs(buy_done_ts - sell_done_ts) * 1000.0
+            if buy_done_ts is not None and sell_done_ts is not None else None)
         for v, info, side in ((buy, binfo, "buy"), (sell, sinfo, "sell")):
             if info.get("err"):
                 log.error("[%s] %s leg: %s", v.name, side, info["err"])
@@ -453,6 +582,7 @@ class Engine:
             sell.volume_usd += sfill * spx
 
         matched = min(bfill, sfill)
+        residual = abs(bfill - sfill)
         fill_edge = 0.0
         if matched > 0 and binfo.get("avg_px") and sinfo.get("avg_px"):
             fill_edge = matched * (sinfo["avg_px"] * (1 - plan.sell_fee)
@@ -491,27 +621,65 @@ class Engine:
             self.total_exp_edge += plan.exp_edge_usd
         self._record_trade(direction, plan,
                            None if unresolved else fill_edge,
-                           f"{binfo['status']}/{sinfo['status']}", sent_ok)
-        self._log_csv(direction, buy, sell, plan, sent_ok, bfill, sfill,
-                      binfo["status"], sinfo["status"], fill_edge, inv_bps)
-        self.last_trade_ts = time.time()
-        return bool(unresolved)
+                           f"{binfo['status']}/{sinfo['status']}", sent_ok,
+                           event_id=event_id)
+        settled_ts = time.time()
+        self.last_trade_ts = settled_ts
+        return {
+            "event_id": event_id,
+            "signal_ts": signal_ts,
+            "settled_ts": settled_ts,
+            "execution_ms": max(0.0, (settled_ts - signal_ts) * 1000.0),
+            "leg_settle_gap_ms": leg_settle_gap_ms,
+            "direction": direction,
+            "buy": buy,
+            "sell": sell,
+            "plan": plan,
+            "buy_bbo_px": buy_bbo_px,
+            "buy_bbo_qty": buy_bbo_qty,
+            "sell_bbo_px": sell_bbo_px,
+            "sell_bbo_qty": sell_bbo_qty,
+            "buy_quote_age_ms": buy_quote_age_ms,
+            "sell_quote_age_ms": sell_quote_age_ms,
+            "buy_bound": buy_bound,
+            "sell_bound": sell_bound,
+            "buy_info": binfo,
+            "sell_info": sinfo,
+            "matched_qty": matched,
+            "residual_qty": residual,
+            "fill_edge": fill_edge,
+            "inv_bps": inv_bps,
+            "unresolved": bool(unresolved),
+            "ok": sent_ok,
+        }
 
     def _record_trade(self, direction: str, plan: ArbPlan, fill_edge,
-                      status: str, ok: bool) -> None:
+                      status: str, ok: bool, event_id: str = "") -> None:
         self.recent_trades.append({
-            "ts": time.time(), "direction": direction, "qty": plan.qty,
+            "ts": time.time(), "event_id": event_id,
+            "direction": direction, "qty": plan.qty,
             "notional": plan.buy_notional,
             "prem_bps": plan.marginal_premium_bps,
             "exp": plan.exp_edge_usd, "fill": fill_edge, "status": status,
             "ok": ok})
 
-    async def _maybe_hedge(self) -> None:
+    async def _maybe_hedge(self) -> dict:
         net = sum(v.position for v in self.venues.values())
-        if abs(net) > self.cfg.net_tolerance_base:
-            await self._hedge(net)
+        if abs(net) <= self.cfg.net_tolerance_base:
+            return {
+                "status": "not_needed",
+                "venue": "",
+                "side": "",
+                "filled_qty": 0.0,
+                "avg_px": None,
+                "notional": None,
+                "duration_ms": 0.0,
+                "remaining_net_qty": net,
+                "error": "",
+            }
+        return await self._hedge(net)
 
-    async def _hedge(self, net: float) -> None:
+    async def _hedge(self, net: float) -> dict:
         """Reduce the venue that carries the imbalance back toward net zero
         (reduce-only taker with hedge_slippage_bps price protection)."""
         cfg = self.cfg
@@ -544,19 +712,36 @@ class Engine:
                             net, "SELL" if is_sell else "BUY", qty, v.name, limit)
                 self.hedges += 1
                 self._record_send(v)  # counts toward the budget, never blocked
+                hedge_started = time.time()
                 info = await v.send_taker(is_buy=not is_sell, qty=qty,
                                           limit_px=limit, reduce_only=True)
+                hedge_duration_ms = max(0.0, (time.time() - hedge_started) * 1000.0)
+                fill = float(info.get("filled_base") or 0.0)
+                avg_px = info.get("avg_px")
+                hedge_notional = (fill * float(avg_px)
+                                  if avg_px is not None else None)
                 if info.get("err") or info.get("unresolved"):
                     log.error("[HEDGE] %s: %s", v.name,
                               info.get("err") or "unresolved")
                     if str(info.get("err", "")).startswith("RATE_LIMITED"):
                         self._mark_limited(v)
                     self._reconcile_evt.set()
+                    return {
+                        "status": info.get("status", "unresolved"),
+                        "venue": v.name,
+                        "side": "sell" if is_sell else "buy",
+                        "filled_qty": fill,
+                        "avg_px": avg_px,
+                        "notional": hedge_notional,
+                        "duration_ms": hedge_duration_ms,
+                        "remaining_net_qty": sum(x.position
+                                                  for x in self.venues.values()),
+                        "error": info.get("err") or "unresolved",
+                    }
                 else:
-                    fill = info["filled_base"]
                     v.position += -fill if is_sell else fill
                     if fill:
-                        px = info.get("avg_px") or limit
+                        px = avg_px or limit
                         fee = v.fee_bps / 1e4
                         v.cash += fill * px * (1 - fee) if is_sell \
                             else -fill * px * (1 + fee)
@@ -564,11 +749,33 @@ class Engine:
                     log.info("[HEDGE SETTLED] %s %s %.6g/%.6g",
                              v.name, info["status"], fill, qty)
                 v.last_traded_ts = time.time()
+                return {
+                    "status": info.get("status", "settled"),
+                    "venue": v.name,
+                    "side": "sell" if is_sell else "buy",
+                    "filled_qty": fill,
+                    "avg_px": avg_px,
+                    "notional": hedge_notional,
+                    "duration_ms": hedge_duration_ms,
+                    "remaining_net_qty": sum(x.position
+                                              for x in self.venues.values()),
+                    "error": "",
+                }
             finally:
                 lk.release()
-            return
         log.warning("[HEDGE] net %+.6g below hedgeable minimum — carrying "
                     "(next reconcile retries)", net)
+        return {
+            "status": "unhedgeable",
+            "venue": "",
+            "side": "",
+            "filled_qty": 0.0,
+            "avg_px": None,
+            "notional": None,
+            "duration_ms": 0.0,
+            "remaining_net_qty": net,
+            "error": "below_hedgeable_minimum",
+        }
 
     # --------------------------------------------------- reconcile / status
 
@@ -749,8 +956,7 @@ class Engine:
                      self.total_exp_edge, self.total_fill_edge, rec,
                      " *** HALTED ***" if self.halted else "")
 
-    def _log_csv(self, direction, buy, sell, plan: ArbPlan, ok: bool, bfill,
-                 sfill, bstatus, sstatus, fill_edge, inv_bps) -> None:
+    def _log_csv(self, execution: dict, hedge: dict) -> None:
         try:
             path = self.cfg.trades_csv
             d = os.path.dirname(path)
@@ -765,14 +971,50 @@ class Engine:
                 w = csv.writer(fh)
                 if new:
                     w.writerow(CSV_HEADER)
-                w.writerow([f"{time.time():.3f}",
-                            direction, buy.name, sell.name, f"{plan.qty:.8g}",
-                            plan.buy_limit, plan.sell_limit,
-                            f"{plan.buy_notional:.2f}", f"{plan.sell_notional:.2f}",
-                            f"{plan.exp_edge_usd:.4f}", f"{plan.gross_edge_usd:.4f}",
-                            f"{plan.marginal_premium_bps:.3f}",
-                            f"{self.cfg.midline_bps:.3f}",
-                            f"{inv_bps:.3f}", int(ok), f"{bfill:.8g}",
-                            f"{sfill:.8g}", bstatus, sstatus, f"{fill_edge:.4f}"])
+                buy = execution["buy"]
+                sell = execution["sell"]
+                plan = execution["plan"]
+                binfo = execution["buy_info"]
+                sinfo = execution["sell_info"]
+                w.writerow([
+                    f"{execution['settled_ts']:.3f}",
+                    f"{execution['signal_ts']:.3f}", self.run_id,
+                    execution["event_id"],
+                    self.cfg.symbol, self.cfg.hedge_venue,
+                    f"{execution['execution_ms']:.3f}",
+                    _csv_num(execution["leg_settle_gap_ms"], 6),
+                    execution["direction"], buy.name, sell.name,
+                    _csv_num(plan.qty),
+                    _csv_num(execution["buy_bbo_px"]),
+                    _csv_num(execution["buy_bbo_qty"]),
+                    _csv_num(execution["sell_bbo_px"]),
+                    _csv_num(execution["sell_bbo_qty"]),
+                    _csv_num(execution["buy_quote_age_ms"], 6),
+                    _csv_num(execution["sell_quote_age_ms"], 6),
+                    _csv_num(plan.buy_limit), _csv_num(plan.sell_limit),
+                    _csv_num(execution["buy_bound"]),
+                    _csv_num(execution["sell_bound"]),
+                    f"{plan.buy_notional:.2f}", f"{plan.sell_notional:.2f}",
+                    f"{plan.exp_edge_usd:.4f}", f"{plan.gross_edge_usd:.4f}",
+                    f"{plan.marginal_premium_bps:.3f}",
+                    f"{self.cfg.midline_bps:.3f}",
+                    f"{execution['inv_bps']:.3f}",
+                    _csv_num(binfo.get("filled_base")),
+                    _csv_num(sinfo.get("filled_base")),
+                    _csv_num(binfo.get("avg_px")),
+                    _csv_num(sinfo.get("avg_px")),
+                    _csv_num(execution["matched_qty"]),
+                    _csv_num(execution["residual_qty"]),
+                    binfo.get("status", ""), sinfo.get("status", ""),
+                    int(execution["unresolved"]), int(execution["ok"]),
+                    _csv_error(binfo, sinfo, hedge),
+                    hedge.get("status", ""), hedge.get("venue", ""),
+                    hedge.get("side", ""), _csv_num(hedge.get("filled_qty")),
+                    _csv_num(hedge.get("avg_px")),
+                    _csv_num(hedge.get("notional")),
+                    _csv_num(hedge.get("duration_ms"), 6),
+                    _csv_num(hedge.get("remaining_net_qty")),
+                    f"{execution['fill_edge']:.4f}",
+                ])
         except Exception:
             log.exception("csv write failed")

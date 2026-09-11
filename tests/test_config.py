@@ -55,6 +55,9 @@ def test_minimal_defaults():
     assert cfg.hedge.lighter_profile.chain_id == 304
     assert cfg.take_fraction == 0.5          # defaults kick in
     assert cfg.recorder_enabled is True
+    assert cfg.recorder_csv == "logs/record/minutes.csv"
+    assert cfg.trades_csv == "logs/trades/trades.csv"
+    assert cfg.log_file == "logs/engine/engine.log"
 
 
 def test_tradexyz_hedge():
@@ -172,6 +175,37 @@ def test_one_selected_lighter_namespace_does_not_require_the_other(monkeypatch):
     cfg = load(MINIMAL, hedge="lighter-rh")
     assert cfg.hedge.lighter_creds.complete
     assert cfg.hedge.lighter_creds.account_index == 202
+
+
+def test_lighter_symbol_aliases_are_scoped_to_each_deployment():
+    for hedge in ("lighter", "lighter-rh"):
+        oai = load(MINIMAL, symbol="OAI", hedge=hedge)
+        anth = load(MINIMAL, symbol="ANTH", hedge=hedge)
+
+        assert oai.symbol == "OAI"
+        assert oai.entropy.symbol == "OAI"
+        assert oai.hedge.symbol == "OPENAI"
+        assert anth.symbol == "ANTH"
+        assert anth.entropy.symbol == "ANTH"
+        assert anth.hedge.symbol == "ANTHROPIC"
+
+
+def test_lighter_symbols_without_aliases_keep_the_canonical_name():
+    for symbol in ("SNDK", "NBIS", "GPRO"):
+        cfg = load(MINIMAL, symbol=symbol, hedge="lighter-rh")
+        assert cfg.symbol == symbol
+        assert cfg.entropy.symbol == symbol
+        assert cfg.hedge.symbol == symbol
+
+
+def test_native_symbol_input_normalizes_to_canonical_symbol():
+    for native, canonical in (("OPENAI", "OAI"),
+                              ("ANTHROPIC", "ANTH")):
+        cfg = load(MINIMAL, symbol=f"  {native.lower()}  ",
+                   hedge="lighter-rh")
+        assert cfg.symbol == canonical
+        assert cfg.entropy.symbol == canonical
+        assert cfg.hedge.symbol == native
 
 
 if __name__ == "__main__":

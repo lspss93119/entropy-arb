@@ -79,7 +79,27 @@ def test_append_keeps_single_header():
     with open(path) as fh:
         lines = fh.read().strip().splitlines()
     assert len(lines) == 3             # one header + two rows
-    assert lines[0].startswith("minute_ts,")
+    assert lines[0].startswith("symbol,hedge,minute_ts,")
+
+
+def test_records_market_identity_and_top_sizes():
+    e_book, h_book = OrderBook(), OrderBook()
+    path = os.path.join(tempfile.mkdtemp(), "minutes.csv")
+    set_book(e_book, 100.0, 100.02)
+    set_book(h_book, 100.0, 100.02)
+    rec = MinuteRecorder(path, e_book, h_book, staleness_sec=1e9,
+                         symbol="SNDK", hedge="lighter-rh")
+    rec.sample(1_700_000_000.0)
+    rec.close()
+
+    with open(path, newline="") as fh:
+        row = next(csv.DictReader(fh))
+    assert row["symbol"] == "SNDK"
+    assert row["hedge"] == "lighter-rh"
+    assert float(row["entropy_bid_qty"]) == 10.0
+    assert float(row["entropy_ask_qty"]) == 10.0
+    assert float(row["hedge_bid_qty"]) == 10.0
+    assert float(row["hedge_ask_qty"]) == 10.0
 
 
 if __name__ == "__main__":

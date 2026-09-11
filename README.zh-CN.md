@@ -72,7 +72,9 @@ cp .env.example .env                     # 密钥——交易必填
 交易哪个市场**不在**配置文件中——每次启动时用命令行参数显式指定：
 `--symbol`（两个交易所共同交易的品种）和 `--hedge`（三选一：
 `lighter`、`lighter-rh`、`tradexyz`；Entropy 永远是
-另一条腿）。
+另一条腿）。已知的交易所原生别名不区分大小写，例如
+`--symbol OAI` 和 `--symbol OPENAI` 都会统一成 canonical `OAI`，然后由
+对冲适配器使用对应交易所的原生市场名称。
 
 本机器人**没有模拟盘**——要么采集数据（`--record-only`），要么实盘交易。
 请用采集的数据和最小的仓位上限来验证策略，而不是模拟成交。
@@ -84,16 +86,45 @@ python3 main.py --record-only --symbol SNDK --hedge lighter-rh
 ```
 
 至少运行几个小时（最好一整天——溢价存在日内规律），数据写入
-`logs/minutes.csv`。
+`logs/record/minutes-SYMBOL-HEDGE.csv`，例如
+`logs/record/minutes-SNDK-lighter-rh.csv`。
+
+如需进行基础多市场采集，可以重复参数（也可以使用逗号分隔）。这是仅采集模式，
+会为每个 `品种 x 对冲交易所` 配对启动一个独立采集器：
+
+```bash
+python3 main.py --record-only --no-dashboard \
+  --symbol SNDK --symbol BTC \
+  --hedge lighter --hedge lighter-rh
+```
+
+程序会自动区分输出文件，例如
+`logs/record/minutes-SNDK-lighter.csv` 和
+`logs/record/minutes-BTC-lighter-rh.csv`。
+市场清单仍由命令行显式提供；这个第一版多市场模式不会自动扫描品种。
 
 **第二步：分析数据、设定阈值：**
 
 ```bash
 python3 tools/analyze.py
+# 多市场示例：
+python3 tools/analyze.py --csv logs/record/minutes-SNDK-lighter.csv
 ```
 
 它会输出溢价分布、各档带宽的历史触发频率，以及可直接粘贴进
 `config.yaml` 的 `thresholds:` 配置块。
+
+成交结果使用独立的分析器，不会混入分钟级分析。它一次读取一个市场与对冲交易所
+的成交文件，输出成交质量、相对 BBO 的滑点、对冲结果，以及各信号区间的实际价差：
+包括实际成交价差 bps、加权滑点，以及对冲成交价格与名义金额：
+
+```bash
+python3 tools/analyze_trades.py \
+  --csv logs/trades/trades-SNDK-lighter-rh.csv
+```
+
+如果存在多个市场成交文件，请明确传入 `--csv`，避免把不同市场和对冲交易所的
+统计混在一起。
 
 **第三步：实盘** —— 填写 `.env`，安装签名 SDK，仓位上限从刚好满足
 交易所最小名义的水平开始：
@@ -109,7 +140,8 @@ python3 main.py --symbol SNDK --hedge lighter-rh
 **仪表盘。** 在终端运行时会显示实时 Rich 仪表盘：两边盘口（含数据龄/点差）、
 持仓与上限、账户权益与本次会话盈亏、两个方向的可成交溢价对比完整门槛
 （已含手续费与库存加价，● 表示已武装）、数据采集进度、最近成交，以及日志
-尾部（完整日志写入 `logging.file`，默认 `logs/engine.log`）。`--record-only`
+尾部（完整日志写入 `logging.file`，默认
+`logs/engine/engine-SYMBOL-HEDGE.log`）。`--record-only`
 模式同样可用。加 `--cn` 参数可使仪表盘全部以中文显示。`--no-dashboard`
 可切换为纯日志输出（nohup/systemd 等非终端环境会自动退回纯日志），也可
 设置 `logging.dashboard: false`。
@@ -121,8 +153,10 @@ python3 main.py --symbol SNDK --hedge lighter-rh
 
 | 列 | 含义 |
 |---|---|
+| `symbol`, `hedge` | 市场配对身份 |
 | `minute_ts`, `time_utc` | 分钟起点（epoch 秒 / ISO UTC） |
 | `entropy_bid/ask`, `hedge_bid/ask` | 该分钟最后一次有效盘口 |
+| `entropy_bid/ask_qty`, `hedge_bid/ask_qty` | 该分钟最后一次有效盘口数量 |
 | `premium_open/high/low/close/mean/std_bps` | Entropy 相对对冲腿的中间价溢价 |
 | `sell_edge_mean/max_bps` | 卖出 Entropy 方向的可成交溢价（Entropy 买一 / 对冲腿卖一 − 1） |
 | `buy_edge_mean/max_bps` | 买入 Entropy 方向的可成交溢价（对冲腿买一 / Entropy 卖一 − 1） |
@@ -152,8 +186,13 @@ python3 main.py --symbol SNDK --hedge lighter-rh
 | `inventory.scale_bps` / `floor_frac` | 库存阶梯（仓位超过上限的 `floor_frac` 后额外加价） | 10 / 0.5 |
 | `execution.premium_persist_sec` | 信号需持续多久才触发 | 0.3 |
 | `execution.*` | 滑点保护、超时、对账周期等 | 见配置文件 |
-| `recorder.*` | 分钟数据采集器 | 开启，`logs/minutes.csv` |
-| `logging.dashboard` / `logging.file` | 终端仪表盘；开启时日志写入文件 | 开启，`logs/engine.log` |
+| `recorder.*` | 分钟数据采集器 | 开启，`logs/record/minutes-SYMBOL-HEDGE.csv` |
+| `logging.trades_csv` | 每个市场与对冲交易所的成交摘要 | `logs/trades/trades-SYMBOL-HEDGE.csv` |
+| `logging.dashboard` / `logging.file` | 终端仪表盘；开启时日志写入文件 | 开启，`logs/engine/engine-SYMBOL-HEDGE.log` |
+
+每次启动程序还会把本次实际生效的策略参数追加到
+`logs/engine/runs-SYMBOL-HEDGE.csv`。成交 CSV 会写入对应的
+`run_id`，因此可以在不重复保存完整配置的情况下比较不同参数运行结果。
 
 ## 密钥配置（`.env`，仅实盘需要）
 
@@ -201,7 +240,8 @@ entropy_arb/venue_lighter.py  zkLighter 适配器（主网、Robinhood 链）
 entropy_arb/engine.py    双交易所策略主循环
 entropy_arb/dashboard.py Rich 终端仪表盘
 entropy_arb/recorder.py  分钟级盘口数据采集
-tools/analyze.py         minutes.csv -> 阈值建议
+tools/analyze.py         logs/record/minutes-SYMBOL-HEDGE.csv -> 阈值建议
+tools/analyze_trades.py  logs/trades/trades-SYMBOL-HEDGE.csv -> 成交质量分析
 tests/                   python3 -m pytest tests/
 ```
 

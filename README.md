@@ -79,7 +79,9 @@ cp .env.example .env                     # credentials — required to trade
 The markets are **not** in the config file — you state them explicitly on
 every start: `--symbol` (traded on both venues) and `--hedge` (one of
 `lighter`, `lighter-rh`, `tradexyz`; Entropy is always the
-other leg).
+other leg). Known native aliases are accepted case-insensitively — for
+example, `--symbol OAI` and `--symbol OPENAI` both normalize to canonical
+`OAI`; the hedge adapter then uses its native market name.
 
 There is **no paper mode** — the bot either collects data (`--record-only`)
 or trades live. Validate with recorded data and tiny position caps, not with
@@ -92,16 +94,48 @@ python3 main.py --record-only --symbol SNDK --hedge lighter-rh
 ```
 
 Let it run for at least a few hours (a day is better — premiums have
-intraday regimes). It writes `logs/minutes.csv`.
+intraday regimes). It writes a pair-specific file under `logs/record/`, for
+example `logs/record/minutes-SNDK-lighter-rh.csv`.
+
+For basic multi-market collection, repeat the flags (or use comma-separated
+values). This is record-only and starts one independent recorder per
+`symbol x hedge` pair:
+
+```bash
+python3 main.py --record-only --no-dashboard \
+  --symbol SNDK --symbol BTC \
+  --hedge lighter --hedge lighter-rh
+```
+
+The files are namespaced automatically, for example
+`logs/record/minutes-SNDK-lighter.csv` and
+`logs/record/minutes-BTC-lighter-rh.csv`.
+Market discovery is still explicit; this first multi-market mode does not
+scan for symbols automatically.
 
 **2. Analyze and set your thresholds:**
 
 ```bash
 python3 tools/analyze.py
+# multi-market example:
+python3 tools/analyze.py --csv logs/record/minutes-SNDK-lighter.csv
 ```
 
 It prints the premium distribution, how often each candidate band would have
 fired, and a ready-to-paste `thresholds:` block for `config.yaml`.
+
+Trade execution results have a separate analyzer. It reads one namespaced
+trade file at a time and reports fill quality, BBO slippage, hedge outcomes,
+realized matched-edge bps, weighted slippage, and hedge fill context by
+signal-distance bucket:
+
+```bash
+python3 tools/analyze_trades.py \
+  --csv logs/trades/trades-SNDK-lighter-rh.csv
+```
+
+If more than one pair-specific trade file exists, pass `--csv` explicitly so
+different markets and hedge venues are not mixed into one statistic.
 
 **3. Go live** — fill in `.env`, install the signing SDKs, and start with
 the smallest position caps that clear the venue minimums:
@@ -119,7 +153,7 @@ books with age/spread, positions and caps, equity and session PnL, the
 executable premium of each direction against its full hurdle (fees and
 inventory surcharge included, ● = armed), recorder progress, the last
 executions, and a tail of the log (the full log goes to `logging.file`,
-default `logs/engine.log`). It works in `--record-only` too. Add `--cn` to
+default `logs/engine/engine-SNDK-lighter-rh.log`). It works in `--record-only` too. Add `--cn` to
 display the dashboard in Chinese. Use `--no-dashboard` for plain console
 logs (nohup/systemd — off-terminal runs fall back automatically), or set
 `logging.dashboard: false`.
@@ -131,8 +165,10 @@ Once per second it samples both live books; once per minute it writes a row:
 
 | column | meaning |
 |---|---|
+| `symbol`, `hedge` | market pair identity |
 | `minute_ts`, `time_utc` | minute start (epoch seconds, ISO UTC) |
 | `entropy_bid/ask`, `hedge_bid/ask` | last fresh top-of-book of the minute |
+| `entropy_bid/ask_qty`, `hedge_bid/ask_qty` | last fresh top-of-book sizes |
 | `premium_open/high/low/close/mean/std_bps` | mid-to-mid premium of Entropy over the hedge |
 | `sell_edge_mean/max_bps` | executable premium for SELL entropy (entropy bid / hedge ask − 1) |
 | `buy_edge_mean/max_bps` | executable premium for BUY entropy (hedge bid / entropy ask − 1) |
@@ -165,8 +201,14 @@ errors), credentials in `.env`, and the markets on the command line
 | `inventory.scale_bps` / `floor_frac` | inventory ladder (extra bps past `floor_frac` of the cap) | 10 / 0.5 |
 | `execution.premium_persist_sec` | edge must persist before firing | 0.3 |
 | `execution.*` | slippage bounds, timeouts, reconcile cadence… | see file |
-| `recorder.*` | minute-data recorder | on, `logs/minutes.csv` |
-| `logging.dashboard` / `logging.file` | Rich dashboard on a tty; log file while it runs | on, `logs/engine.log` |
+| `recorder.*` | minute-data recorder | on, `logs/record/minutes-SYMBOL-HEDGE.csv` |
+| `logging.trades_csv` | per-pair execution summary | `logs/trades/trades-SYMBOL-HEDGE.csv` |
+| `logging.dashboard` / `logging.file` | Rich dashboard on a tty; log file while it runs | on, `logs/engine/engine-SYMBOL-HEDGE.log` |
+
+Each process start also appends the effective strategy parameters to
+`logs/engine/runs-SYMBOL-HEDGE.csv`. The trade CSV includes the matching
+`run_id`, so executions can be compared across parameter changes without
+duplicating the full configuration on every trade row.
 
 ## Credentials (`.env`, live only)
 
@@ -217,7 +259,8 @@ entropy_arb/venue_lighter.py  zkLighter adapter (mainnet, Robinhood chain)
 entropy_arb/engine.py    the two-venue strategy loop
 entropy_arb/dashboard.py Rich terminal dashboard
 entropy_arb/recorder.py  1-minute orderbook bars
-tools/analyze.py         minutes.csv -> suggested thresholds
+tools/analyze.py         logs/record/minutes-SYMBOL-HEDGE.csv -> suggested thresholds
+tools/analyze_trades.py  logs/trades/trades-SYMBOL-HEDGE.csv -> execution quality
 tests/                   python3 -m pytest tests/
 ```
 
