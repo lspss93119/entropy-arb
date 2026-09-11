@@ -34,16 +34,20 @@ log = logging.getLogger("engine")
 
 CSV_HEADER = [
     "ts", "signal_ts", "run_id", "event_id", "symbol", "hedge",
-    "execution_ms", "leg_settle_gap_ms",
+    "execution_ms", "buy_settle_ms", "sell_settle_ms",
+    "leg_settle_gap_ms", "first_settled_leg",
     "direction", "buy_venue", "sell_venue", "qty",
     "buy_bbo_px", "buy_bbo_qty", "sell_bbo_px", "sell_bbo_qty",
     "buy_quote_age_ms", "sell_quote_age_ms",
+    "entropy_book_server_age_ms", "entropy_update_gap_ms",
+    "hedge_update_gap_ms",
     "buy_limit", "sell_limit", "buy_protect_limit", "sell_protect_limit",
     "buy_notional", "sell_notional", "exp_edge_usd", "gross_edge_usd",
     "marginal_premium_bps", "midline_bps", "inv_add_bps",
     "buy_fill", "sell_fill", "buy_avg_px", "sell_avg_px",
     "matched_qty", "residual_qty", "buy_status", "sell_status",
-    "unresolved", "ok", "error", "hedge_status", "hedge_venue",
+    "buy_reason", "sell_reason", "unresolved", "ok", "error",
+    "hedge_status", "hedge_venue",
     "hedge_side", "hedge_fill", "hedge_avg_px", "hedge_notional",
     "hedge_duration_ms", "remaining_net_qty", "fill_edge_usd",
 ]
@@ -53,6 +57,8 @@ RUN_CONFIG_HEADER = [
     "premium_persist_sec", "cooldown_sec",
     "leg_slippage_bps", "hedge_slippage_bps",
     "take_fraction", "max_order_notional_usd", "inventory_scale_bps",
+    "host_region", "market_data_mode", "entropy_order_transport",
+    "hedge_order_transport", "code_version",
 ]
 BALANCE_POLL_SEC = 30.0
 
@@ -158,6 +164,31 @@ class Engine:
         return os.path.join(
             directory, f"runs-{self.cfg.symbol}-{self.cfg.hedge_venue}.csv")
 
+    def _runtime_metadata(self) -> dict:
+        """Return small deployment identifiers for local/AWS comparisons."""
+        hedge_kind = getattr(self.cfg.hedge, "kind", "")
+        default_market_mode = (
+            "entropy:hl_l2book_fast|hedge:lighter_order_book"
+            if hedge_kind == "lighter" else
+            "entropy:hl_l2book_fast|hedge:hl_l2book_fast")
+        return {
+            "host_region": (
+                os.getenv("ENTROPY_ARB_HOST_REGION")
+                or os.getenv("AWS_REGION")
+                or os.getenv("AWS_DEFAULT_REGION")
+                or "local"),
+            "market_data_mode": (
+                os.getenv("ENTROPY_ARB_MARKET_DATA_MODE")
+                or default_market_mode),
+            "entropy_order_transport": os.getenv(
+                "ENTROPY_ARB_ENTROPY_ORDER_TRANSPORT", "http_exchange"),
+            "hedge_order_transport": os.getenv(
+                "ENTROPY_ARB_HEDGE_ORDER_TRANSPORT",
+                "lighter_sdk" if hedge_kind == "lighter" else "http_exchange"),
+            "code_version": (os.getenv("ENTROPY_ARB_CODE_VERSION")
+                             or os.getenv("GIT_COMMIT") or "unknown"),
+        }
+
     def _write_run_config(self) -> None:
         """Append one effective strategy snapshot for this process run."""
         try:
@@ -170,6 +201,7 @@ class Engine:
                     if fh0.readline().strip() != ",".join(RUN_CONFIG_HEADER):
                         os.replace(path, path + ".old")
             new = not os.path.exists(path)
+            metadata = self._runtime_metadata()
             with open(path, "a", newline="") as fh:
                 writer = csv.writer(fh)
                 if new:
@@ -190,6 +222,11 @@ class Engine:
                     f"{self.cfg.take_fraction:.6g}",
                     f"{self.cfg.max_order_notional:.6g}",
                     f"{self.cfg.inventory_scale_bps:.6g}",
+                    metadata["host_region"],
+                    metadata["market_data_mode"],
+                    metadata["entropy_order_transport"],
+                    metadata["hedge_order_transport"],
+                    metadata["code_version"],
                 ])
         except Exception:
             log.exception("run config write failed")
@@ -526,6 +563,9 @@ class Engine:
                             if buy.book.last_update_ts else None)
         sell_quote_age_ms = (max(0.0, signal_ts - sell.book.last_update_ts) * 1000.0
                              if sell.book.last_update_ts else None)
+        entropy_book_server_age_ms = self.entropy.book.server_age_ms(signal_ts)
+        entropy_update_gap_ms = self.entropy.book.last_update_gap_ms
+        hedge_update_gap_ms = self.hedge.book.last_update_gap_ms
         inv_bps = self._inv_add_bps(buy, sell)
         direction = "sell_entropy" if sell.key == "entropy" else "buy_entropy"
         self.last_trade_ts = signal_ts
@@ -541,9 +581,15 @@ class Engine:
         self._record_send(sell)
 
         async def send_with_completion_ts(venue, *, is_buy, qty, limit_px):
-            info = await venue.send_taker(is_buy=is_buy, qty=qty,
-                                           limit_px=limit_px)
-            return info, time.time()
+            started_ts = time.time()
+            try:
+                info = await venue.send_taker(is_buy=is_buy, qty=qty,
+                                               limit_px=limit_px)
+            except Exception as exc:
+                info = {"status": "send-failed", "filled_base": 0.0,
+                        "avg_px": None, "err": repr(exc),
+                        "reason": repr(exc), "unresolved": False}
+            return info, started_ts, time.time()
 
         res = await asyncio.gather(
             send_with_completion_ts(buy, is_buy=True, qty=plan.qty,
@@ -553,18 +599,32 @@ class Engine:
             return_exceptions=True)
 
         def unpack_send_result(result):
-            if (isinstance(result, tuple) and len(result) == 2
+            if (isinstance(result, tuple) and len(result) == 3
                     and isinstance(result[0], dict)):
                 return result
             return ({"status": "send-failed", "filled_base": 0.0,
                      "avg_px": None, "err": repr(result),
-                     "unresolved": False}, None)
+                     "reason": repr(result), "unresolved": False},
+                    None, None)
 
-        (binfo, buy_done_ts), (sinfo, sell_done_ts) = (
+        (binfo, buy_started_ts, buy_done_ts), (sinfo, sell_started_ts,
+                                               sell_done_ts) = (
             unpack_send_result(result) for result in res)
+        buy_settle_ms = (
+            max(0.0, buy_done_ts - buy_started_ts) * 1000.0
+            if buy_started_ts is not None and buy_done_ts is not None else None)
+        sell_settle_ms = (
+            max(0.0, sell_done_ts - sell_started_ts) * 1000.0
+            if sell_started_ts is not None and sell_done_ts is not None else None)
         leg_settle_gap_ms = (
             abs(buy_done_ts - sell_done_ts) * 1000.0
             if buy_done_ts is not None and sell_done_ts is not None else None)
+        if buy_done_ts is None or sell_done_ts is None:
+            first_settled_leg = ""
+        elif abs(buy_done_ts - sell_done_ts) <= 1e-6:
+            first_settled_leg = "same"
+        else:
+            first_settled_leg = "buy" if buy_done_ts < sell_done_ts else "sell"
         for v, info, side in ((buy, binfo, "buy"), (sell, sinfo, "sell")):
             if info.get("err"):
                 log.error("[%s] %s leg: %s", v.name, side, info["err"])
@@ -630,7 +690,10 @@ class Engine:
             "signal_ts": signal_ts,
             "settled_ts": settled_ts,
             "execution_ms": max(0.0, (settled_ts - signal_ts) * 1000.0),
+            "buy_settle_ms": buy_settle_ms,
+            "sell_settle_ms": sell_settle_ms,
             "leg_settle_gap_ms": leg_settle_gap_ms,
+            "first_settled_leg": first_settled_leg,
             "direction": direction,
             "buy": buy,
             "sell": sell,
@@ -641,6 +704,9 @@ class Engine:
             "sell_bbo_qty": sell_bbo_qty,
             "buy_quote_age_ms": buy_quote_age_ms,
             "sell_quote_age_ms": sell_quote_age_ms,
+            "entropy_book_server_age_ms": entropy_book_server_age_ms,
+            "entropy_update_gap_ms": entropy_update_gap_ms,
+            "hedge_update_gap_ms": hedge_update_gap_ms,
             "buy_bound": buy_bound,
             "sell_bound": sell_bound,
             "buy_info": binfo,
@@ -982,7 +1048,10 @@ class Engine:
                     execution["event_id"],
                     self.cfg.symbol, self.cfg.hedge_venue,
                     f"{execution['execution_ms']:.3f}",
+                    _csv_num(execution["buy_settle_ms"], 6),
+                    _csv_num(execution["sell_settle_ms"], 6),
                     _csv_num(execution["leg_settle_gap_ms"], 6),
+                    execution["first_settled_leg"],
                     execution["direction"], buy.name, sell.name,
                     _csv_num(plan.qty),
                     _csv_num(execution["buy_bbo_px"]),
@@ -991,6 +1060,9 @@ class Engine:
                     _csv_num(execution["sell_bbo_qty"]),
                     _csv_num(execution["buy_quote_age_ms"], 6),
                     _csv_num(execution["sell_quote_age_ms"], 6),
+                    _csv_num(execution["entropy_book_server_age_ms"], 6),
+                    _csv_num(execution["entropy_update_gap_ms"], 6),
+                    _csv_num(execution["hedge_update_gap_ms"], 6),
                     _csv_num(plan.buy_limit), _csv_num(plan.sell_limit),
                     _csv_num(execution["buy_bound"]),
                     _csv_num(execution["sell_bound"]),
@@ -1006,6 +1078,8 @@ class Engine:
                     _csv_num(execution["matched_qty"]),
                     _csv_num(execution["residual_qty"]),
                     binfo.get("status", ""), sinfo.get("status", ""),
+                    binfo.get("reason") or binfo.get("err") or "",
+                    sinfo.get("reason") or sinfo.get("err") or "",
                     int(execution["unresolved"]), int(execution["ok"]),
                     _csv_error(binfo, sinfo, hedge),
                     hedge.get("status", ""), hedge.get("venue", ""),

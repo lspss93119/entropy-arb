@@ -33,11 +33,13 @@ _TEXT_FIELDS = {
     "run_id", "event_id", "symbol", "hedge", "direction", "buy_venue",
     "sell_venue",
     "buy_status", "sell_status", "hedge_status", "hedge_venue",
-    "hedge_side", "error",
+    "hedge_side", "first_settled_leg", "buy_reason", "sell_reason",
+    "error",
 }
 _FLAG_FIELDS = {"unresolved", "ok"}
 _NUMERIC_FIELDS = {
-    "ts", "signal_ts", "execution_ms", "qty", "buy_bbo_px",
+    "ts", "signal_ts", "execution_ms", "buy_settle_ms", "sell_settle_ms",
+    "qty", "buy_bbo_px",
     "buy_bbo_qty", "sell_bbo_px", "sell_bbo_qty", "buy_quote_age_ms",
     "sell_quote_age_ms", "buy_limit", "sell_limit", "buy_protect_limit",
     "sell_protect_limit", "buy_notional", "sell_notional", "exp_edge_usd",
@@ -45,7 +47,8 @@ _NUMERIC_FIELDS = {
     "buy_fill", "sell_fill", "buy_avg_px", "sell_avg_px", "matched_qty",
     "residual_qty", "hedge_fill", "hedge_duration_ms",
     "hedge_avg_px", "hedge_notional", "remaining_net_qty", "fill_edge_usd",
-    "leg_settle_gap_ms",
+    "leg_settle_gap_ms", "entropy_book_server_age_ms",
+    "entropy_update_gap_ms", "hedge_update_gap_ms",
 }
 _REQUIRED_FIELDS = {
     "ts", "event_id", "symbol", "hedge", "execution_ms", "direction",
@@ -259,6 +262,17 @@ def summarize_trades(rows: List[dict]) -> dict:
                     if row.get("execution_ms") is not None]
     leg_settle_gap_ms = [float(row["leg_settle_gap_ms"]) for row in rows
                          if row.get("leg_settle_gap_ms") is not None]
+    buy_settle_ms = [float(row["buy_settle_ms"]) for row in rows
+                     if row.get("buy_settle_ms") is not None]
+    sell_settle_ms = [float(row["sell_settle_ms"]) for row in rows
+                      if row.get("sell_settle_ms") is not None]
+    entropy_server_age_ms = [
+        float(row["entropy_book_server_age_ms"]) for row in rows
+        if row.get("entropy_book_server_age_ms") is not None]
+    entropy_update_gap_ms = [float(row["entropy_update_gap_ms"]) for row in rows
+                             if row.get("entropy_update_gap_ms") is not None]
+    hedge_update_gap_ms = [float(row["hedge_update_gap_ms"]) for row in rows
+                           if row.get("hedge_update_gap_ms") is not None]
     hedge_duration_ms = [float(row["hedge_duration_ms"]) for row in rows
                          if row.get("hedge_duration_ms") is not None
                          and row.get("hedge_status") not in {"", "not_needed"}]
@@ -294,6 +308,19 @@ def summarize_trades(rows: List[dict]) -> dict:
         "leg_settle_gap_ms_mean": _mean(leg_settle_gap_ms),
         "leg_settle_gap_ms_p50": percentile(leg_settle_gap_ms, 50),
         "leg_settle_gap_ms_p90": percentile(leg_settle_gap_ms, 90),
+        "buy_settle_ms_p50": percentile(buy_settle_ms, 50),
+        "buy_settle_ms_p90": percentile(buy_settle_ms, 90),
+        "sell_settle_ms_p50": percentile(sell_settle_ms, 50),
+        "sell_settle_ms_p90": percentile(sell_settle_ms, 90),
+        "entropy_book_server_age_ms_p50": percentile(entropy_server_age_ms, 50),
+        "entropy_book_server_age_ms_p90": percentile(entropy_server_age_ms, 90),
+        "entropy_update_gap_ms_p50": percentile(entropy_update_gap_ms, 50),
+        "entropy_update_gap_ms_p90": percentile(entropy_update_gap_ms, 90),
+        "hedge_update_gap_ms_p50": percentile(hedge_update_gap_ms, 50),
+        "hedge_update_gap_ms_p90": percentile(hedge_update_gap_ms, 90),
+        "first_settled_leg_counts": dict(Counter(
+            row["first_settled_leg"] for row in rows
+            if row.get("first_settled_leg"))),
         "hedge_status_counts": dict(sorted(hedge_status_counts.items())),
         "hedge_attempts": hedge_attempts,
         "hedge_completed": hedge_completed,
@@ -370,6 +397,19 @@ def _print_report(path: str, rows: List[dict], skipped: int) -> None:
           f"{_fmt(summary['leg_settle_gap_ms_mean'], 1)}/"
           f"{_fmt(summary['leg_settle_gap_ms_p50'], 1)}/"
           f"{_fmt(summary['leg_settle_gap_ms_p90'], 1)} ms")
+    print(f"  leg settle p50/p90 buy/sell "
+          f"{_fmt(summary['buy_settle_ms_p50'], 1)}/"
+          f"{_fmt(summary['buy_settle_ms_p90'], 1)} / "
+          f"{_fmt(summary['sell_settle_ms_p50'], 1)}/"
+          f"{_fmt(summary['sell_settle_ms_p90'], 1)} ms")
+    print(f"  entropy server age p50/p90 "
+          f"{_fmt(summary['entropy_book_server_age_ms_p50'], 1)}/"
+          f"{_fmt(summary['entropy_book_server_age_ms_p90'], 1)} ms")
+    print(f"  feed update gap p50/p90 entropy/hedge "
+          f"{_fmt(summary['entropy_update_gap_ms_p50'], 1)}/"
+          f"{_fmt(summary['entropy_update_gap_ms_p90'], 1)} / "
+          f"{_fmt(summary['hedge_update_gap_ms_p50'], 1)}/"
+          f"{_fmt(summary['hedge_update_gap_ms_p90'], 1)} ms")
 
     print("\nhedge / 對沖")
     statuses = ", ".join(

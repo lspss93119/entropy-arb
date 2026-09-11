@@ -146,7 +146,7 @@ class HLBookFeed:
         if msg.get("channel") == "l2Book":
             d = msg.get("data") or {}
             if d.get("coin") == self.coin:
-                self.book.apply_hl(d["levels"])
+                self.book.apply_hl(d["levels"], server_ts_ms=d.get("time"))
                 if not self._snapped:
                     self._snapped = True
                     log.info("[%s] snapshot: %d bids / %d asks", self.name,

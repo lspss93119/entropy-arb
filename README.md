@@ -172,6 +172,9 @@ Once per second it samples both live books; once per minute it writes a row:
 | `premium_open/high/low/close/mean/std_bps` | mid-to-mid premium of Entropy over the hedge |
 | `sell_edge_mean/max_bps` | executable premium for SELL entropy (entropy bid / hedge ask − 1) |
 | `buy_edge_mean/max_bps` | executable premium for BUY entropy (hedge bid / entropy ask − 1) |
+| `entropy_update_count`, `hedge_update_count` | number of book updates observed during the minute |
+| `*_gap_p50/p95_ms` | p50/p95 inter-update gap for each feed |
+| `entropy_age_p95_ms` | p95 local receipt age versus Hyperliquid's book server timestamp |
 | `samples` | how many of the ~60 seconds both books were fresh |
 
 Recorded edges are pre-fee; the analyzer subtracts `--fees-bps` (pass the
@@ -208,7 +211,11 @@ errors), credentials in `.env`, and the markets on the command line
 Each process start also appends the effective strategy parameters to
 `logs/engine/runs-SYMBOL-HEDGE.csv`. The trade CSV includes the matching
 `run_id`, so executions can be compared across parameter changes without
-duplicating the full configuration on every trade row.
+duplicating the full configuration on every trade row. Live trade rows also
+include each leg's settle duration, the first leg to settle, quote/feed age at
+the signal, and venue-native cancellation or rejection reasons. Run rows record
+the host region, feed/order transport mode, and `code_version`; set
+`ENTROPY_ARB_CODE_VERSION` when deploying a revision outside a Git checkout.
 
 ## Credentials (`.env`, live only)
 

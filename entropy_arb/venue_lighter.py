@@ -8,7 +8,7 @@ without the SDK. Trading lazily imports the official `lighter` SDK
 Market orders carry mandatory avg-execution-price protection and settle
 asynchronously on the authenticated account_orders websocket; send_taker()
 hides that behind the same result shape the HL venue returns:
-{status, filled_base, avg_px, err, unresolved}.
+{status, filled_base, avg_px, err, reason, unresolved}.
 """
 from __future__ import annotations
 
@@ -85,9 +85,12 @@ class AccountOrdersFeed:
                     continue
                 fb = float(o.get("filled_base_amount") or 0.0)
                 fq = float(o.get("filled_quote_amount") or 0.0)
-                self._resolve(coi, {"status": status, "filled_base": fb,
-                                    "filled_quote": fq,
-                                    "avg_px": (fq / fb) if fb > 0 else None})
+                self._resolve(coi, {
+                    "status": status, "filled_base": fb,
+                    "filled_quote": fq,
+                    "avg_px": (fq / fb) if fb > 0 else None,
+                    "reason": "" if status.lower() == "filled" else status,
+                })
 
     async def run(self, stop: asyncio.Event) -> None:
         backoff = 1.0
@@ -295,8 +298,9 @@ class LighterVenue:
             msg = f"{type(e).__name__}: {e}"
             if getattr(e, "status", None) == 429 or "(429)" in str(e):
                 msg = "RATE_LIMITED: " + msg
-            return {"status": "send-failed", "filled_base": 0.0, "avg_px": None,
-                    "err": msg, "unresolved": False}
+            return {"status": "send-failed", "filled_base": 0.0,
+                    "avg_px": None, "err": msg, "reason": msg,
+                    "unresolved": False}
         if err is not None or (getattr(resp, "code", 200) or 200) != 200:
             if fut is not None:
                 self.orders_feed.unwatch(coi)
@@ -304,21 +308,28 @@ class LighterVenue:
                 f"tx rejected code={resp.code} msg={getattr(resp, 'message', None)}"
             if "rate limit" in msg.lower():
                 msg = "RATE_LIMITED: " + msg
-            return {"status": "send-failed", "filled_base": 0.0, "avg_px": None,
-                    "err": msg, "unresolved": False}
+            return {"status": "send-failed", "filled_base": 0.0,
+                    "avg_px": None, "err": msg, "reason": msg,
+                    "unresolved": False}
         if fut is None:
             return {"status": "sent-unconfirmed", "filled_base": 0.0,
-                    "avg_px": None, "err": None, "unresolved": True}
+                    "avg_px": None, "err": None,
+                    "reason": "no_account_orders_feed", "unresolved": True}
         try:
             info = await asyncio.wait_for(fut, timeout=self.settle_timeout)
             return {"status": info["status"], "filled_base": info["filled_base"],
-                    "avg_px": info.get("avg_px"), "err": None, "unresolved": False}
+                    "avg_px": info.get("avg_px"), "err": None,
+                    "reason": info.get("reason") or (
+                        "" if info["status"].lower() == "filled"
+                        else info["status"]),
+                    "unresolved": False}
         except asyncio.TimeoutError:
             self.orders_feed.unwatch(coi)
             log.warning("[%s] no settle confirmation for coi %d in %.1fs",
                         self.name, coi, self.settle_timeout)
-            return {"status": "timeout", "filled_base": 0.0, "avg_px": None,
-                    "err": None, "unresolved": True}
+            return {"status": "timeout", "filled_base": 0.0,
+                    "avg_px": None, "err": None,
+                    "reason": "settle_timeout", "unresolved": True}
 
     # -------------------------------------------------------------- accounts
 

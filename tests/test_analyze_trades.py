@@ -21,7 +21,10 @@ def _trade_row(**overrides):
         "symbol": "SNDK",
         "hedge": "lighter-rh",
         "execution_ms": "100.000",
+        "buy_settle_ms": "80.000",
+        "sell_settle_ms": "20.000",
         "leg_settle_gap_ms": "20.000",
+        "first_settled_leg": "sell",
         "direction": "sell_entropy",
         "buy_venue": "RH",
         "sell_venue": "ENTROPY",
@@ -32,6 +35,9 @@ def _trade_row(**overrides):
         "sell_bbo_qty": "2.0",
         "buy_quote_age_ms": "20.0",
         "sell_quote_age_ms": "30.0",
+        "entropy_book_server_age_ms": "200.0",
+        "entropy_update_gap_ms": "500.0",
+        "hedge_update_gap_ms": "300.0",
         "buy_limit": "100.0",
         "sell_limit": "110.0",
         "buy_protect_limit": "100.5",
@@ -51,6 +57,8 @@ def _trade_row(**overrides):
         "residual_qty": "0.0",
         "buy_status": "filled",
         "sell_status": "filled",
+        "buy_reason": "",
+        "sell_reason": "",
         "unresolved": "0",
         "ok": "1",
         "error": "",
@@ -110,6 +118,11 @@ def test_summarize_trades_reports_fills_edge_slippage_and_hedging():
                 hedge_status="filled",
                 hedge_fill="1.0",
                 hedge_duration_ms="50.0",
+                buy_settle_ms="70.0",
+                sell_settle_ms="30.0",
+                entropy_book_server_age_ms="250.0",
+                entropy_update_gap_ms="550.0",
+                hedge_update_gap_ms="350.0",
                 leg_settle_gap_ms="40.0",
                 fill_edge_usd="3.0",
             ))
@@ -144,6 +157,15 @@ def test_summarize_trades_reports_fills_edge_slippage_and_hedging():
     assert summary["leg_settle_gap_ms_mean"] == pytest.approx(30.0)
     assert summary["leg_settle_gap_ms_p50"] == pytest.approx(30.0)
     assert summary["leg_settle_gap_ms_p90"] == pytest.approx(38.0)
+    assert summary["buy_settle_ms_p50"] == pytest.approx(75.0)
+    assert summary["buy_settle_ms_p90"] == pytest.approx(79.0)
+    assert summary["sell_settle_ms_p50"] == pytest.approx(25.0)
+    assert summary["sell_settle_ms_p90"] == pytest.approx(29.0)
+    assert summary["entropy_book_server_age_ms_p50"] == pytest.approx(225.0)
+    assert summary["entropy_book_server_age_ms_p90"] == pytest.approx(245.0)
+    assert summary["entropy_update_gap_ms_p50"] == pytest.approx(525.0)
+    assert summary["hedge_update_gap_ms_p50"] == pytest.approx(325.0)
+    assert summary["first_settled_leg_counts"] == {"sell": 2}
 
 
 def test_signal_groups_keep_direction_and_premium_distance_separate():
@@ -176,6 +198,8 @@ def test_main_prints_trade_report_and_skipped_count(tmp_path, monkeypatch,
     assert "trade summary" in out
     assert "execution quality" in out
     assert "leg settle gap" in out
+    assert "leg settle p50/p90" in out
+    assert "entropy server age" in out
     assert "hedge" in out
     assert "signal buckets" in out
     assert "skipped invalid rows: 1" in out

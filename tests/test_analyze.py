@@ -51,7 +51,8 @@ def _write_minute_csv(path, missing_index=None):
             writer.writerow([
                 "SNDK", "lighter-rh", ts, "2023-11-14T22:13:20Z",
                 100, 100.1, 1, 1, 100, 100.1, 1, 1,
-                0, 1, -1, 0, 0, 0, 0, 1, 0, 1, 60,
+                0, 1, -1, 0, 0, 0, 0, 1, 0, 1,
+                0, 0, 0, 0, 0, 0, 0, 60,
             ])
 
 

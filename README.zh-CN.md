@@ -160,6 +160,9 @@ python3 main.py --symbol SNDK --hedge lighter-rh
 | `premium_open/high/low/close/mean/std_bps` | Entropy 相对对冲腿的中间价溢价 |
 | `sell_edge_mean/max_bps` | 卖出 Entropy 方向的可成交溢价（Entropy 买一 / 对冲腿卖一 − 1） |
 | `buy_edge_mean/max_bps` | 买入 Entropy 方向的可成交溢价（对冲腿买一 / Entropy 卖一 − 1） |
+| `entropy_update_count`, `hedge_update_count` | 该分钟观察到的盘口更新次数 |
+| `*_gap_p50/p95_ms` | 两个 feed 的盘口更新间隔 p50/p95 |
+| `entropy_age_p95_ms` | 相对 Hyperliquid 盘口 server timestamp 的本地接收延迟 p95 |
 | `samples` | 该分钟约 60 秒中两边盘口同时有效的秒数 |
 
 采集的 edge 为费前口径；分析工具在统计触发频率前会先扣除 `--fees-bps`
@@ -193,6 +196,10 @@ python3 main.py --symbol SNDK --hedge lighter-rh
 每次启动程序还会把本次实际生效的策略参数追加到
 `logs/engine/runs-SYMBOL-HEDGE.csv`。成交 CSV 会写入对应的
 `run_id`，因此可以在不重复保存完整配置的情况下比较不同参数运行结果。
+实盘成交列还会记录两腿各自的完成耗时、先完成的腿、信号当下的报价/feed
+年龄，以及交易所原生取消或拒绝原因。每次实盘启动也会记录主机区域、行情／
+下单传输模式和 `code_version`；部署到没有 Git checkout 的环境时，设置
+`ENTROPY_ARB_CODE_VERSION` 即可标记版本。
 
 ## 密钥配置（`.env`，仅实盘需要）
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 import time
+from collections import deque
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
@@ -16,12 +17,20 @@ Level = Tuple[float, float]
 
 
 class OrderBook:
+    _TELEMETRY_MAX_SAMPLES = 10_000
+
     def __init__(self) -> None:
         self.bids: Dict[float, float] = {}
         self.asks: Dict[float, float] = {}
         self.ready = False
         self.last_update_ts = 0.0
         self.alive_ts = 0.0
+        self.last_update_gap_ms: Optional[float] = None
+        self.last_server_ts_ms: Optional[float] = None
+        self.last_server_age_ms: Optional[float] = None
+        self._feed_update_count = 0
+        self._feed_gap_ms = deque(maxlen=self._TELEMETRY_MAX_SAMPLES)
+        self._feed_age_ms = deque(maxlen=self._TELEMETRY_MAX_SAMPLES)
 
     def touch(self) -> None:
         self.alive_ts = time.time()
@@ -30,6 +39,63 @@ class OrderBook:
         self.bids.clear()
         self.asks.clear()
         self.ready = False
+
+    def _record_book_update(self, server_ts_ms: Optional[float] = None) -> None:
+        """Record compact in-memory feed telemetry for the current window."""
+        now = time.time()
+        if self.last_update_ts:
+            gap_ms = max(0.0, now - self.last_update_ts) * 1000.0
+            self.last_update_gap_ms = gap_ms
+            self._feed_gap_ms.append(gap_ms)
+        self.last_update_ts = now
+        self.alive_ts = now
+        self._feed_update_count += 1
+
+        self.last_server_ts_ms = None
+        self.last_server_age_ms = None
+        if server_ts_ms is not None:
+            try:
+                server_ts = float(server_ts_ms)
+            except (TypeError, ValueError):
+                server_ts = None
+            if server_ts is not None:
+                self.last_server_ts_ms = server_ts
+                self.last_server_age_ms = max(0.0, now * 1000.0 - server_ts)
+                self._feed_age_ms.append(self.last_server_age_ms)
+
+    @staticmethod
+    def _percentile(values, q: float) -> Optional[float]:
+        ordered = sorted(values)
+        if not ordered:
+            return None
+        position = (len(ordered) - 1) * q
+        lower, upper = math.floor(position), math.ceil(position)
+        if lower == upper:
+            return ordered[lower]
+        return (ordered[lower] * (upper - position)
+                + ordered[upper] * (position - lower))
+
+    def drain_feed_stats(self) -> dict:
+        """Return and reset compact feed statistics since the last drain."""
+        gaps = list(self._feed_gap_ms)
+        ages = list(self._feed_age_ms)
+        stats = {
+            "update_count": self._feed_update_count,
+            "gap_p50_ms": self._percentile(gaps, 0.50),
+            "gap_p95_ms": self._percentile(gaps, 0.95),
+            "age_p95_ms": self._percentile(ages, 0.95),
+        }
+        self._feed_update_count = 0
+        self._feed_gap_ms.clear()
+        self._feed_age_ms.clear()
+        return stats
+
+    def server_age_ms(self, now: Optional[float] = None) -> Optional[float]:
+        """Return local signal time minus the latest exchange timestamp."""
+        if self.last_server_ts_ms is None:
+            return None
+        now = time.time() if now is None else now
+        return max(0.0, now * 1000.0 - self.last_server_ts_ms)
 
     # ---- zkLighter snapshot + diff ----
     def apply_lighter(self, ob: dict, snapshot: bool) -> None:
@@ -44,18 +110,17 @@ class OrderBook:
                 else:
                     side[px] = sz
         self.ready = True
-        self.last_update_ts = time.time()
-        self.touch()
+        self._record_book_update()
 
     # ---- Hyperliquid full snapshot ----
-    def apply_hl(self, levels: list) -> None:
+    def apply_hl(self, levels: list,
+                 server_ts_ms: Optional[float] = None) -> None:
         self.bids = {float(l["px"]): float(l["sz"])
                      for l in levels[0] if float(l["sz"]) > 0}
         self.asks = {float(l["px"]): float(l["sz"])
                      for l in levels[1] if float(l["sz"]) > 0}
         self.ready = True
-        self.last_update_ts = time.time()
-        self.touch()
+        self._record_book_update(server_ts_ms)
 
     def sorted_bids(self) -> List[Level]:
         return sorted(self.bids.items(), key=lambda kv: -kv[0])

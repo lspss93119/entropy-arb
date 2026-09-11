@@ -9,7 +9,7 @@ official `hyperliquid-python-sdk` signing helpers + eth_account —
 IOC limit orders settle synchronously in the /exchange response; unknown
 outcomes (timeout/5xx) fall back to orderStatus-by-cloid polling inside
 send_taker(), so the engine sees the same unified result shape as the Lighter
-venue: {status, filled_base, avg_px, err, unresolved}.
+venue: {status, filled_base, avg_px, err, reason, unresolved}.
 """
 from __future__ import annotations
 
@@ -197,13 +197,16 @@ class HLVenue:
             payload = {"action": action, "nonce": nonce, "signature": sig,
                        "vaultAddress": None, "expiresAfter": None}
         except Exception as e:
-            return {"status": "send-failed", "filled_base": 0.0, "avg_px": None,
-                    "err": f"signing failed: {e!r}", "unresolved": False}
+            reason = f"signing failed: {e!r}"
+            return {"status": "send-failed", "filled_base": 0.0,
+                    "avg_px": None, "err": reason, "reason": reason,
+                    "unresolved": False}
 
         body, err, unresolved = await self._post_exchange(payload)
         if err is not None:
-            return {"status": "send-failed", "filled_base": 0.0, "avg_px": None,
-                    "err": err, "unresolved": False}
+            return {"status": "send-failed", "filled_base": 0.0,
+                    "avg_px": None, "err": err, "reason": err,
+                    "unresolved": False}
         if not unresolved:
             res = self._parse(body)
             if not res.get("unresolved"):
@@ -228,10 +231,12 @@ class HLVenue:
                     filled = 0.0
                 if status != "open":
                     return {"status": status, "filled_base": filled,
-                            "avg_px": None, "err": None, "unresolved": False}
+                            "avg_px": None, "err": None,
+                            "reason": "" if status == "filled" else status,
+                            "unresolved": False}
             await asyncio.sleep(0.5)
         return {"status": "timeout", "filled_base": 0.0, "avg_px": None,
-                "err": None, "unresolved": True}
+                "err": None, "reason": "settle_timeout", "unresolved": True}
 
     async def _post_exchange(self, payload: dict):
         try:
@@ -256,7 +261,7 @@ class HLVenue:
             if "rate limit" in low or "too many" in low:
                 msg = "RATE_LIMITED: " + msg
             return {"status": "send-failed", "filled_base": 0.0, "avg_px": None,
-                    "err": msg, "unresolved": False}
+                    "err": msg, "reason": msg, "unresolved": False}
         if body.get("status") == "err":
             return fail(str(body.get("response")))
         if body.get("status") != "ok":
@@ -270,16 +275,16 @@ class HLVenue:
             return {"status": "filled",
                     "filled_base": float(f.get("totalSz") or 0.0),
                     "avg_px": float(f["avgPx"]) if f.get("avgPx") else None,
-                    "err": None, "unresolved": False}
+                    "err": None, "reason": "", "unresolved": False}
         if "error" in st:
             msg = str(st["error"])
             if "could not immediately match" in msg.lower():
                 return {"status": "canceled", "filled_base": 0.0, "avg_px": None,
-                        "err": None, "unresolved": False}
+                        "err": None, "reason": msg, "unresolved": False}
             return fail(msg)
         if "resting" in st:
             return {"status": "resting?", "filled_base": 0.0, "avg_px": None,
-                    "err": None, "unresolved": True}
+                    "err": None, "reason": "resting", "unresolved": True}
         return fail(f"unknown status: {str(st)[:150]}")
 
     # -------------------------------------------------------------- accounts

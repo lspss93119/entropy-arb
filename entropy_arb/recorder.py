@@ -43,14 +43,20 @@ HEADER = ["symbol", "hedge", "minute_ts", "time_utc",
           "premium_open_bps", "premium_high_bps", "premium_low_bps",
           "premium_close_bps", "premium_mean_bps", "premium_std_bps",
           "sell_edge_mean_bps", "sell_edge_max_bps",
-          "buy_edge_mean_bps", "buy_edge_max_bps", "samples"]
+          "buy_edge_mean_bps", "buy_edge_max_bps",
+          "entropy_update_count", "entropy_gap_p50_ms",
+          "entropy_gap_p95_ms", "entropy_age_p95_ms",
+          "hedge_update_count", "hedge_gap_p50_ms", "hedge_gap_p95_ms",
+          "samples"]
 
 
 class _MinuteAgg:
     __slots__ = ("minute", "n", "p_open", "p_high", "p_low", "p_close",
                  "p_sum", "p_sumsq", "s_sum", "s_max", "b_sum", "b_max",
                  "e_bid", "e_ask", "e_bid_qty", "e_ask_qty",
-                 "h_bid", "h_ask", "h_bid_qty", "h_ask_qty")
+                 "h_bid", "h_ask", "h_bid_qty", "h_ask_qty",
+                 "e_update_count", "e_gap_p50", "e_gap_p95", "e_age_p95",
+                 "h_update_count", "h_gap_p50", "h_gap_p95")
 
     def __init__(self, minute: int) -> None:
         self.minute = minute
@@ -64,6 +70,9 @@ class _MinuteAgg:
         self.e_bid = self.e_ask = self.h_bid = self.h_ask = 0.0
         self.e_bid_qty = self.e_ask_qty = 0.0
         self.h_bid_qty = self.h_ask_qty = 0.0
+        self.e_update_count = self.h_update_count = 0
+        self.e_gap_p50 = self.e_gap_p95 = self.e_age_p95 = None
+        self.h_gap_p50 = self.h_gap_p95 = None
 
     def add(self, e_bid: float, e_ask: float, e_bid_qty: float,
             e_ask_qty: float, h_bid: float, h_ask: float,
@@ -90,6 +99,19 @@ class _MinuteAgg:
         self.h_bid, self.h_ask = h_bid, h_ask
         self.h_bid_qty, self.h_ask_qty = h_bid_qty, h_ask_qty
 
+    @staticmethod
+    def _optional(value) -> str:
+        return "" if value is None else f"{float(value):.3f}"
+
+    def set_feed_stats(self, entropy: dict, hedge: dict) -> None:
+        self.e_update_count = int(entropy.get("update_count") or 0)
+        self.e_gap_p50 = entropy.get("gap_p50_ms")
+        self.e_gap_p95 = entropy.get("gap_p95_ms")
+        self.e_age_p95 = entropy.get("age_p95_ms")
+        self.h_update_count = int(hedge.get("update_count") or 0)
+        self.h_gap_p50 = hedge.get("gap_p50_ms")
+        self.h_gap_p95 = hedge.get("gap_p95_ms")
+
     def row(self, symbol: str, hedge: str) -> list:
         mean = self.p_sum / self.n
         var = max(self.p_sumsq / self.n - mean * mean, 0.0)
@@ -106,6 +128,10 @@ class _MinuteAgg:
                 f"{mean:.3f}", f"{math.sqrt(var):.3f}",
                 f"{self.s_sum / self.n:.3f}", f"{self.s_max:.3f}",
                 f"{self.b_sum / self.n:.3f}", f"{self.b_max:.3f}",
+                self.e_update_count, self._optional(self.e_gap_p50),
+                self._optional(self.e_gap_p95), self._optional(self.e_age_p95),
+                self.h_update_count, self._optional(self.h_gap_p50),
+                self._optional(self.h_gap_p95),
                 self.n]
 
 
@@ -124,6 +150,11 @@ class MinuteRecorder:
         self._agg: Optional[_MinuteAgg] = None
         self._fh = None
         self._writer = None
+        self._stats_minute: Optional[int] = None
+        # Do not attribute feed updates that happened before this recorder
+        # started to its first minute.
+        self.entropy_book.drain_feed_stats()
+        self.hedge_book.drain_feed_stats()
 
     def _open(self) -> None:
         d = os.path.dirname(self.path)
@@ -155,10 +186,26 @@ class MinuteRecorder:
         self.rows_written += 1
         self._agg = None
 
+    def _drain_feed_stats(self) -> tuple[dict, dict]:
+        return (self.entropy_book.drain_feed_stats(),
+                self.hedge_book.drain_feed_stats())
+
+    def _roll_feed_stats(self, minute: int) -> None:
+        if self._stats_minute is None:
+            self._stats_minute = minute
+            return
+        if self._stats_minute == minute:
+            return
+        entropy_stats, hedge_stats = self._drain_feed_stats()
+        if self._agg is not None:
+            self._agg.set_feed_stats(entropy_stats, hedge_stats)
+        self._stats_minute = minute
+
     def sample(self, now: Optional[float] = None) -> None:
         """Take one sample; call ~1/sec. Rolls the minute over as needed."""
         now = time.time() if now is None else now
         minute = int(now // 60)
+        self._roll_feed_stats(minute)
         if self._agg is not None and self._agg.minute != minute:
             self._flush_agg()
         if not (self.entropy_book.is_fresh(self.staleness_sec)
@@ -179,6 +226,9 @@ class MinuteRecorder:
 
     def close(self) -> None:
         """Flush the partial minute and close the file (call on shutdown)."""
+        entropy_stats, hedge_stats = self._drain_feed_stats()
+        if self._agg is not None:
+            self._agg.set_feed_stats(entropy_stats, hedge_stats)
         self._flush_agg()
         if self._fh is not None:
             self._fh.close()

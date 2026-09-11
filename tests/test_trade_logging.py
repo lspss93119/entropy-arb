@@ -130,4 +130,9 @@ thresholds:
     assert float(row["remaining_net_qty"]) == 0.0
     assert float(row["execution_ms"]) >= 0.0
     assert float(row["leg_settle_gap_ms"]) >= 20.0
+    assert float(row["buy_settle_ms"]) >= 20.0
+    assert float(row["sell_settle_ms"]) >= 0.0
+    assert row["first_settled_leg"] == "sell"
+    assert row["buy_reason"] == ""
+    assert row["sell_reason"] == ""
     assert float(row["hedge_duration_ms"]) >= 0.0

@@ -13,7 +13,8 @@ from entropy_arb.engine import Engine, RUN_CONFIG_HEADER  # noqa: E402
 NO_ENV = "/tmp/entropy-arb-no-such.env"
 
 
-def test_run_config_snapshot_records_effective_strategy_parameters(tmp_path):
+def test_run_config_snapshot_records_effective_strategy_parameters(tmp_path,
+                                                                  monkeypatch):
     config_file = tmp_path / "config.yaml"
     config_file.write_text("""
 thresholds:
@@ -34,6 +35,8 @@ inventory:
     cfg = load_config(str(config_file), NO_ENV,
                       symbol="SNDK", hedge_venue="lighter-rh")
     cfg.log_file = str(tmp_path / "logs" / "engine.log")
+    monkeypatch.setenv("AWS_REGION", "ap-northeast-1")
+    monkeypatch.setenv("ENTROPY_ARB_CODE_VERSION", "a1fbb32")
 
     eng = Engine(cfg, record_only=False)
     eng._write_run_config()
@@ -58,6 +61,12 @@ inventory:
     assert float(row["take_fraction"]) == 0.25
     assert float(row["max_order_notional_usd"]) == 50.0
     assert float(row["inventory_scale_bps"]) == 10.0
+    assert row["host_region"] == "ap-northeast-1"
+    assert row["market_data_mode"] == (
+        "entropy:hl_l2book_fast|hedge:lighter_order_book")
+    assert row["entropy_order_transport"] == "http_exchange"
+    assert row["hedge_order_transport"] == "lighter_sdk"
+    assert row["code_version"] == "a1fbb32"
 
 
 def test_engine_run_writes_run_config_before_runtime(tmp_path):
