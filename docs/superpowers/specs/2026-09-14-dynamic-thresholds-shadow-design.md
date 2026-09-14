@@ -53,7 +53,8 @@ logs/engine/dynamic-thresholds-<symbol>-<hedge>.csv
 提供獨立、可測試的 controller／estimator：
 
 - 接收 completed minute row。
-- 維護最近 12 小時的有效資料。
+- 只在記憶體中維護最近 12 小時的精簡 rolling buffer，最多約 720 個 minute slots。
+- 每個 buffer entry 只保留 `minute_ts`、`samples`、`premium_close_bps`、`sell_edge_max_bps` 與 `buy_edge_max_bps`。
 - 依 15 分鐘更新邊界計算 snapshot。
 - 輸出 `warming_up`、`valid` 或 `frozen` 狀態。
 - 將結果寫入交易對專用的 engine log CSV。
@@ -160,6 +161,8 @@ reason
 ```
 
 每 15 分鐘最多一列。只保存結果與品質資訊，不保存完整 rolling window。更新邊界應避免同一個窗口重複寫入；重啟後可從既有 minute CSV seed，但不應重寫歷史 snapshot。
+
+Calculator 的 rolling buffer 是暫時性的記憶體狀態，不是第二份 recorder 資料庫。超過 12 小時的 entry 自動淘汰；完整分鐘資料仍只保存在 recorder CSV。以目前市場數量估算，buffer 只占用數 MB 以內，snapshot 每天新增的磁碟資料通常不到 1 MB。
 
 ## 測試與驗收
 
