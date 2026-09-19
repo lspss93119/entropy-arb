@@ -34,11 +34,13 @@ class StubVenue:
         self.min_base = 0.1
         self.min_quote = 10.0
         self.last_traded_ts = 0.0
+        self.calls = []
 
     def px_round(self, px, round_up):
         return px
 
     async def send_taker(self, **_kwargs):
+        self.calls.append(dict(_kwargs))
         if self.delay:
             await asyncio.sleep(self.delay)
         return self._responses.pop(0)
@@ -128,6 +130,11 @@ thresholds:
     assert float(row["hedge_avg_px"]) == 99.9
     assert float(row["hedge_notional"]) == pytest.approx(24.975)
     assert float(row["remaining_net_qty"]) == 0.0
+    assert row["strategy_mode"] == "fixed"
+    assert row["reduce_only"] == "0"
+    assert row["rolling_signal_reason"] == ""
+    assert buy.calls[0]["reduce_only"] is False
+    assert sell.calls[0]["reduce_only"] is False
     assert float(row["execution_ms"]) >= 0.0
     assert float(row["leg_settle_gap_ms"]) >= 20.0
     assert float(row["buy_settle_ms"]) >= 20.0
@@ -136,3 +143,79 @@ thresholds:
     assert row["buy_reason"] == ""
     assert row["sell_reason"] == ""
     assert float(row["hedge_duration_ms"]) >= 0.0
+
+
+def test_rolling_trade_csv_records_signal_context(tmp_path):
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("""
+thresholds:
+  midline_bps: 0.0
+  upper_bps: 4.0
+  lower_bps: 4.0
+strategy:
+  mode: rolling
+rolling:
+  window_hours: 12
+  update_minutes: 15
+  entry_z: 1.5
+  exit_z: 0.5
+  min_reversion_bps: 5
+  max_spread_bps: 10
+  min_coverage_pct: 80
+  timeout_hours: 12
+  seed_from_csv: false
+""")
+    cfg = load_config(str(config_file), NO_ENV,
+                      symbol="SNDK", hedge_venue="lighter-rh")
+    cfg.trades_csv = str(tmp_path / "trades.csv")
+
+    eng = Engine(cfg)
+    buy = StubVenue("entropy", "ENTROPY", [{
+        "status": "filled", "filled_base": 0.1, "avg_px": 100.0,
+        "err": None, "unresolved": False,
+    }])
+    sell = StubVenue("hedge", "RH", [{
+        "status": "filled", "filled_base": 0.1, "avg_px": 101.0,
+        "err": None, "unresolved": False,
+    }])
+    buy.book = _book(99.9, 1.0, 100.0, 1.0)
+    sell.book = _book(101.0, 1.0, 101.1, 1.0)
+    eng.entropy = buy
+    eng.hedge = sell
+    eng.venues = {"entropy": buy, "hedge": sell}
+    eng._step = 0.01
+    eng._min_base = 0.1
+    eng._min_notional = 10.0
+    eng._rolling_signal_meta = {
+        "reason": "timeout",
+        "z": None,
+        "mean_bps": None,
+        "std_bps": None,
+        "coverage_pct": None,
+        "snapshot_ts": None,
+        "direction": "buy_entropy",
+    }
+
+    plan = ArbPlan(
+        qty=0.1, buy_limit=100.0, sell_limit=101.0,
+        buy_notional=10.0, sell_notional=10.1,
+        q_max=0.1, q_max_notional=10.0,
+        top_premium_bps=100.0, marginal_premium_bps=100.0,
+        buy_fee=0.0, sell_fee=0.0, reduce_only=True,
+    )
+
+    async def run_execution():
+        await eng._vlock(buy.key).acquire()
+        await eng._vlock(sell.key).acquire()
+        await eng._execute_locked(buy, sell, plan)
+
+    asyncio.run(run_execution())
+
+    import csv
+    with open(cfg.trades_csv, newline="") as fh:
+        row = next(csv.DictReader(fh))
+
+    assert row["strategy_mode"] == "rolling"
+    assert row["reduce_only"] == "1"
+    assert row["rolling_signal_reason"] == "timeout"
+    assert all(call["reduce_only"] is True for call in buy.calls + sell.calls)

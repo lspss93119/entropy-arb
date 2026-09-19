@@ -115,10 +115,10 @@ class OrderBook:
     # ---- Hyperliquid full snapshot ----
     def apply_hl(self, levels: list,
                  server_ts_ms: Optional[float] = None) -> None:
-        self.bids = {float(l["px"]): float(l["sz"])
-                     for l in levels[0] if float(l["sz"]) > 0}
-        self.asks = {float(l["px"]): float(l["sz"])
-                     for l in levels[1] if float(l["sz"]) > 0}
+        self.bids = {float(level["px"]): float(level["sz"])
+                     for level in levels[0] if float(level["sz"]) > 0}
+        self.asks = {float(level["px"]): float(level["sz"])
+                     for level in levels[1] if float(level["sz"]) > 0}
         self.ready = True
         self._record_book_update(server_ts_ms)
 

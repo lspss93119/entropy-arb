@@ -49,6 +49,7 @@ inventory:
 
     assert row["run_id"] == eng.run_id
     assert row["mode"] == "live"
+    assert row["strategy_mode"] == "fixed"
     assert row["symbol"] == "SNDK"
     assert row["hedge"] == "lighter-rh"
     assert float(row["cooldown_sec"]) == 1.0
@@ -67,6 +68,49 @@ inventory:
     assert row["entropy_order_transport"] == "http_exchange"
     assert row["hedge_order_transport"] == "lighter_sdk"
     assert row["code_version"] == "a1fbb32"
+
+
+def test_run_config_snapshot_records_rolling_parameters(tmp_path):
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("""
+thresholds:
+  midline_bps: 0.0
+  upper_bps: 4.0
+  lower_bps: 4.0
+strategy:
+  mode: rolling
+rolling:
+  window_hours: 12
+  update_minutes: 15
+  entry_z: 1.5
+  exit_z: 0.5
+  min_reversion_bps: 5
+  max_spread_bps: 10
+  min_coverage_pct: 80
+  timeout_hours: 12
+  seed_from_csv: true
+""")
+    cfg = load_config(str(config_file), NO_ENV,
+                      symbol="ANTH", hedge_venue="lighter-rh")
+    cfg.log_file = str(tmp_path / "logs" / "engine.log")
+
+    eng = Engine(cfg, record_only=False)
+    eng._write_run_config()
+
+    path = tmp_path / "logs" / "runs-ANTH-lighter-rh.csv"
+    with open(path, newline="") as fh:
+        row = next(csv.DictReader(fh))
+
+    assert row["strategy_mode"] == "rolling"
+    assert float(row["rolling_window_hours"]) == 12.0
+    assert int(row["rolling_update_minutes"]) == 15
+    assert float(row["rolling_entry_z"]) == 1.5
+    assert float(row["rolling_exit_z"]) == 0.5
+    assert float(row["rolling_min_reversion_bps"]) == 5.0
+    assert float(row["rolling_max_spread_bps"]) == 10.0
+    assert float(row["rolling_min_coverage_pct"]) == 80.0
+    assert float(row["rolling_timeout_hours"]) == 12.0
+    assert row["rolling_seed_from_csv"] == "1"
 
 
 def test_engine_run_writes_run_config_before_runtime(tmp_path):
