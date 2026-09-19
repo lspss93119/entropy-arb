@@ -31,7 +31,7 @@ import math
 import os
 import time
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Callable, Optional
 
 from .book import OrderBook
 
@@ -138,7 +138,8 @@ class _MinuteAgg:
 class MinuteRecorder:
     def __init__(self, path: str, entropy_book: OrderBook, hedge_book: OrderBook,
                  staleness_sec: float, interval_sec: float = 1.0,
-                 symbol: str = "", hedge: str = "") -> None:
+                 symbol: str = "", hedge: str = "",
+                 on_minute: Optional[Callable[[dict], None]] = None) -> None:
         self.path = path
         self.entropy_book = entropy_book
         self.hedge_book = hedge_book
@@ -146,6 +147,7 @@ class MinuteRecorder:
         self.interval_sec = interval_sec
         self.symbol = symbol
         self.hedge = hedge
+        self.on_minute = on_minute
         self.rows_written = 0
         self._agg: Optional[_MinuteAgg] = None
         self._fh = None
@@ -181,10 +183,16 @@ class MinuteRecorder:
             return
         if self._writer is None:
             self._open()
-        self._writer.writerow(self._agg.row(self.symbol, self.hedge))
+        row = self._agg.row(self.symbol, self.hedge)
+        self._writer.writerow(row)
         self._fh.flush()
         self.rows_written += 1
         self._agg = None
+        if self.on_minute is not None:
+            try:
+                self.on_minute(dict(zip(HEADER, row)))
+            except Exception:
+                log.exception("minute callback failed")
 
     def _drain_feed_stats(self) -> tuple[dict, dict]:
         return (self.entropy_book.drain_feed_stats(),

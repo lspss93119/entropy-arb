@@ -82,6 +82,30 @@ def test_append_keeps_single_header():
     assert lines[0].startswith("symbol,hedge,minute_ts,")
 
 
+def test_completed_rows_are_sent_to_callback_in_write_order():
+    e_book, h_book = OrderBook(), OrderBook()
+    path = os.path.join(tempfile.mkdtemp(), "minutes.csv")
+    callbacks = []
+    set_book(e_book, 100.0, 100.02)
+    set_book(h_book, 100.0, 100.02)
+    rec = MinuteRecorder(path, e_book, h_book, staleness_sec=1e9,
+                         on_minute=callbacks.append)
+
+    t0 = 1_700_000_000.0
+    rec.sample(t0)
+    set_book(e_book, 100.1, 100.12)
+    rec.sample(t0 + 60)
+    rec.close()
+
+    with open(path, newline="") as fh:
+        written = list(csv.DictReader(fh))
+    assert [str(row["minute_ts"]) for row in callbacks] == [
+        row["minute_ts"] for row in written]
+    assert [row["premium_close_bps"] for row in callbacks] == [
+        row["premium_close_bps"] for row in written]
+    assert all(set(row) == set(HEADER) for row in callbacks)
+
+
 def test_records_market_identity_and_top_sizes():
     e_book, h_book = OrderBook(), OrderBook()
     path = os.path.join(tempfile.mkdtemp(), "minutes.csv")
