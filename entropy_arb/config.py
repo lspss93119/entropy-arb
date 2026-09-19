@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+import math
 from typing import Any, Dict, Optional
 
 import yaml
@@ -105,6 +106,46 @@ class HLCreds:
         return bool(self.private_key)
 
 
+@dataclass(frozen=True)
+class RollingConf:
+    """Validated parameters for the walk-forward rolling signal."""
+
+    window_hours: float = 12.0
+    update_minutes: int = 15
+    entry_z: float = 1.5
+    exit_z: float = 0.5
+    min_reversion_bps: float = 5.0
+    max_spread_bps: float = 10.0
+    min_coverage_pct: float = 80.0
+    timeout_hours: float = 12.0
+    seed_from_csv: bool = True
+
+    def __post_init__(self) -> None:
+        numeric = (
+            "window_hours", "entry_z", "exit_z", "min_reversion_bps",
+            "max_spread_bps", "min_coverage_pct", "timeout_hours",
+        )
+        for name in numeric:
+            if not math.isfinite(float(getattr(self, name))):
+                raise ValueError(f"rolling.{name} must be finite")
+        if self.window_hours <= 0:
+            raise ValueError("rolling.window_hours must be > 0")
+        if self.update_minutes <= 0:
+            raise ValueError("rolling.update_minutes must be > 0")
+        if self.entry_z <= 0:
+            raise ValueError("rolling.entry_z must be > 0")
+        if not 0 <= self.exit_z < self.entry_z:
+            raise ValueError("rolling.exit_z must be < rolling.entry_z and >= 0")
+        if self.min_reversion_bps < 0:
+            raise ValueError("rolling.min_reversion_bps must be >= 0")
+        if self.max_spread_bps < 0:
+            raise ValueError("rolling.max_spread_bps must be >= 0")
+        if not 0 < self.min_coverage_pct <= 100:
+            raise ValueError("rolling.min_coverage_pct must be in (0, 100]")
+        if self.timeout_hours <= 0:
+            raise ValueError("rolling.timeout_hours must be > 0")
+
+
 @dataclass
 class VenueConf:
     key: str                  # "entropy" | "hedge"
@@ -128,6 +169,8 @@ class Config:
     hedge_venue: str
     entropy: VenueConf
     hedge: VenueConf
+    strategy_mode: str
+    rolling: RollingConf
     # thresholds (the whole signal)
     midline_bps: float
     upper_bps: float
@@ -180,6 +223,20 @@ class Config:
 
 # Schema: nested dict of key -> type (or nested dict). Unknown keys are errors.
 _SCHEMA: Dict[str, Any] = {
+    "strategy": {
+        "mode": str,
+    },
+    "rolling": {
+        "window_hours": float,
+        "update_minutes": int,
+        "entry_z": float,
+        "exit_z": float,
+        "min_reversion_bps": float,
+        "max_spread_bps": float,
+        "min_coverage_pct": float,
+        "timeout_hours": float,
+        "seed_from_csv": bool,
+    },
     "thresholds": {
         "midline_bps": float,
         "upper_bps": float,
@@ -340,6 +397,26 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         raise ConfigError("thresholds.upper_bps and lower_bps must be > 0 "
                           "(the round trip nets upper+lower bps after fees)")
 
+    strategy_mode = str(_get(raw, "strategy", "mode", "fixed")).lower()
+    if strategy_mode not in ("fixed", "rolling"):
+        raise ConfigError("strategy.mode must be 'fixed' or 'rolling'")
+    try:
+        rolling = RollingConf(
+            window_hours=float(_get(raw, "rolling", "window_hours", 12.0)),
+            update_minutes=int(_get(raw, "rolling", "update_minutes", 15)),
+            entry_z=float(_get(raw, "rolling", "entry_z", 1.5)),
+            exit_z=float(_get(raw, "rolling", "exit_z", 0.5)),
+            min_reversion_bps=float(_get(raw, "rolling",
+                                         "min_reversion_bps", 5.0)),
+            max_spread_bps=float(_get(raw, "rolling", "max_spread_bps", 10.0)),
+            min_coverage_pct=float(_get(raw, "rolling",
+                                        "min_coverage_pct", 80.0)),
+            timeout_hours=float(_get(raw, "rolling", "timeout_hours", 12.0)),
+            seed_from_csv=bool(_get(raw, "rolling", "seed_from_csv", True)),
+        )
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(str(exc)) from exc
+
     take_fraction = float(_get(raw, "sizing", "take_fraction", 0.5))
     if not 0.0 < take_fraction <= 1.0:
         raise ConfigError("sizing.take_fraction must be in (0, 1] — taking "
@@ -393,6 +470,8 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         hedge_venue=hedge_venue,
         entropy=entropy,
         hedge=hedge,
+        strategy_mode=strategy_mode,
+        rolling=rolling,
         midline_bps=float(thr["midline_bps"]),
         upper_bps=upper,
         lower_bps=lower,

@@ -58,6 +58,46 @@ def test_minimal_defaults():
     assert cfg.recorder_csv == "logs/record/minutes.csv"
     assert cfg.trades_csv == "logs/trades/trades.csv"
     assert cfg.log_file == "logs/engine/engine.log"
+    assert cfg.strategy_mode == "fixed"
+    assert cfg.rolling.window_hours == 12.0
+    assert cfg.rolling.update_minutes == 15
+
+
+def test_rolling_strategy_config_loads():
+    cfg = load(MINIMAL + """
+strategy:
+  mode: rolling
+rolling:
+  window_hours: 6
+  update_minutes: 5
+  entry_z: 2.0
+  exit_z: 0.25
+  min_reversion_bps: 4.0
+  max_spread_bps: 8.0
+  min_coverage_pct: 90
+  timeout_hours: 3
+  seed_from_csv: false
+""")
+    assert cfg.strategy_mode == "rolling"
+    assert cfg.rolling.window_hours == 6.0
+    assert cfg.rolling.update_minutes == 5
+    assert cfg.rolling.entry_z == 2.0
+    assert cfg.rolling.exit_z == 0.25
+    assert cfg.rolling.min_reversion_bps == 4.0
+    assert cfg.rolling.max_spread_bps == 8.0
+    assert cfg.rolling.min_coverage_pct == 90.0
+    assert cfg.rolling.timeout_hours == 3.0
+    assert cfg.rolling.seed_from_csv is False
+
+
+def test_rolling_config_rejects_invalid_z_order():
+    expect_error(MINIMAL + """
+strategy:
+  mode: rolling
+rolling:
+  entry_z: 1.0
+  exit_z: 1.0
+""", "rolling.exit_z must be < rolling.entry_z")
 
 
 def test_tradexyz_hedge():
