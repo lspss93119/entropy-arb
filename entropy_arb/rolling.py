@@ -134,6 +134,8 @@ class RollingWindow:
                 and hedge_spread_bps is not None
                 and math.isfinite(float(entropy_spread_bps))
                 and math.isfinite(float(hedge_spread_bps))
+                and entropy_spread_bps >= 0.0
+                and hedge_spread_bps >= 0.0
                 and entropy_spread_bps <= max_spread_bps
                 and hedge_spread_bps <= max_spread_bps)
 

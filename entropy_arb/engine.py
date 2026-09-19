@@ -262,6 +262,26 @@ class Engine:
         self._update_evt.set()
         self._reconcile_evt.set()
 
+    def _reset_rolling_arming(self) -> None:
+        self._armed["sell_entropy"] = None
+        self._armed["buy_entropy"] = None
+
+    def _halt_rolling(self, reason: str) -> None:
+        """Stop rolling entries until a human reconciles and restarts."""
+        if self._rolling is None:
+            return
+        self.halted = True
+        self._rolling_signal_meta = {}
+        self._reconcile_evt.set()
+        log.critical("ROLLING HALTED after %s — reconcile positions and "
+                     "restart before trading", reason)
+
+    def _validate_rolling_runtime(self, live: bool) -> None:
+        if live and self._rolling is not None and not self.cfg.recorder_enabled:
+            raise RuntimeError(
+                "rolling strategy requires recorder.enabled=true so live "
+                "signals receive completed minute updates")
+
     # ------------------------------------------------------------- lifecycle
 
     async def run(self) -> None:
@@ -295,6 +315,7 @@ class Engine:
                      seeded, cfg.recorder_csv)
 
         live = not self.record_only
+        self._validate_rolling_runtime(live)
         if live:
             if not cfg.creds_complete:
                 raise RuntimeError(
@@ -397,6 +418,7 @@ class Engine:
         self._rolling_open_direction = None
         self._rolling_open_qty = 0.0
         self._rolling_entry_ts = None
+        self._reset_rolling_arming()
 
     @staticmethod
     def _book_spread_bps(venue) -> Optional[float]:
@@ -559,25 +581,31 @@ class Engine:
         finally:
             self._vlock(buy.key).release()
             self._vlock(sell.key).release()
-        if execution is not None:
-            if execution["unresolved"]:
-                hedge = {
-                    "status": "not_attempted",
-                    "venue": "",
-                    "side": "",
-                    "filled_qty": 0.0,
-                    "avg_px": None,
-                    "notional": None,
-                    "duration_ms": 0.0,
-                    "remaining_net_qty": sum(v.position
-                                              for v in self.venues.values()),
-                    "error": "primary_execution_unresolved",
-                }
-                self._reconcile_evt.set()
-            else:
-                hedge = await self._maybe_hedge()
-            if not execution["unresolved"]:
-                self._update_rolling_position(execution, hedge)
+        if execution is None:
+            self._halt_rolling("execution failed before settlement")
+        elif execution["unresolved"]:
+            hedge = {
+                "status": "not_attempted",
+                "venue": "",
+                "side": "",
+                "filled_qty": 0.0,
+                "avg_px": None,
+                "notional": None,
+                "duration_ms": 0.0,
+                "remaining_net_qty": sum(v.position
+                                          for v in self.venues.values()),
+                "error": "primary_execution_unresolved",
+            }
+            self._reconcile_evt.set()
+            self._halt_rolling("unresolved primary execution")
+            self._log_csv(execution, hedge)
+        else:
+            hedge = await self._maybe_hedge()
+            if hedge.get("status") == "unresolved":
+                self._halt_rolling("unresolved hedge execution")
+            if not execution["ok"]:
+                self._halt_rolling("failed primary execution")
+            self._update_rolling_position(execution, hedge)
             self._log_csv(execution, hedge)
         self._update_evt.set()  # freed venues may have a queued opportunity
 
@@ -692,8 +720,17 @@ class Engine:
             if plan is None:
                 self._skiplog("rolling exit %s unavailable: %s", dkey, reason)
                 return None
+            self._reset_rolling_arming()
             self._rolling_signal_meta = self._rolling_signal_meta_for(signal)
             return buy, sell, plan
+
+        # Do not build a second spread on top of a known residual leg. The
+        # reconcile loop may still be able to flatten a below-minimum or
+        # temporarily unavailable residual position.
+        if any(abs(v.position) > cfg.net_tolerance_base
+               for v in self.venues.values()):
+            self._skiplog("rolling blocked: non-flat residual position")
+            return None
 
         signal = rolling.entry_signal(
             premium, now, entropy_spread, hedge_spread)
@@ -704,6 +741,9 @@ class Engine:
             return None
         buy, sell = self._direction_venues(signal.direction, entropy, hedge)
         dkey = signal.direction
+        for direction in self._armed:
+            if direction != dkey:
+                self._armed[direction] = None
         if (self._vlock(buy.key).locked() or self._vlock(sell.key).locked()
                 or self._venue_limited(buy) or self._venue_limited(sell)
                 or not (self._venue_rate_ok(buy)
@@ -770,6 +810,8 @@ class Engine:
         else:
             log.error("rolling position state received a second entry; "
                       "keeping the original position state")
+        if matched > 0 or (plan.reduce_only and hedge_fill > 0):
+            self._reset_rolling_arming()
         self._rolling_signal_meta = {}
 
     async def _execute(self, buy, sell, plan: ArbPlan) -> Optional[dict]:

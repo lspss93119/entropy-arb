@@ -97,6 +97,12 @@ def test_entry_signal_negative_z_is_buy_entropy():
     assert signal.direction == "buy_entropy"
 
 
+def test_negative_spread_is_invalid():
+    window = _filled_window()
+
+    assert window.entry_signal(5.0, 3600.0, -1.0, 1.0) is None
+
+
 def test_exit_signal_uses_z_band_and_timeout():
     config = RollingConf(window_hours=1, update_minutes=15,
                          min_coverage_pct=80, entry_z=1.5, exit_z=0.5,

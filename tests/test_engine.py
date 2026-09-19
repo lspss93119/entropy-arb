@@ -253,6 +253,32 @@ def test_rolling_start_rejects_nonflat_positions():
         eng._check_rolling_start_flat()
 
 
+def test_rolling_live_requires_recorder():
+    eng = make_engine(mode="rolling")
+    eng.cfg.recorder_enabled = False
+
+    with pytest.raises(RuntimeError, match="recorder.enabled=true"):
+        eng._validate_rolling_runtime(live=True)
+
+
+def test_rolling_blocks_entry_on_residual_position():
+    eng = make_engine(mode="rolling")
+    seed_rolling(eng, __import__("time").time())
+    eng.entropy.position = 0.01
+    eng.entropy.set_book(100.11, 100.13)
+    eng.hedge.set_book(99.99, 100.01)
+
+    assert run_scan(eng) is None
+
+
+def test_rolling_failure_halts_engine():
+    eng = make_engine(mode="rolling")
+
+    eng._halt_rolling("test unresolved fill")
+
+    assert eng.halted is True
+
+
 def test_rolling_partial_exit_keeps_state_until_residual_is_hedged():
     eng = make_engine(mode="rolling")
     eng._rolling_open_direction = "sell_entropy"
