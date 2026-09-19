@@ -81,6 +81,9 @@ may cross a temporarily negative edge to remove risk. An invalid or
 insufficiently covered window blocks new entries rather than falling back to
 the fixed strategy. At live startup, both reconciled venue positions must be
 flat, because the direction of an inherited spread cannot be inferred safely.
+Live rolling mode also requires `recorder.enabled: true`; if an execution is
+failed or unresolved, rolling trading halts and requires authoritative position
+reconciliation plus a manual restart before it can resume.
 
 The existing `thresholds:` block is still required so the same configuration
 file can be switched back to `fixed`. Record-only mode remains unchanged and
