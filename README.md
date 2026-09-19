@@ -65,6 +65,27 @@ money**: if you type `midline_bps: 5` while the true premium sits at 0, the
 bot happily buys entropy at fair value all day. Measure first, then trade —
 that is what the recorder and analyzer are for.
 
+### Optional rolling-window strategy
+
+The fixed-threshold strategy remains the default. To explicitly select the
+walk-forward strategy, set `strategy.mode: rolling` in `config.yaml` and tune
+the `rolling:` block in [config.example.yaml](config.example.yaml). It uses
+completed recorder minute closes from the preceding window, recalculates its
+snapshot every `update_minutes`, and requires both a z-score excursion and a
+minimum bps distance from the rolling mean. Current top-of-book spreads and
+the normal fee-aware executable plan are still required before an entry.
+
+Rolling mode allows only one open spread position. It exits when the z-score
+returns inside `exit_z`, or after `timeout_hours`; exits are reduce-only and
+may cross a temporarily negative edge to remove risk. An invalid or
+insufficiently covered window blocks new entries rather than falling back to
+the fixed strategy. At live startup, both reconciled venue positions must be
+flat, because the direction of an inherited spread cannot be inferred safely.
+
+The existing `thresholds:` block is still required so the same configuration
+file can be switched back to `fixed`. Record-only mode remains unchanged and
+never sends orders.
+
 ## Quick start
 
 ```bash
@@ -193,8 +214,10 @@ errors), credentials in `.env`, and the markets on the command line
 
 | key | meaning | default |
 |---|---|---|
+| `strategy.mode` | signal mode: `fixed` or `rolling` | `fixed` |
 | `thresholds.midline_bps` | premium center (measure it!) | — |
 | `thresholds.upper_bps` / `lower_bps` | entry bands (> 0) | — |
+| `rolling.*` | walk-forward window, z-score, spread, coverage and timeout gates | see file |
 | `entropy.dex` | Entropy's dex name on Hyperliquid | `io` |
 | `*.taker_fee_bps` | per-venue taker fee | 0.0 (tradexyz hedge: 1.0) |
 | `*.max_position_usd` | per-venue position cap | 1000 |
@@ -242,6 +265,9 @@ the host region, feed/order transport mode, and `code_version`; set
   orderStatus polling for unknown outcomes).
 - A **persistence gate** (`premium_persist_sec`) arms each direction and only
   fires if the edge survives — one-tick phantoms are filtered.
+- **Rolling mode** (when explicitly selected): uses a strict pre-block
+  rolling snapshot, permits one spread position, and closes on mean reversion
+  or timeout with reduce-only primary legs.
 - **Inventory ladder**: past `floor_frac` of a venue's cap, adding to the
   position requires linearly more edge, up to `scale_bps` extra at the cap.
 - **Net-delta hedge**: if legs fill unevenly, the imbalance is immediately

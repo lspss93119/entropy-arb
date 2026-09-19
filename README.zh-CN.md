@@ -58,6 +58,24 @@ midline − lower  ────────────────────�
 策略**：若真实溢价中枢是 0 而你填了 5，机器人会整天以公允价买入 Entropy。
 先测量、再交易——数据采集器和分析工具就是为此而生。
 
+### 可选的滚动窗口策略
+
+固定阈值策略仍然是默认值。要明确启用 walk-forward 滚动策略，请在
+`config.yaml` 中设置 `strategy.mode: rolling`，并调整
+[config.example.yaml](config.example.yaml) 里的 `rolling:` 区块。它只使用
+已经完成的分钟采集行，在前一个窗口上计算均值与总体标准差，并按
+`update_minutes` 更新；入场同时需要 z 分数偏离、最小 bps 偏离、当前盘口点差
+和原有的含手续费可成交双腿计划。
+
+rolling 同时最多持有一个价差仓位。z 分数回到 `exit_z` 内，或超过
+`timeout_hours` 后退出；退出两条主腿都会带 reduce-only，即使暂时没有正的
+可成交价差也会优先解除风险。窗口无效或覆盖率不足时会停止新入场，不会偷偷
+退回固定策略。实盘启动时两边经链上核对后的仓位必须都是零，因为无法安全推断
+继承仓位的价差方向。
+
+现有 `thresholds:` 区块仍然必须保留，方便同一份配置切回 `fixed`；
+`--record-only` 的无下单行为不变。
+
 ## 快速开始
 
 ```bash
@@ -178,8 +196,10 @@ python3 main.py --symbol SNDK --hedge lighter-rh
 
 | 键 | 含义 | 默认值 |
 |---|---|---|
+| `strategy.mode` | 信号模式：`fixed` 或 `rolling` | `fixed` |
 | `thresholds.midline_bps` | 溢价中枢（必须实测！） | — |
 | `thresholds.upper_bps` / `lower_bps` | 入场带宽（> 0） | — |
+| `rolling.*` | 滚动窗口、z 分数、点差、覆盖率与超时闸门 | 见配置文件 |
 | `entropy.dex` | Entropy 在 Hyperliquid 上的 dex 名 | `io` |
 | `*.taker_fee_bps` | 各所吃单费 | 0.0（tradexyz 对冲腿：1.0） |
 | `*.max_position_usd` | 各所持仓上限 | 1000 |
@@ -225,6 +245,8 @@ python3 main.py --symbol SNDK --hedge lighter-rh
   orderStatus 兜底）。
 - **持续性闸门**（`premium_persist_sec`）：信号先"武装"，持续存在才触发，
   过滤单 tick 的假信号。
+- **Rolling 模式**（明确选择后）：使用严格排除当前区块的滚动快照，最多持有
+  一个价差仓位，并在均值回归或超时后用 reduce-only 主腿平仓。
 - **库存阶梯**：仓位超过上限的 `floor_frac` 后，同方向加仓需要线性递增的
   额外溢价，满仓时最高加 `scale_bps`。
 - **净敞口对冲**：两腿成交不对等时立即用 reduce-only 单（带滑点保护）

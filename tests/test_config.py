@@ -9,6 +9,7 @@ import tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from entropy_arb.config import ConfigError, load_config  # noqa: E402
+from entropy_arb.rolling import RollingWindow  # noqa: E402
 
 ROOT = os.path.join(os.path.dirname(__file__), "..")
 EXAMPLE = os.path.join(ROOT, "config.example.yaml")
@@ -46,6 +47,43 @@ def test_example_config_loads():
     assert cfg.entropy.symbol == "SNDK" and cfg.hedge.symbol == "SNDK"
     assert cfg.recorder_enabled and cfg.recorder_csv
     assert cfg.dashboard and cfg.log_file
+    assert cfg.strategy_mode == "fixed"
+    assert cfg.rolling.window_hours == 12.0
+    assert cfg.rolling.update_minutes == 15
+
+
+def test_example_rolling_settings_support_offline_snapshot_smoke():
+    cfg = load_config(EXAMPLE, NO_ENV,
+                      symbol="SNDK", hedge_venue="lighter-rh")
+    window = RollingWindow(cfg.rolling)
+    for minute in range(window.expected_minutes):
+        assert window.ingest_row({
+            "minute_ts": minute * 60,
+            "samples": "1",
+            "premium_close_bps": "-1" if minute % 2 else "1",
+        })
+
+    snapshot = window.snapshot_for(window.expected_minutes * 60)
+
+    assert snapshot.valid
+    assert snapshot.valid_minutes == window.expected_minutes
+
+
+def test_example_rolling_can_seed_a_recorder_csv(tmp_path):
+    cfg = load_config(EXAMPLE, NO_ENV,
+                      symbol="SNDK", hedge_venue="lighter-rh")
+    window = RollingWindow(cfg.rolling)
+    expected = window.expected_minutes
+    path = tmp_path / "minutes-SNDK-lighter-rh.csv"
+    rows = ["minute_ts,samples,premium_close_bps"]
+    rows.extend(
+        f"{minute * 60},1,{1 if minute % 2 else -1}"
+        for minute in range(1, expected + 1)
+    )
+    path.write_text("\n".join(rows) + "\n")
+
+    assert window.load_csv(str(path)) == expected
+    assert window.snapshot_for((expected + 1) * 60).valid
 
 
 def test_minimal_defaults():
