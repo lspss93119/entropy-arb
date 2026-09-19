@@ -4,6 +4,7 @@ Run:  python3 -m pytest tests/  (or  python3 tests/test_book.py)
 """
 import os
 import sys
+from dataclasses import replace
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -30,6 +31,22 @@ def test_no_edge_below_threshold():
     sell = make_book(bids=[(100.05, 10)], asks=[(100.2, 10)])  # +5 bps top
     plan, reason = plan_arb(buy, sell, **common(threshold_bps=6.0))
     assert plan is None and reason == "no_edge"
+
+
+def test_force_close_plan_allows_negative_edge_without_defaulting_reduce_only():
+    buy = make_book(bids=[(100.8, 10)], asks=[(101.0, 10)])
+    sell = make_book(bids=[(100.0, 10)], asks=[(100.2, 10)])
+
+    plan, reason = plan_arb(buy, sell, **common())
+    assert plan is None and reason == "no_edge"
+
+    close_plan, reason = plan_arb(buy, sell,
+                                  **common(require_edge=False))
+    assert reason == "ok"
+    assert close_plan.qty == 10.0
+    assert close_plan.exp_edge_usd < 0.0
+    assert close_plan.reduce_only is False
+    assert replace(close_plan, reduce_only=True).reduce_only is True
 
 
 def test_edge_above_threshold():

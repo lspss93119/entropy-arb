@@ -149,7 +149,8 @@ def floor_step(x: float, step: float) -> float:
 
 
 def crossable_base(asks: List[Level], bids: List[Level], threshold: float,
-                   buy_fee: float = 0.0, sell_fee: float = 0.0) -> Tuple[float, float]:
+                   buy_fee: float = 0.0, sell_fee: float = 0.0,
+                   require_edge: bool = True) -> Tuple[float, float]:
     """Walk both books level by level and return (base qty, buy notional) that
     can be crossed while every marginal slice still clears fees + threshold."""
     qty = 0.0
@@ -168,7 +169,8 @@ def crossable_base(asks: List[Level], bids: List[Level], threshold: float,
                 break
             b_px, b_rem = bids[j]
             j += 1
-        if b_px * (1.0 - sell_fee) < a_px * (1.0 + buy_fee) * (1.0 + threshold):
+        if (require_edge and b_px * (1.0 - sell_fee)
+                < a_px * (1.0 + buy_fee) * (1.0 + threshold)):
             break
         take = min(a_rem, b_rem)
         qty += take
@@ -205,6 +207,7 @@ class ArbPlan:
     marginal_premium_bps: float
     buy_fee: float
     sell_fee: float
+    reduce_only: bool = False
 
     @property
     def gross_edge_usd(self) -> float:
@@ -219,7 +222,7 @@ class ArbPlan:
 def plan_arb(buy_book: OrderBook, sell_book: OrderBook, *, threshold_bps: float,
              buy_fee_bps: float, sell_fee_bps: float, take_fraction: float,
              cap_notional: float, min_base: float, min_notional: float,
-             size_step: float):
+             size_step: float, require_edge: bool = True):
     """Size a two-leg taker slice: buy on buy_book, sell on sell_book.
 
     A slice qualifies when the executable premium (sell bid over buy ask)
@@ -234,9 +237,11 @@ def plan_arb(buy_book: OrderBook, sell_book: OrderBook, *, threshold_bps: float,
     buy_fee = buy_fee_bps / 1e4
     sell_fee = sell_fee_bps / 1e4
     top_premium_bps = (bids[0][0] / asks[0][0] - 1.0) * 1e4
-    if bids[0][0] * (1.0 - sell_fee) < asks[0][0] * (1.0 + buy_fee) * (1.0 + threshold):
+    if (require_edge and bids[0][0] * (1.0 - sell_fee)
+            < asks[0][0] * (1.0 + buy_fee) * (1.0 + threshold)):
         return None, "no_edge"
-    q_max, q_max_notional = crossable_base(asks, bids, threshold, buy_fee, sell_fee)
+    q_max, q_max_notional = crossable_base(
+        asks, bids, threshold, buy_fee, sell_fee, require_edge=require_edge)
     if q_max <= 0:
         return None, "no_edge"
     target = min(q_max * take_fraction, cap_notional / asks[0][0])
