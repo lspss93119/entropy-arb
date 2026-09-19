@@ -279,6 +279,25 @@ def test_rolling_failure_halts_engine():
     assert eng.halted is True
 
 
+def test_rolling_unresolved_execution_halts_before_next_scan():
+    eng = make_engine(mode="rolling")
+    eng._log_csv = lambda execution, hedge: None
+
+    async def unresolved_execute(buy, sell, plan):
+        return {"unresolved": True, "ok": False}
+
+    eng._execute = unresolved_execute
+
+    async def run_execution():
+        await eng._vlock("entropy").acquire()
+        await eng._vlock("hedge").acquire()
+        await eng._execute_locked(eng.entropy, eng.hedge, None)
+
+    asyncio.run(run_execution())
+
+    assert eng.halted is True
+
+
 def test_rolling_partial_exit_keeps_state_until_residual_is_hedged():
     eng = make_engine(mode="rolling")
     eng._rolling_open_direction = "sell_entropy"
