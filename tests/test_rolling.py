@@ -125,6 +125,62 @@ def test_exit_signal_uses_z_band_and_timeout():
     assert timeout.direction == "buy_entropy"
 
 
+@pytest.mark.parametrize(
+    ("z", "should_exit"),
+    [(0.6, False), (0.5, True), (0.0, True), (-0.8, True)],
+)
+def test_sell_entropy_exit_is_directional(z, should_exit):
+    config = RollingConf(window_hours=1, update_minutes=15,
+                         min_coverage_pct=80, exit_z=0.5,
+                         timeout_hours=1)
+    window = _filled_window(config=config, values=[0.0, 1.0] * 30)
+
+    signal = window.exit_signal(0.5 + z * 0.5, 3600.0, 5.0, 5.0,
+                                3500.0, "sell_entropy")
+
+    assert (signal is not None) is should_exit
+    if should_exit:
+        assert signal.reason == "exit_z"
+        assert signal.direction == "buy_entropy"
+
+
+@pytest.mark.parametrize(
+    ("z", "should_exit"),
+    [(-0.6, False), (-0.5, True), (0.0, True), (0.8, True)],
+)
+def test_buy_entropy_exit_is_directional(z, should_exit):
+    config = RollingConf(window_hours=1, update_minutes=15,
+                         min_coverage_pct=80, exit_z=0.5,
+                         timeout_hours=1)
+    window = _filled_window(config=config, values=[0.0, 1.0] * 30)
+
+    signal = window.exit_signal(0.5 + z * 0.5, 3600.0, 5.0, 5.0,
+                                3500.0, "buy_entropy")
+
+    assert (signal is not None) is should_exit
+    if should_exit:
+        assert signal.reason == "exit_z"
+        assert signal.direction == "sell_entropy"
+
+
+def test_invalid_snapshot_or_spread_blocks_normal_exit():
+    invalid_config = RollingConf(window_hours=1, update_minutes=15,
+                                 min_coverage_pct=100, exit_z=0.5,
+                                 timeout_hours=1)
+    invalid_window = RollingWindow(invalid_config)
+    for minute in range(10):
+        invalid_window.ingest_row(_row(minute * 60, float(minute)))
+
+    assert invalid_window.exit_signal(0.0, 3600.0, 5.0, 5.0,
+                                      3500.0, "sell_entropy") is None
+
+    valid_window = _filled_window(config=RollingConf(
+        window_hours=1, update_minutes=15, min_coverage_pct=80,
+        exit_z=0.5, timeout_hours=1), values=[0.0, 1.0] * 30)
+    assert valid_window.exit_signal(0.5, 3600.0, 10.01, 5.0,
+                                   3500.0, "sell_entropy") is None
+
+
 def test_invalid_snapshot_blocks_entry_and_timeout_exits():
     config = RollingConf(window_hours=1, update_minutes=15,
                          min_coverage_pct=100, timeout_hours=1)
