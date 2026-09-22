@@ -179,7 +179,9 @@ class RollingWindow:
                                 self.config.max_spread_bps):
             return None
         z = (float(premium_bps) - snapshot.mean_bps) / snapshot.std_bps
-        if not math.isfinite(z) or abs(z) > self.config.exit_z:
+        if (not math.isfinite(z)
+                or (direction == "sell_entropy" and z > self.config.exit_z)
+                or (direction == "buy_entropy" and z < -self.config.exit_z)):
             return None
         return RollingSignal(
             direction=reverse, reason="exit_z", z=z,
