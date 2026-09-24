@@ -208,6 +208,12 @@ class ArbPlan:
     buy_fee: float
     sell_fee: float
     reduce_only: bool = False
+    # Rolling reduce-only plans carry the exact lots selected by the
+    # break-even depth walk. These defaults keep fixed-mode callers unchanged.
+    lot_allocations: tuple = ()
+    selected_lot_ids: tuple = ()
+    expected_exit_capture_bps: Optional[float] = None
+    exit_segments: tuple = ()
 
     @property
     def gross_edge_usd(self) -> float:
@@ -259,4 +265,171 @@ def plan_arb(buy_book: OrderBook, sell_book: OrderBook, *, threshold_bps: float,
         top_premium_bps=top_premium_bps,
         marginal_premium_bps=(sell_limit / buy_limit - 1.0) * 1e4,
         buy_fee=buy_fee, sell_fee=sell_fee,
+    ), "ok"
+
+
+def plan_reduce_arb(buy_book: OrderBook, sell_book: OrderBook, *,
+                    candidates, buy_fee_bps: float, sell_fee_bps: float,
+                    take_fraction: float, cap_notional: float,
+                    min_base: float, min_notional: float,
+                    size_step: float):
+    """Plan a reduce-only close without violating any selected lot's BE.
+
+    ``candidates`` are the immutable records returned by
+    :meth:`LotLedger.exit_candidates`. The walk uses current opposite-side
+    depth, assigns each safe slice to the lot with the best expected capture,
+    and stops as soon as the marginal depth cannot satisfy any open lot.
+    Unlike :func:`plan_arb`, this planner never applies generic entry
+    slippage: its returned limits are the BE-safe protective limits.
+    """
+    asks = buy_book.sorted_asks()
+    bids = sell_book.sorted_bids()
+    if not asks or not bids:
+        return None, "empty_book"
+    if not candidates:
+        return None, "no_open_lots"
+    if not (0.0 < float(take_fraction) <= 1.0):
+        return None, "invalid_take_fraction"
+    if cap_notional <= 0:
+        return None, "no_headroom"
+
+    buy_fee = float(buy_fee_bps) / 1e4
+    sell_fee = float(sell_fee_bps) / 1e4
+    remaining = {}
+    normalized = []
+    for candidate in candidates:
+        try:
+            lot_id = str(candidate["lot_id"])
+            qty = float(candidate["open_qty"])
+            entry_cash = float(candidate["entry_cash_per_base"])
+            reference = float(candidate["reference_entry_notional_per_base"])
+            required = float(candidate["required_exit_cash_per_base"])
+        except (KeyError, TypeError, ValueError):
+            return None, "invalid_lot_candidate"
+        if (not lot_id or not all(math.isfinite(value) for value in
+                                  (qty, entry_cash, reference, required))
+                or qty <= 0 or reference <= 0):
+            return None, "invalid_lot_candidate"
+        remaining[lot_id] = qty
+        normalized.append({
+            "lot_id": lot_id, "open_qty": qty,
+            "entry_cash_per_base": entry_cash,
+            "reference_entry_notional_per_base": reference,
+            "required_exit_cash_per_base": required,
+        })
+
+    i = j = 0
+    a_px = b_px = 0.0
+    a_rem = b_rem = 0.0
+    q_max = 0.0
+    q_max_notional = 0.0
+    segments = []
+    while True:
+        if a_rem <= 0:
+            if i >= len(asks):
+                break
+            a_px, a_rem = asks[i]
+            i += 1
+        if b_rem <= 0:
+            if j >= len(bids):
+                break
+            b_px, b_rem = bids[j]
+            j += 1
+        exit_cash = b_px * (1.0 - sell_fee) - a_px * (1.0 + buy_fee)
+        eligible = [candidate for candidate in normalized
+                    if remaining[candidate["lot_id"]] > 1e-12
+                    and candidate["required_exit_cash_per_base"]
+                    <= exit_cash + 1e-10]
+        if not eligible:
+            break
+        # Lower required cash means higher current capture. Keep this ordering
+        # stable so the planner is deterministic for equal economics.
+        eligible.sort(key=lambda candidate: (
+            -(candidate["entry_cash_per_base"] + exit_cash)
+            / candidate["reference_entry_notional_per_base"],
+            candidate["lot_id"]))
+        slice_qty = min(a_rem, b_rem)
+        left = slice_qty
+        for candidate in eligible:
+            if left <= 1e-12:
+                break
+            lot_id = candidate["lot_id"]
+            take = min(left, remaining[lot_id])
+            if take <= 1e-12:
+                continue
+            segments.append({
+                "lot_id": lot_id, "qty": take,
+                "buy_px": a_px, "sell_px": b_px,
+                "exit_cash_per_base": exit_cash,
+                "entry_cash_per_base": candidate["entry_cash_per_base"],
+                "reference_entry_notional_per_base": candidate[
+                    "reference_entry_notional_per_base"],
+            })
+            remaining[lot_id] -= take
+            left -= take
+        used = slice_qty - left
+        if used <= 1e-12:
+            break
+        q_max += used
+        q_max_notional += used * a_px
+        a_rem -= used
+        b_rem -= used
+        # If the current books have more depth than the remaining eligible
+        # lots, there is no reason to inspect further levels.
+        if left > 1e-12:
+            break
+
+    if q_max <= 0:
+        return None, "no_break_even_depth"
+    target = min(q_max * float(take_fraction),
+                 float(cap_notional) / asks[0][0])
+    target = floor_step(target, size_step)
+    if target < min_base:
+        return None, "below_min_base"
+
+    selected_segments = []
+    left = target
+    for segment in segments:
+        if left <= 1e-12:
+            break
+        take = min(left, segment["qty"])
+        if take > 1e-12:
+            selected_segments.append({**segment, "qty": take})
+            left -= take
+    if left > 1e-9:
+        return None, "below_min_base"
+
+    buy_notional = sum(s["qty"] * s["buy_px"] for s in selected_segments)
+    sell_notional = sum(s["qty"] * s["sell_px"] for s in selected_segments)
+    if buy_notional < min_notional or sell_notional < min_notional:
+        return None, "below_min_notional"
+    buy_limit = max(s["buy_px"] for s in selected_segments)
+    sell_limit = min(s["sell_px"] for s in selected_segments)
+    top_premium_bps = (bids[0][0] / asks[0][0] - 1.0) * 1e4
+    capture_usd = sum(
+        s["qty"] * (s["entry_cash_per_base"] + s["exit_cash_per_base"])
+        for s in selected_segments)
+    reference_notional = sum(
+        s["qty"] * s["reference_entry_notional_per_base"]
+        for s in selected_segments)
+    expected_capture_bps = (capture_usd / reference_notional * 1e4
+                            if reference_notional > 0 else None)
+    allocation_by_lot = {}
+    for segment in selected_segments:
+        lot_id = segment["lot_id"]
+        allocation_by_lot[lot_id] = (allocation_by_lot.get(lot_id, 0.0)
+                                     + segment["qty"])
+    allocations = tuple({"lot_id": lot_id, "qty": qty}
+                        for lot_id, qty in allocation_by_lot.items())
+    selected_ids = tuple(allocation["lot_id"] for allocation in allocations)
+    return ArbPlan(
+        qty=target, buy_limit=buy_limit, sell_limit=sell_limit,
+        buy_notional=buy_notional, sell_notional=sell_notional,
+        q_max=q_max, q_max_notional=q_max_notional,
+        top_premium_bps=top_premium_bps,
+        marginal_premium_bps=(sell_limit / buy_limit - 1.0) * 1e4,
+        buy_fee=buy_fee, sell_fee=sell_fee, reduce_only=True,
+        lot_allocations=allocations, selected_lot_ids=selected_ids,
+        expected_exit_capture_bps=expected_capture_bps,
+        exit_segments=tuple(selected_segments),
     ), "ok"

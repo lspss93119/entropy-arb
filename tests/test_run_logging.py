@@ -82,13 +82,9 @@ strategy:
 rolling:
   window_hours: 12
   update_minutes: 15
-  entry_z: 1.5
-  exit_z: 0.5
-  min_reversion_bps: 5
-  max_spread_bps: 10
   min_coverage_pct: 80
-  timeout_hours: 12
   seed_from_csv: true
+  min_exit_capture_bps: 0.0
 """)
     cfg = load_config(str(config_file), NO_ENV,
                       symbol="ANTH", hedge_venue="lighter-rh")
@@ -104,13 +100,9 @@ rolling:
     assert row["strategy_mode"] == "rolling"
     assert float(row["rolling_window_hours"]) == 12.0
     assert int(row["rolling_update_minutes"]) == 15
-    assert float(row["rolling_entry_z"]) == 1.5
-    assert float(row["rolling_exit_z"]) == 0.5
-    assert float(row["rolling_min_reversion_bps"]) == 5.0
-    assert float(row["rolling_max_spread_bps"]) == 10.0
     assert float(row["rolling_min_coverage_pct"]) == 80.0
-    assert float(row["rolling_timeout_hours"]) == 12.0
     assert row["rolling_seed_from_csv"] == "1"
+    assert float(row["rolling_min_exit_capture_bps"]) == 0.0
 
 
 def test_engine_run_writes_run_config_before_runtime(tmp_path):

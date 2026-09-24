@@ -157,13 +157,9 @@ strategy:
 rolling:
   window_hours: 12
   update_minutes: 15
-  entry_z: 1.5
-  exit_z: 0.5
-  min_reversion_bps: 5
-  max_spread_bps: 10
   min_coverage_pct: 80
-  timeout_hours: 12
   seed_from_csv: false
+  min_exit_capture_bps: 0
 """)
     cfg = load_config(str(config_file), NO_ENV,
                       symbol="SNDK", hedge_venue="lighter-rh")
@@ -187,14 +183,16 @@ rolling:
     eng._min_base = 0.1
     eng._min_notional = 10.0
     eng._rolling_signal_meta = {
-        "reason": "timeout",
-        "z": None,
-        "mean_bps": None,
-        "std_bps": None,
+        "reason": "entry",
+        "action": "reduce",
+        "center_bps": 0.0,
         "coverage_pct": None,
         "snapshot_ts": None,
         "direction": "buy_entropy",
     }
+    # This test exercises CSV serialization only; inventory state is covered
+    # by the rolling engine tests and is intentionally not mutated here.
+    eng._rolling_ledger = None
 
     plan = ArbPlan(
         qty=0.1, buy_limit=100.0, sell_limit=101.0,
@@ -217,5 +215,6 @@ rolling:
 
     assert row["strategy_mode"] == "rolling"
     assert row["reduce_only"] == "1"
-    assert row["rolling_signal_reason"] == "timeout"
+    assert row["rolling_signal_reason"] == "entry"
+    assert row["rolling_action"] == "reduce"
     assert all(call["reduce_only"] is True for call in buy.calls + sell.calls)

@@ -45,24 +45,20 @@ thresholds:
 # ======================= STRATEGY MODE / 策略模式 ===========================
 # fixed is the default and uses the thresholds above. Set mode to rolling only
 # after the recorder has enough completed minute rows. Rolling never falls back
-# to fixed thresholds when its snapshot is invalid, and holds at most one
-# spread position at a time.
+# to fixed midline_bps when its snapshot is invalid. It uses the causal median
+# of completed minute closes and keeps a persistent lot ledger for reductions.
 # fixed 为默认模式，使用上面的 thresholds。只有在采集足够分钟数据后才建议改成
-# rolling；rolling 的统计窗口无效时会停止入场，不会偷偷退回固定阈值，且同一时间
-# 最多持有一个价差仓位。
+# rolling；rolling 的统计窗口无效时会停止入场，不会偷偷退回固定阈值；同方向信号
+# 仍可连续增加库存，并由持久化 lot ledger 记录实际成交与 break-even 平仓。
 strategy:
   mode: fixed                 # fixed | rolling / 固定阈值 | 滚动窗口
 
 rolling:
   window_hours: 12            # walk-forward history / 回看窗口
   update_minutes: 15          # snapshot block size / 参数更新区间
-  entry_z: 1.5                # entry |z| / 入场 z 分数
-  exit_z: 0.5                 # exit |z| / 平仓 z 分数
-  min_reversion_bps: 5.0      # minimum distance from rolling mean
-  max_spread_bps: 10.0         # both current top-of-book spreads
   min_coverage_pct: 80.0       # required completed minute coverage
-  timeout_hours: 12.0          # force reduce-only close timeout
   seed_from_csv: true          # load existing recorder CSV on startup
+  min_exit_capture_bps: 0.0    # net round-trip capture floor / 最低净回收
 
 # ======================== VENUES / 交易所参数 ==============================
 entropy:

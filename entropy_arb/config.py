@@ -7,14 +7,13 @@ which markets to trade is stated explicitly on every start (--symbol,
 --hedge). Every YAML key is validated against the schema below, so a typo
 is an error rather than a setting that silently does nothing.
 
-Threshold model (fixed numbers the user derives from recorded minute data):
+Threshold model:
 
     premium_bps = (entropy_price / hedge_price - 1) * 10_000
 
-    SELL entropy / BUY hedge  fires when the executable premium
-        (entropy bid over hedge ask) >= midline_bps + upper_bps
-    BUY entropy / SELL hedge  fires when the executable premium
-        (entropy ask under hedge bid) <= midline_bps - lower_bps
+    Fixed mode uses the configured midline. Rolling mode replaces only that
+    center with the causal median of completed recorder minutes; upper/lower
+    remain the executable bps hurdles.
 
     Both hurdles are net of both venues' taker fees, so a full round trip
     nets >= (upper_bps + lower_bps) after fees by construction.
@@ -108,23 +107,17 @@ class HLCreds:
 
 @dataclass(frozen=True)
 class RollingConf:
-    """Validated parameters for the walk-forward rolling signal."""
+    """Validated parameters for the causal rolling-median signal."""
 
     window_hours: float = 12.0
     update_minutes: int = 15
-    entry_z: float = 1.5
-    exit_z: float = 0.5
-    min_reversion_bps: float = 5.0
-    max_spread_bps: float = 10.0
     min_coverage_pct: float = 80.0
-    timeout_hours: float = 12.0
     seed_from_csv: bool = True
+    min_exit_capture_bps: float = 0.0
 
     def __post_init__(self) -> None:
-        numeric = (
-            "window_hours", "entry_z", "exit_z", "min_reversion_bps",
-            "max_spread_bps", "min_coverage_pct", "timeout_hours",
-        )
+        numeric = ("window_hours", "min_coverage_pct",
+                   "min_exit_capture_bps")
         for name in numeric:
             if not math.isfinite(float(getattr(self, name))):
                 raise ValueError(f"rolling.{name} must be finite")
@@ -132,18 +125,10 @@ class RollingConf:
             raise ValueError("rolling.window_hours must be > 0")
         if self.update_minutes <= 0:
             raise ValueError("rolling.update_minutes must be > 0")
-        if self.entry_z <= 0:
-            raise ValueError("rolling.entry_z must be > 0")
-        if not 0 <= self.exit_z < self.entry_z:
-            raise ValueError("rolling.exit_z must be < rolling.entry_z and >= 0")
-        if self.min_reversion_bps < 0:
-            raise ValueError("rolling.min_reversion_bps must be >= 0")
-        if self.max_spread_bps < 0:
-            raise ValueError("rolling.max_spread_bps must be >= 0")
         if not 0 < self.min_coverage_pct <= 100:
             raise ValueError("rolling.min_coverage_pct must be in (0, 100]")
-        if self.timeout_hours <= 0:
-            raise ValueError("rolling.timeout_hours must be > 0")
+        if self.min_exit_capture_bps < 0:
+            raise ValueError("rolling.min_exit_capture_bps must be >= 0")
 
 
 @dataclass
@@ -229,13 +214,9 @@ _SCHEMA: Dict[str, Any] = {
     "rolling": {
         "window_hours": float,
         "update_minutes": int,
-        "entry_z": float,
-        "exit_z": float,
-        "min_reversion_bps": float,
-        "max_spread_bps": float,
         "min_coverage_pct": float,
-        "timeout_hours": float,
         "seed_from_csv": bool,
+        "min_exit_capture_bps": float,
     },
     "thresholds": {
         "midline_bps": float,
@@ -404,15 +385,11 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         rolling = RollingConf(
             window_hours=float(_get(raw, "rolling", "window_hours", 12.0)),
             update_minutes=int(_get(raw, "rolling", "update_minutes", 15)),
-            entry_z=float(_get(raw, "rolling", "entry_z", 1.5)),
-            exit_z=float(_get(raw, "rolling", "exit_z", 0.5)),
-            min_reversion_bps=float(_get(raw, "rolling",
-                                         "min_reversion_bps", 5.0)),
-            max_spread_bps=float(_get(raw, "rolling", "max_spread_bps", 10.0)),
             min_coverage_pct=float(_get(raw, "rolling",
                                         "min_coverage_pct", 80.0)),
-            timeout_hours=float(_get(raw, "rolling", "timeout_hours", 12.0)),
             seed_from_csv=bool(_get(raw, "rolling", "seed_from_csv", True)),
+            min_exit_capture_bps=float(_get(
+                raw, "rolling", "min_exit_capture_bps", 0.0)),
         )
     except (TypeError, ValueError) as exc:
         raise ConfigError(str(exc)) from exc

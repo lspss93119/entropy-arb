@@ -1,11 +1,11 @@
 """Two-venue arbitrage engine: Entropy vs one hedge venue.
 
-The signal is a fixed band around a configured midline (config.yaml):
+Fixed mode uses a configured midline band. Rolling mode uses a causal median
+of completed recorder minutes as its dynamic center and the same configured
+upper/lower executable bands. Rolling positions can accumulate same-direction
+lots and reduce only through a persistent, pair-specific break-even ledger.
 
-    SELL entropy / BUY hedge  when executable premium >= midline + upper (+fees)
-    BUY entropy / SELL hedge  when executable premium <= midline - lower (+fees)
-
-Around the signal: per-direction persistence arming,
+Around both signals: per-direction persistence arming,
 per-venue inventory ladder + position caps, per-venue order budgets and
 reactive rate-limit exclusion, net-delta hedging, venue-outage pausing with
 probing, and periodic on-chain reconciliation. There is no paper mode: the
@@ -25,8 +25,9 @@ from typing import Dict, List, Optional
 
 import aiohttp
 
-from .book import ArbPlan, floor_step, plan_arb
+from .book import ArbPlan, floor_step, plan_arb, plan_reduce_arb
 from .config import Config
+from .lot_ledger import LotLedger, LotLedgerError
 from .recorder import MinuteRecorder
 from .rolling import RollingSignal, RollingWindow
 from .venue_hl import HLVenue
@@ -39,8 +40,11 @@ CSV_HEADER = [
     "execution_ms", "buy_settle_ms", "sell_settle_ms",
     "leg_settle_gap_ms", "first_settled_leg",
     "direction", "strategy_mode", "reduce_only",
-    "rolling_signal_reason", "rolling_z", "rolling_mean_bps",
-    "rolling_std_bps", "rolling_coverage_pct", "rolling_snapshot_ts",
+    "rolling_signal_reason", "rolling_action", "rolling_center_bps",
+    "rolling_coverage_pct", "rolling_snapshot_ts", "rolling_valid_minutes",
+    "rolling_open_lot_count", "rolling_open_qty",
+    "rolling_expected_capture_bps", "rolling_realized_capture_bps",
+    "rolling_realized_capture_usd",
     "buy_venue", "sell_venue", "qty",
     "buy_bbo_px", "buy_bbo_qty", "sell_bbo_px", "sell_bbo_qty",
     "buy_quote_age_ms", "sell_quote_age_ms",
@@ -63,10 +67,9 @@ RUN_CONFIG_HEADER = [
     "premium_persist_sec", "cooldown_sec",
     "leg_slippage_bps", "hedge_slippage_bps",
     "take_fraction", "max_order_notional_usd", "inventory_scale_bps",
-    "rolling_window_hours", "rolling_update_minutes", "rolling_entry_z",
-    "rolling_exit_z", "rolling_min_reversion_bps", "rolling_max_spread_bps",
-    "rolling_min_coverage_pct", "rolling_timeout_hours",
-    "rolling_seed_from_csv",
+    "rolling_window_hours", "rolling_update_minutes",
+    "rolling_min_coverage_pct", "rolling_seed_from_csv",
+    "rolling_min_exit_capture_bps",
     "host_region", "market_data_mode", "entropy_order_transport",
     "hedge_order_transport", "code_version",
 ]
@@ -128,7 +131,15 @@ class Engine:
         self._rolling_open_direction: Optional[str] = None
         self._rolling_open_qty = 0.0
         self._rolling_entry_ts: Optional[float] = None
+        self._rolling_open_lot_count = 0
+        self._rolling_ledger: Optional[LotLedger] = (
+            LotLedger(self._rolling_state_path(), symbol=cfg.symbol,
+                      hedge=cfg.hedge_venue,
+                      tolerance=cfg.net_tolerance_base)
+            if cfg.strategy_mode == "rolling" else None)
+        self._rolling_ledger_loaded = False
         self._rolling_signal_meta: dict = {}
+        self._rolling_result_meta: dict = {}
         self._step = 1e-4
         self._min_base = 0.0
         self._min_notional = 10.0
@@ -179,6 +190,16 @@ class Engine:
         directory = os.path.dirname(self.cfg.log_file) or "logs/engine"
         return os.path.join(
             directory, f"runs-{self.cfg.symbol}-{self.cfg.hedge_venue}.csv")
+
+    def _rolling_state_path(self) -> str:
+        """Return the ignored pair-specific runtime ledger path."""
+        trade_dir = os.path.dirname(os.path.abspath(self.cfg.trades_csv))
+        if os.path.basename(trade_dir) == "trades":
+            root = os.path.dirname(trade_dir)
+        else:
+            root = trade_dir
+        return os.path.join(root, "state",
+                            f"lots-{self.cfg.symbol}-{self.cfg.hedge_venue}.json")
 
     def _runtime_metadata(self) -> dict:
         """Return small deployment identifiers for local/AWS comparisons."""
@@ -241,13 +262,9 @@ class Engine:
                     f"{self.cfg.inventory_scale_bps:.6g}",
                     f"{self.cfg.rolling.window_hours:.6g}",
                     self.cfg.rolling.update_minutes,
-                    f"{self.cfg.rolling.entry_z:.6g}",
-                    f"{self.cfg.rolling.exit_z:.6g}",
-                    f"{self.cfg.rolling.min_reversion_bps:.6g}",
-                    f"{self.cfg.rolling.max_spread_bps:.6g}",
                     f"{self.cfg.rolling.min_coverage_pct:.6g}",
-                    f"{self.cfg.rolling.timeout_hours:.6g}",
                     int(self.cfg.rolling.seed_from_csv),
+                    f"{self.cfg.rolling.min_exit_capture_bps:.6g}",
                     metadata["host_region"],
                     metadata["market_data_mode"],
                     metadata["entropy_order_transport"],
@@ -338,12 +355,22 @@ class Engine:
                              self._step)
         self._min_notional = max(cfg.min_order_notional,
                                  self.entropy.min_quote, self.hedge.min_quote)
-        log.info("pair ENTROPY(%s)-%s(%s): midline=%+.2fbps band=[-%.2f, +%.2f] "
-                 "fees=%.2f+%.2f step=%g min_ntl=$%g",
-                 self.entropy.conf.symbol, self.hedge.name,
-                 self.hedge.conf.symbol, cfg.midline_bps, cfg.lower_bps,
-                 cfg.upper_bps, self.entropy.fee_bps, self.hedge.fee_bps,
-                 self._step, self._min_notional)
+        if cfg.strategy_mode == "rolling":
+            log.info("pair ENTROPY(%s)-%s(%s): center=rolling-median "
+                     "band=[-%.2f, +%.2f] fees=%.2f+%.2f step=%g "
+                     "min_ntl=$%g",
+                     self.entropy.conf.symbol, self.hedge.name,
+                     self.hedge.conf.symbol, cfg.lower_bps, cfg.upper_bps,
+                     self.entropy.fee_bps, self.hedge.fee_bps,
+                     self._step, self._min_notional)
+        else:
+            log.info("pair ENTROPY(%s)-%s(%s): midline=%+.2fbps "
+                     "band=[-%.2f, +%.2f] fees=%.2f+%.2f step=%g "
+                     "min_ntl=$%g",
+                     self.entropy.conf.symbol, self.hedge.name,
+                     self.hedge.conf.symbol, cfg.midline_bps, cfg.lower_bps,
+                     cfg.upper_bps, self.entropy.fee_bps, self.hedge.fee_bps,
+                     self._step, self._min_notional)
 
         if self.record_only:
             log.warning("RECORD-ONLY — collecting minute data, no strategy, "
@@ -352,7 +379,7 @@ class Engine:
             log.warning("LIVE — real orders will be sent (use --record-only "
                         "for credential-less data collection)")
             await self._reconcile_positions(hedge=False, strict=True)
-            self._check_rolling_start_flat()
+            self._check_rolling_start_state()
             log.info("starting positions: %s (net %+.6g)",
                      " ".join(f"{v.name}={v.position:+.6g}"
                               for v in self.venues.values()),
@@ -404,40 +431,54 @@ class Engine:
         if self._rolling is not None and self._rolling.ingest_row(row):
             self._update_evt.set()
 
-    def _check_rolling_start_flat(self) -> None:
-        """Refuse to start rolling mode with an unknown/open inventory state."""
-        if self._rolling is None:
+    def _sync_rolling_cache(self) -> None:
+        """Mirror the persistent lot ledger into the hot-path cache."""
+        if self._rolling_ledger is None:
+            self._rolling_open_direction = None
+            self._rolling_open_qty = 0.0
+            self._rolling_entry_ts = None
+            self._rolling_open_lot_count = 0
             return
+        self._rolling_open_direction = self._rolling_ledger.direction
+        self._rolling_open_qty = self._rolling_ledger.total_qty
+        self._rolling_entry_ts = self._rolling_ledger.first_entry_ts
+        self._rolling_open_lot_count = len(self._rolling_ledger.lots)
+
+    def _check_rolling_start_state(self) -> None:
+        """Load and validate the persisted rolling inventory before live mode."""
+        if self._rolling is None or self._rolling_ledger is None:
+            return
+        try:
+            self._rolling_ledger.load()
+            self._sync_rolling_cache()
+            positions = {key: venue.position
+                         for key, venue in self.venues.items()}
+            self._rolling_ledger.validate_positions(positions)
+        except LotLedgerError as exc:
+            raise RuntimeError(f"rolling lot ledger validation failed: {exc}") \
+                from exc
         nonflat = [f"{v.name}={v.position:+.6g}"
                    for v in self.venues.values()
                    if abs(v.position) > self.cfg.net_tolerance_base]
-        if nonflat:
+        if nonflat and not self._rolling_ledger.lots:
             raise RuntimeError(
-                "rolling strategy requires flat starting positions: "
-                + ", ".join(nonflat))
-        self._rolling_open_direction = None
-        self._rolling_open_qty = 0.0
-        self._rolling_entry_ts = None
+                "rolling positions are non-flat but no persisted lot ledger "
+                "is available: " + ", ".join(nonflat))
+        self._rolling_ledger_loaded = True
         self._reset_rolling_arming()
 
-    @staticmethod
-    def _book_spread_bps(venue) -> Optional[float]:
-        bid = venue.book.best_bid()
-        ask = venue.book.best_ask()
-        if bid is None or ask is None:
-            return None
-        mid = (bid + ask) / 2.0
-        if mid <= 0 or ask < bid:
-            return None
-        return (ask - bid) / mid * 1e4
+    # Kept as a narrow compatibility alias for callers that used the old
+    # pre-ledger startup helper. Live mode uses _check_rolling_start_state.
+    def _check_rolling_start_flat(self) -> None:
+        self._check_rolling_start_state()
 
-    def _rolling_signal_meta_for(self, signal: RollingSignal) -> dict:
+    def _rolling_signal_meta_for(self, signal: RollingSignal,
+                                 action: str = "entry") -> dict:
         return {
             "reason": signal.reason,
+            "action": action,
             "direction": signal.direction,
-            "z": signal.z,
-            "mean_bps": signal.mean_bps,
-            "std_bps": signal.std_bps,
+            "center_bps": signal.center_bps,
             "coverage_pct": signal.coverage_pct,
             "snapshot_ts": signal.snapshot_ts,
             "valid_minutes": signal.valid_minutes,
@@ -483,6 +524,16 @@ class Engine:
             base = self.cfg.midline_bps + self.cfg.upper_bps
         else:
             base = self.cfg.lower_bps - self.cfg.midline_bps
+        return base + self._inv_add_bps(buy, sell)
+
+    def _rolling_threshold(self, signal: RollingSignal, buy, sell) -> float:
+        """Return the dynamic executable hurdle for a rolling entry/add."""
+        if signal.center_bps is None:
+            raise ValueError("rolling signal has no dynamic center")
+        if sell.key == "entropy":
+            base = signal.center_bps + self.cfg.upper_bps
+        else:
+            base = self.cfg.lower_bps - signal.center_bps
         return base + self._inv_add_bps(buy, sell)
 
     def _headroom(self, buy, sell, ref_px: float) -> float:
@@ -671,7 +722,8 @@ class Engine:
     def _scan_rolling(self, now: float):
         """Evaluate rolling entry, add, and directional exit signals."""
         rolling = self._rolling
-        if rolling is None:
+        ledger = self._rolling_ledger
+        if rolling is None or ledger is None:
             return None
         cfg = self.cfg
         entropy, hedge = self.entropy, self.hedge
@@ -683,56 +735,56 @@ class Engine:
         if self._venue_down:
             return None
         premium = self.premium_bps()
-        entropy_spread = self._book_spread_bps(entropy)
-        hedge_spread = self._book_spread_bps(hedge)
         if premium is None:
             return None
 
         open_direction = self._rolling_open_direction
-        if open_direction is not None:
-            if self._rolling_entry_ts is None:
-                return None
-            exit_signal = rolling.exit_signal(
-                premium, now, entropy_spread, hedge_spread,
-                self._rolling_entry_ts, open_direction)
-            if exit_signal is not None:
-                buy, sell = self._direction_venues(exit_signal.direction,
-                                                    entropy, hedge)
-                dkey = exit_signal.direction
-                if (self._vlock(buy.key).locked()
-                        or self._vlock(sell.key).locked()
-                        or self._venue_limited(buy)
-                        or self._venue_limited(sell)
-                        or not (self._venue_rate_ok(buy)
-                                and self._venue_rate_ok(sell))):
-                    return None
-                if (buy.book.last_update_ts <= buy.last_traded_ts
-                        or sell.book.last_update_ts <= sell.last_traded_ts):
-                    return None
-                ref_px = buy.book.best_ask()
-                if ref_px is None:
-                    return None
-                cap_notional = min(cfg.max_order_notional,
-                                   self._rolling_open_qty * ref_px)
-                plan, reason = self._plan(
-                    buy, sell, cap_notional, threshold_bps=0.0,
-                    require_edge=False, reduce_only=True)
-                if plan is None:
-                    self._skiplog("rolling exit %s unavailable: %s",
-                                  dkey, reason)
-                    return None
-                self._reset_rolling_arming()
-                self._rolling_signal_meta = self._rolling_signal_meta_for(
-                    exit_signal)
-                return buy, sell, plan
+        signal = rolling.signal(
+            premium, now, upper_bps=cfg.upper_bps, lower_bps=cfg.lower_bps)
+        if signal is None:
+            self._reset_rolling_arming()
+            self._rolling_signal_meta = {}
+            return None
 
-            signal = rolling.entry_signal(
-                premium, now, entropy_spread, hedge_spread)
-            if signal is None or signal.direction != open_direction:
-                self._reset_rolling_arming()
-                self._rolling_signal_meta = {}
+        if open_direction is not None and signal.direction != open_direction:
+            # A signal on the opposite side of the dynamic center is the only
+            # normal rolling exit. The ledger chooses lots/depth that remain
+            # above their configured break-even capture floor.
+            buy, sell = self._direction_venues(signal.direction, entropy, hedge)
+            if (self._vlock(buy.key).locked()
+                    or self._vlock(sell.key).locked()
+                    or self._venue_limited(buy)
+                    or self._venue_limited(sell)
+                    or not (self._venue_rate_ok(buy)
+                            and self._venue_rate_ok(sell))):
                 return None
-        else:
+            if (buy.book.last_update_ts <= buy.last_traded_ts
+                    or sell.book.last_update_ts <= sell.last_traded_ts):
+                return None
+            ref_px = buy.book.best_ask()
+            if ref_px is None:
+                return None
+            cap_notional = min(cfg.max_order_notional,
+                               self._rolling_open_qty * ref_px)
+            plan, reason = plan_reduce_arb(
+                buy.book, sell.book,
+                candidates=ledger.exit_candidates(
+                    cfg.rolling.min_exit_capture_bps),
+                buy_fee_bps=buy.fee_bps, sell_fee_bps=sell.fee_bps,
+                take_fraction=cfg.take_fraction,
+                cap_notional=cap_notional,
+                min_base=self._min_base, min_notional=self._min_notional,
+                size_step=self._step)
+            if plan is None:
+                self._skiplog("rolling exit %s unavailable: %s",
+                              signal.direction, reason)
+                return None
+            self._reset_rolling_arming()
+            self._rolling_signal_meta = self._rolling_signal_meta_for(
+                signal, action="reduce")
+            return buy, sell, plan
+
+        if open_direction is None:
             # Do not build a second spread on top of a known residual leg. The
             # reconcile loop may still be able to flatten a below-minimum or
             # temporarily unavailable residual position.
@@ -740,13 +792,10 @@ class Engine:
                    for v in self.venues.values()):
                 self._skiplog("rolling blocked: non-flat residual position")
                 return None
-
-            signal = rolling.entry_signal(
-                premium, now, entropy_spread, hedge_spread)
-            if signal is None:
-                self._reset_rolling_arming()
-                self._rolling_signal_meta = {}
-                return None
+        elif signal.direction != open_direction:
+            # The branch above returns a reduce-only plan. This is a guard for
+            # future changes that might accidentally route an opposite entry.
+            return None
 
         buy, sell = self._direction_venues(signal.direction, entropy, hedge)
         dkey = signal.direction
@@ -761,7 +810,7 @@ class Engine:
         if (buy.book.last_update_ts <= buy.last_traded_ts
                 or sell.book.last_update_ts <= sell.last_traded_ts):
             return None
-        threshold_bps = self._inv_add_bps(buy, sell)
+        threshold_bps = self._rolling_threshold(signal, buy, sell)
         plan, reason = self._plan(
             buy, sell, cfg.max_order_notional,
             threshold_bps=threshold_bps)
@@ -792,40 +841,160 @@ class Engine:
     # ------------------------------------------------------------- execution
 
     def _update_rolling_position(self, execution: dict, hedge: dict) -> None:
-        if self._rolling is None or not execution.get("ok"):
+        if (self._rolling is None or self._rolling_ledger is None
+                or not execution.get("ok")):
             return
         matched = float(execution.get("matched_qty") or 0.0)
         plan = execution["plan"]
-        hedge_fill = float(hedge.get("filled_qty") or 0.0)
-        if matched <= 0 and not (plan.reduce_only and hedge_fill > 0):
+        if matched <= self.cfg.net_tolerance_base and not plan.reduce_only:
             return
+        hedge_status = hedge.get("status", "not_needed")
+        if hedge_status in ("not_attempted", "unhedgeable", "unresolved"):
+            self._halt_rolling(
+                f"rolling {'reduce' if plan.reduce_only else 'entry'} "
+                f"has unsettled hedge ({hedge_status})")
+            return
+        try:
+            remaining_net = hedge.get("remaining_net_qty")
+            if (remaining_net is not None
+                    and abs(float(remaining_net)) > self.cfg.net_tolerance_base):
+                self._halt_rolling(
+                    f"rolling {'reduce' if plan.reduce_only else 'entry'} "
+                    f"leaves residual net position ({float(remaining_net):+.6g})")
+                return
+        except (TypeError, ValueError):
+            self._halt_rolling("rolling settlement has invalid net position")
+            return
+        try:
+            hedge_fill = max(float(hedge.get("filled_qty") or 0.0), 0.0)
+        except (TypeError, ValueError):
+            self._halt_rolling("rolling settlement has invalid hedge fill")
+            return
+
         if plan.reduce_only:
             closed_qty = matched
-            # If only one primary leg fills, the existing residual hedge can
-            # complete that part of the spread. Count it only for a settled
-            # hedge; an unresolved/unhedgeable residual must remain open in
-            # the rolling state until reconciliation proves otherwise.
-            if hedge_fill > 0 and hedge.get("status") not in (
-                    "not_attempted", "unhedgeable", "unresolved"):
+            if hedge_status not in ("not_needed", "not_attempted",
+                                     "unhedgeable", "unresolved"):
+                # A successful reduce-only hedge completes the opposite
+                # primary leg, so it contributes to the truly closed spread
+                # quantity just as the pre-ledger rolling state did.
                 closed_qty += hedge_fill
-            self._rolling_open_qty = max(0.0,
-                                         self._rolling_open_qty - closed_qty)
-            if self._rolling_open_qty <= self.cfg.net_tolerance_base:
-                self._rolling_open_direction = None
-                self._rolling_open_qty = 0.0
-                self._rolling_entry_ts = None
-        elif self._rolling_open_direction is None:
-            self._rolling_open_direction = execution["direction"]
-            self._rolling_open_qty = matched
-            self._rolling_entry_ts = execution["settled_ts"]
-        elif execution["direction"] == self._rolling_open_direction:
-            self._rolling_open_qty += matched
+            if closed_qty <= self.cfg.net_tolerance_base:
+                return
+            allocations = self._scaled_lot_allocations(
+                plan.lot_allocations, closed_qty)
+            if not allocations:
+                self._halt_rolling("rolling reduce has no lot allocations")
+                return
+            buy_px, sell_px = self._rolling_exit_prices(execution, hedge)
+            try:
+                realized_usd = 0.0
+                reference_notional = 0.0
+                for allocation in allocations:
+                    usd, _ = self._rolling_ledger.realized_capture(
+                        allocation["lot_id"], allocation["qty"],
+                        buy_px=buy_px, sell_px=sell_px,
+                        buy_fee_bps=execution["buy"].fee_bps,
+                        sell_fee_bps=execution["sell"].fee_bps)
+                    realized_usd += usd
+                    lot = next(lot for lot in self._rolling_ledger.lots
+                               if lot.lot_id == allocation["lot_id"])
+                    reference_notional += (allocation["qty"]
+                                           * lot.reference_entry_notional_per_base)
+                self._rolling_ledger.close_allocations(allocations)
+            except (LotLedgerError, StopIteration, TypeError, ValueError) as exc:
+                self._halt_rolling(f"rolling lot close failed: {exc}")
+                return
+            realized_bps = (realized_usd / reference_notional * 1e4
+                            if reference_notional > 0 else None)
+            self._rolling_result_meta = {
+                "action": "reduce",
+                "closed_qty": closed_qty,
+                "realized_capture_usd": realized_usd,
+                "realized_capture_bps": realized_bps,
+            }
         else:
-            log.error("rolling position state received an opposite entry; "
-                      "keeping the original position state")
-        if matched > 0 or (plan.reduce_only and hedge_fill > 0):
-            self._reset_rolling_arming()
+            buy_info = execution.get("buy_info") or {}
+            sell_info = execution.get("sell_info") or {}
+            buy_px = buy_info.get("avg_px")
+            sell_px = sell_info.get("avg_px")
+            if buy_px is None or sell_px is None:
+                self._halt_rolling("rolling entry is missing actual average fills")
+                return
+            try:
+                self._rolling_ledger.add_lot(
+                    lot_id=execution["event_id"],
+                    source_event_id=execution["event_id"],
+                    direction=execution["direction"],
+                    open_qty=matched,
+                    entry_ts=execution["settled_ts"],
+                    buy_venue=execution["buy"].name,
+                    sell_venue=execution["sell"].name,
+                    buy_avg_px=buy_px,
+                    sell_avg_px=sell_px,
+                    buy_fee_bps=execution["buy"].fee_bps,
+                    sell_fee_bps=execution["sell"].fee_bps,
+                )
+            except (LotLedgerError, KeyError, TypeError, ValueError) as exc:
+                self._halt_rolling(f"rolling lot entry failed: {exc}")
+                return
+            self._rolling_result_meta = {"action": "entry"}
+
+        try:
+            self._sync_rolling_cache()
+        except LotLedgerError as exc:
+            self._halt_rolling(f"rolling ledger state invalid: {exc}")
+            return
+        self._reset_rolling_arming()
         self._rolling_signal_meta = {}
+
+    @staticmethod
+    def _rolling_exit_prices(execution: dict, hedge: dict) -> tuple[float, float]:
+        """Return effective exit prices, blending a settled residual hedge."""
+        plan = execution["plan"]
+        buy_info = execution.get("buy_info") or {}
+        sell_info = execution.get("sell_info") or {}
+        buy_px = buy_info.get("avg_px") or plan.buy_limit
+        sell_px = sell_info.get("avg_px") or plan.sell_limit
+        try:
+            buy_qty = float(buy_info.get("filled_base")
+                            or execution.get("matched_qty") or 0.0)
+            sell_qty = float(sell_info.get("filled_base")
+                             or execution.get("matched_qty") or 0.0)
+            hedge_qty = max(float(hedge.get("filled_qty") or 0.0), 0.0)
+            hedge_px = hedge.get("avg_px")
+        except (TypeError, ValueError):
+            return float(buy_px), float(sell_px)
+        if hedge_qty <= 0 or hedge_px is None:
+            return float(buy_px), float(sell_px)
+        hedge_px = float(hedge_px)
+        hedge_venue = str(hedge.get("venue") or "")
+        if hedge_venue == getattr(execution["buy"], "name", ""):
+            total = buy_qty + hedge_qty
+            if total > 0:
+                buy_px = (buy_qty * float(buy_px)
+                          + hedge_qty * hedge_px) / total
+        elif hedge_venue == getattr(execution["sell"], "name", ""):
+            total = sell_qty + hedge_qty
+            if total > 0:
+                sell_px = (sell_qty * float(sell_px)
+                           + hedge_qty * hedge_px) / total
+        return float(buy_px), float(sell_px)
+
+    @staticmethod
+    def _scaled_lot_allocations(allocations, qty: float) -> tuple:
+        """Trim planner allocations to the quantity actually paired/fillable."""
+        remaining = max(float(qty), 0.0)
+        selected = []
+        for allocation in allocations or ():
+            if remaining <= 1e-12:
+                break
+            take = min(float(allocation["qty"]), remaining)
+            if take > 1e-12:
+                selected.append({"lot_id": allocation["lot_id"],
+                                 "qty": take})
+                remaining -= take
+        return tuple(selected) if remaining <= 1e-9 else ()
 
     async def _execute(self, buy, sell, plan: ArbPlan) -> Optional[dict]:
         """Send both legs and settle the fills. Both venue locks are held by
@@ -833,6 +1002,7 @@ class Engine:
         if self.halted:
             return None
         cfg = self.cfg
+        self._rolling_result_meta = {}
         signal_ts = time.time()
         self._event_seq += 1
         event_id = f"{int(self.start_ts * 1000)}-{self._event_seq:06d}"
@@ -849,7 +1019,7 @@ class Engine:
         entropy_book_server_age_ms = self.entropy.book.server_age_ms(signal_ts)
         entropy_update_gap_ms = self.entropy.book.last_update_gap_ms
         hedge_update_gap_ms = self.hedge.book.last_update_gap_ms
-        inv_bps = self._inv_add_bps(buy, sell)
+        inv_bps = 0.0 if plan.reduce_only else self._inv_add_bps(buy, sell)
         direction = "sell_entropy" if sell.key == "entropy" else "buy_entropy"
         rolling_signal_meta = (
             dict(self._rolling_signal_meta)
@@ -860,9 +1030,18 @@ class Engine:
                  direction, buy.name, plan.qty, plan.buy_limit, sell.name,
                  plan.sell_limit, plan.buy_notional, plan.q_max_notional,
                  plan.marginal_premium_bps, plan.exp_edge_usd)
-        slip = cfg.leg_slippage_bps / 1e4
-        buy_bound = buy.px_round(plan.buy_limit * (1 + slip), round_up=False)
-        sell_bound = sell.px_round(plan.sell_limit * (1 - slip), round_up=True)
+        if plan.reduce_only and cfg.strategy_mode == "rolling":
+            # Rolling reduce plans already contain break-even-safe protective
+            # limits. Widening them with generic entry slippage could turn a
+            # profitable lot close into a loss.
+            buy_bound = buy.px_round(plan.buy_limit, round_up=False)
+            sell_bound = sell.px_round(plan.sell_limit, round_up=True)
+        else:
+            slip = cfg.leg_slippage_bps / 1e4
+            buy_bound = buy.px_round(plan.buy_limit * (1 + slip),
+                                     round_up=False)
+            sell_bound = sell.px_round(plan.sell_limit * (1 - slip),
+                                       round_up=True)
         self._record_send(buy)
         self._record_send(sell)
 
@@ -1165,6 +1344,16 @@ class Engine:
                 raise r  # strict startup: fail loudly
         if hedge:
             await self._maybe_hedge()
+        if (self._rolling_ledger_loaded and not self._venue_down
+                and self._rolling_ledger is not None):
+            try:
+                self._rolling_ledger.validate_positions({
+                    key: venue.position for key, venue in self.venues.items()})
+                self._sync_rolling_cache()
+            except LotLedgerError as exc:
+                self._halt_rolling(f"position reconciliation mismatch: {exc}")
+                if strict:
+                    raise RuntimeError(str(exc)) from exc
 
     async def _reconcile_venue(self, v, strict: bool) -> None:
         async with self._vlock(v.key):
@@ -1308,11 +1497,19 @@ class Engine:
                    if self.recorder else "")
             if cfg.strategy_mode == "rolling":
                 open_state = (f"{self._rolling_open_direction} "
-                              f"qty={self._rolling_open_qty:.6g}"
+                              f"qty={self._rolling_open_qty:.6g} "
+                              f"lots={self._rolling_open_lot_count}"
                               if self._rolling_open_direction else "flat")
                 signal = self._rolling_signal_meta
-                signal_s = (f"{signal.get('reason')} z={signal.get('z')}"
-                            if signal else "no signal")
+                snapshot = self._rolling.snapshot_for(
+                    self._rolling._block_start(time.time()))
+                if signal:
+                    signal_s = (f"{signal.get('reason')} "
+                                f"center={signal.get('center_bps')}bps "
+                                f"coverage={signal.get('coverage_pct')}%")
+                else:
+                    signal_s = (f"no signal center={snapshot.median_bps}bps "
+                                f"coverage={snapshot.coverage_pct}%")
                 log.info(
                     "[status] %s | prem %s bps (rolling %s; %s) | pos %s "
                     "net %+.6g | trades %d hedges %d | MTM %s expEdge $%.4f "
@@ -1355,6 +1552,8 @@ class Engine:
                 binfo = execution["buy_info"]
                 sinfo = execution["sell_info"]
                 rolling = execution.get("rolling_signal_meta") or {}
+                result = self._rolling_result_meta if (
+                    self.cfg.strategy_mode == "rolling") else {}
                 w.writerow([
                     f"{execution['settled_ts']:.3f}",
                     f"{execution['signal_ts']:.3f}", self.run_id,
@@ -1368,11 +1567,18 @@ class Engine:
                     execution["direction"], execution["strategy_mode"],
                     int(execution["reduce_only"]),
                     rolling.get("reason", ""),
-                    _csv_num(rolling.get("z"), 6),
-                    _csv_num(rolling.get("mean_bps"), 6),
-                    _csv_num(rolling.get("std_bps"), 6),
+                    rolling.get("action") or result.get("action", ""),
+                    _csv_num(rolling.get("center_bps"), 6),
                     _csv_num(rolling.get("coverage_pct"), 6),
                     _csv_num(rolling.get("snapshot_ts"), 6),
+                    _csv_num(rolling.get("valid_minutes"), 6),
+                    self._rolling_open_lot_count
+                    if self.cfg.strategy_mode == "rolling" else "",
+                    _csv_num(self._rolling_open_qty)
+                    if self.cfg.strategy_mode == "rolling" else "",
+                    _csv_num(plan.expected_exit_capture_bps),
+                    _csv_num(result.get("realized_capture_bps"), 6),
+                    _csv_num(result.get("realized_capture_usd"), 6),
                     buy.name, sell.name,
                     _csv_num(plan.qty),
                     _csv_num(execution["buy_bbo_px"]),
@@ -1390,7 +1596,8 @@ class Engine:
                     f"{plan.buy_notional:.2f}", f"{plan.sell_notional:.2f}",
                     f"{plan.exp_edge_usd:.4f}", f"{plan.gross_edge_usd:.4f}",
                     f"{plan.marginal_premium_bps:.3f}",
-                    f"{self.cfg.midline_bps:.3f}",
+                    ("" if self.cfg.strategy_mode == "rolling"
+                     else f"{self.cfg.midline_bps:.3f}"),
                     f"{execution['inv_bps']:.3f}",
                     _csv_num(binfo.get("filled_base")),
                     _csv_num(sinfo.get("filled_base")),

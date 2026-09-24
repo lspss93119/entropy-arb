@@ -63,17 +63,20 @@ midline − lower  ────────────────────�
 固定阈值策略仍然是默认值。要明确启用 walk-forward 滚动策略，请在
 `config.yaml` 中设置 `strategy.mode: rolling`，并调整
 [config.example.yaml](config.example.yaml) 里的 `rolling:` 区块。它只使用
-已经完成的分钟采集行，在前一个窗口上计算均值与总体标准差，并按
-`update_minutes` 更新；入场同时需要 z 分数偏离、最小 bps 偏离、当前盘口点差
-和原有的含手续费可成交双腿计划。
+严格早于当前更新区块的已完成分钟采集行，以中位数作为动态中枢，并按
+`update_minutes` 更新。`thresholds.upper_bps` 与 `thresholds.lower_bps` 仍然是
+动态中枢两侧的可执行入场带宽；`thresholds.midline_bps` 只为 fixed 模式兼容而
+保留，rolling 交易不会使用它。当前盘口点差、覆盖率和原有的含手续费可成交
+双腿计划仍然必须通过。
 
-rolling 同时最多持有一个价差仓位。z 分数回到 `exit_z` 内，或超过
-`timeout_hours` 后退出；退出两条主腿都会带 reduce-only，即使暂时没有正的
-可成交价差也会优先解除风险。窗口无效或覆盖率不足时会停止新入场，不会偷偷
-退回固定策略。实盘启动时两边经链上核对后的仓位必须都是零，因为无法安全推断
-继承仓位的价差方向。
-实盘 rolling 也必须保持 `recorder.enabled: true`；如果下单失败或结果未确认，
-rolling 会停机，必须先以交易所权威仓位完成对账，再手动重启才能继续。
+rolling 可以在同方向入场信号持续成立时连续增加库存。每次两腿结算后的入场都以
+实际平均成交价记录为一个 pair-specific lot。遇到动态带的相反方向信号时，程序会
+建立 reduce-only 计划，按当前可成交深度优先选择预期回收较好的 lot，并且不会让
+平仓低于其 break-even 门槛。部分平仓会继续保留在 ledger 中，直到全部库存关闭才
+回到 flat；没有 timeout 或强制平仓。窗口无效或覆盖率不足时会停止新入场，不会偷偷
+退回固定策略。实盘启动和后续对账时，持久化 lot ledger 必须与交易所权威仓位一致；
+缺失、损坏或不匹配都会停止 rolling。实盘 rolling 仍必须保持
+`recorder.enabled: true`，停机后需要完成对账并手动重启。
 
 现有 `thresholds:` 区块仍然必须保留，方便同一份配置切回 `fixed`；
 `--record-only` 的无下单行为不变。
@@ -201,7 +204,7 @@ python3 main.py --symbol SNDK --hedge lighter-rh
 | `strategy.mode` | 信号模式：`fixed` 或 `rolling` | `fixed` |
 | `thresholds.midline_bps` | 溢价中枢（必须实测！） | — |
 | `thresholds.upper_bps` / `lower_bps` | 入场带宽（> 0） | — |
-| `rolling.*` | 滚动窗口、z 分数、点差、覆盖率与超时闸门 | 见配置文件 |
+| `rolling.*` | 因果中位数窗口、更新频率、覆盖率、CSV seed 和平仓回收门槛 | 见配置文件 |
 | `entropy.dex` | Entropy 在 Hyperliquid 上的 dex 名 | `io` |
 | `*.taker_fee_bps` | 各所吃单费 | 0.0（tradexyz 对冲腿：1.0） |
 | `*.max_position_usd` | 各所持仓上限 | 1000 |
@@ -247,8 +250,8 @@ python3 main.py --symbol SNDK --hedge lighter-rh
   orderStatus 兜底）。
 - **持续性闸门**（`premium_persist_sec`）：信号先"武装"，持续存在才触发，
   过滤单 tick 的假信号。
-- **Rolling 模式**（明确选择后）：使用严格排除当前区块的滚动快照，最多持有
-  一个价差仓位，并在均值回归或超时后用 reduce-only 主腿平仓。
+- **Rolling 模式**（明确选择后）：使用严格排除当前区块的滚动中位数，允许同方向
+  库存追加，并在相反动态带出现时以 break-even 安全的 reduce-only 主腿平仓。
 - **库存阶梯**：仓位超过上限的 `floor_frac` 后，同方向加仓需要线性递增的
   额外溢价，满仓时最高加 `scale_bps`。
 - **净敞口对冲**：两腿成交不对等时立即用 reduce-only 单（带滑点保护）

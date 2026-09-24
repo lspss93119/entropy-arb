@@ -76,6 +76,7 @@ _ZH = {
         "信号 —— 可成交溢价 vs 完整门槛（含手续费，● = 已武装）",
     "mid premium ": "中间价溢价 ",
     "   midline ": "   中枢 ",
+    "   rolling median ": "   滚动中位数 ",
     "   band ": "   区间 ",
     "SELL entropy → buy {h}": "卖出 entropy → 买入 {h}",
     "BUY entropy → sell {h}": "买入 entropy → 卖出 {h}",
@@ -306,12 +307,22 @@ class Dashboard:
         return Panel(g, title=self._t("session"), box=box.ROUNDED,
                      padding=(0, 1))
 
-    def _dir_row(self, t: Table, label: str, buy, sell, hurdle_bps: float,
+    def _dir_row(self, t: Table, label: str, buy, sell,
+                 hurdle_bps: Optional[float],
                  armed_key: str) -> None:
         """One direction: executable premium vs its full hurdle (fees and
         inventory surcharge included)."""
         eng = self.eng
         ba, sb = buy.book.best_ask(), sell.book.best_bid()
+        if hurdle_bps is None:
+            if not (ba and sb):
+                t.add_row(label, Text("—", style="dim"), "—",
+                          Text("—", style="dim"), "")
+                return
+            prem = (sb / ba - 1) * 1e4
+            t.add_row(label, f"{prem:+.2f}", "—",
+                      Text("—", style="dim"), "")
+            return
         hurdle = (hurdle_bps + buy.fee_bps + sell.fee_bps
                   + eng._inv_add_bps(buy, sell))
         if not (ba and sb):
@@ -334,11 +345,34 @@ class Dashboard:
         head.append(self._t("mid premium "), style="dim")
         head.append(f"{prem:+.2f} bps" if prem is not None else "—",
                     style="bold cyan")
-        head.append(self._t("   midline "), style="dim")
-        head.append(f"{cfg.midline_bps:+.2f}")
-        head.append(self._t("   band "), style="dim")
-        head.append(f"[{cfg.midline_bps - cfg.lower_bps:+.2f} … "
-                    f"{cfg.midline_bps + cfg.upper_bps:+.2f}]")
+        if cfg.strategy_mode == "rolling":
+            center = (eng._rolling_signal_meta.get("center_bps")
+                      if eng._rolling_signal_meta else None)
+            if center is None and eng._rolling is not None:
+                snapshot = eng._rolling.snapshot_for(
+                    eng._rolling._block_start(time.time()))
+                if snapshot.valid:
+                    center = snapshot.median_bps
+            head.append(self._t("   rolling median "), style="dim")
+            head.append(f"{center:+.2f}" if center is not None else "—")
+            head.append(self._t("   band "), style="dim")
+            if center is None:
+                head.append("[warming]")
+            else:
+                head.append(f"[{center - cfg.lower_bps:+.2f} … "
+                            f"{center + cfg.upper_bps:+.2f}]")
+            sell_hurdle = (center + cfg.upper_bps
+                           if center is not None else None)
+            buy_hurdle = (cfg.lower_bps - center
+                          if center is not None else None)
+        else:
+            head.append(self._t("   midline "), style="dim")
+            head.append(f"{cfg.midline_bps:+.2f}")
+            head.append(self._t("   band "), style="dim")
+            head.append(f"[{cfg.midline_bps - cfg.lower_bps:+.2f} … "
+                        f"{cfg.midline_bps + cfg.upper_bps:+.2f}]")
+            sell_hurdle = cfg.midline_bps + cfg.upper_bps
+            buy_hurdle = cfg.lower_bps - cfg.midline_bps
         t = Table(box=box.SIMPLE_HEAD, expand=True, padding=(0, 1))
         t.add_column(self._t("direction"))
         t.add_column(self._t("exec prem bps"), justify="right")
@@ -347,10 +381,10 @@ class Dashboard:
         t.add_column("", justify="left")
         self._dir_row(t, self._t("SELL entropy → buy {h}", h=eng.hedge.name),
                       eng.hedge, eng.entropy,
-                      cfg.midline_bps + cfg.upper_bps, "sell_entropy")
+                      sell_hurdle, "sell_entropy")
         self._dir_row(t, self._t("BUY entropy → sell {h}", h=eng.hedge.name),
                       eng.entropy, eng.hedge,
-                      cfg.lower_bps - cfg.midline_bps, "buy_entropy")
+                      buy_hurdle, "buy_entropy")
         return Panel(Group(head, t),
                      title=self._t("signal — executable premium vs full "
                                    "hurdle incl. fees (● = armed)"),
