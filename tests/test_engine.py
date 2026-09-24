@@ -11,9 +11,10 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from entropy_arb.book import OrderBook  # noqa: E402
+from entropy_arb.book import ArbPlan, OrderBook  # noqa: E402
 from entropy_arb.config import load_config  # noqa: E402
 from entropy_arb.engine import Engine  # noqa: E402
+from entropy_arb.rolling import RollingSignal  # noqa: E402
 
 NO_ENV = os.path.join(tempfile.gettempdir(), "entropy-arb-no-such.env")
 
@@ -131,6 +132,24 @@ def seed_rolling(eng, now):
     return block
 
 
+def rolling_execution(direction, matched_qty, settled_ts,
+                      reduce_only=False):
+    plan = ArbPlan(
+        qty=max(matched_qty, 1.0), buy_limit=100.0, sell_limit=100.0,
+        buy_notional=100.0, sell_notional=100.0,
+        q_max=1.0, q_max_notional=100.0,
+        top_premium_bps=0.0, marginal_premium_bps=0.0,
+        buy_fee=0.0, sell_fee=0.0, reduce_only=reduce_only,
+    )
+    return {
+        "ok": True,
+        "matched_qty": matched_qty,
+        "plan": plan,
+        "direction": direction,
+        "settled_ts": settled_ts,
+    }
+
+
 def test_scan_fires_sell_entropy_above_band():
     eng = make_engine(midline=5.0, upper=4.0, lower=3.0)
     # entropy 15 bps rich vs hedge: above midline+upper=9 -> sell entropy
@@ -189,17 +208,178 @@ def test_rolling_scan_enters_from_valid_snapshot():
     assert eng._rolling_signal_meta["direction"] == "sell_entropy"
 
 
-def test_rolling_scan_does_not_pyramid_an_open_position():
+@pytest.mark.parametrize(
+    ("direction", "entropy_book", "hedge_book"),
+    [
+        ("sell_entropy", (100.11, 100.13), (99.99, 100.01)),
+        ("buy_entropy", (99.87, 99.89), (99.99, 100.01)),
+    ],
+)
+def test_rolling_scan_allows_same_direction_entry_for_open_inventory(
+        direction, entropy_book, hedge_book):
     eng = make_engine(mode="rolling")
     now = __import__("time").time()
     seed_rolling(eng, now)
+    eng._rolling_open_direction = direction
+    eng._rolling_open_qty = 1.0
+    eng._rolling_entry_ts = now - 60.0
+    eng.entropy.set_book(*entropy_book)
+    eng.hedge.set_book(*hedge_book)
+
+    best = run_scan(eng)
+
+    assert best is not None
+    buy, sell, plan = best
+    assert plan.reduce_only is False
+    assert eng._rolling_signal_meta["direction"] == direction
+    if direction == "sell_entropy":
+        assert buy.key == "hedge" and sell.key == "entropy"
+    else:
+        assert buy.key == "entropy" and sell.key == "hedge"
+
+
+def test_rolling_open_inventory_rejects_opposite_entry_signal(monkeypatch):
+    eng = make_engine(mode="rolling")
+    now = __import__("time").time()
     eng._rolling_open_direction = "sell_entropy"
     eng._rolling_open_qty = 1.0
     eng._rolling_entry_ts = now - 60.0
     eng.entropy.set_book(100.11, 100.13)
     eng.hedge.set_book(99.99, 100.01)
+    entry_calls = []
+
+    def no_exit(*args):
+        return None
+
+    def opposite_entry(*args):
+        entry_calls.append(args)
+        return RollingSignal(
+            "buy_entropy", "entry", -2.0, now, 0.0, 1.0, 100.0, 720)
+
+    monkeypatch.setattr(eng._rolling, "exit_signal", no_exit)
+    monkeypatch.setattr(eng._rolling, "entry_signal", opposite_entry)
 
     assert run_scan(eng) is None
+    assert entry_calls
+    assert eng._rolling_open_direction == "sell_entropy"
+    assert eng._rolling_open_qty == 1.0
+
+
+def test_rolling_add_entry_uses_inventory_surcharge(monkeypatch):
+    eng = make_engine(mode="rolling")
+    eng.cfg.inventory_scale_bps = 10.0
+    eng.cfg.inventory_floor_frac = 0.5
+    now = __import__("time").time()
+    seed_rolling(eng, now)
+    eng._rolling_open_direction = "sell_entropy"
+    eng._rolling_open_qty = 1.0
+    eng._rolling_entry_ts = now - 60.0
+    eng.hedge.position = 90.0
+    eng.entropy.position = -90.0
+    eng.entropy.set_book(100.11, 100.13)
+    eng.hedge.set_book(99.99, 100.01)
+    thresholds = []
+    original_plan = eng._plan
+
+    def spy_plan(buy, sell, cap_notional, **kwargs):
+        thresholds.append(kwargs.get("threshold_bps"))
+        return original_plan(buy, sell, cap_notional, **kwargs)
+
+    monkeypatch.setattr(eng, "_plan", spy_plan)
+
+    best = run_scan(eng)
+
+    assert best is not None
+    assert thresholds[-1] == pytest.approx(8.0, abs=0.2)
+
+
+def test_rolling_add_entry_respects_position_headroom():
+    eng = make_engine(mode="rolling")
+    eng.cfg.inventory_scale_bps = 0.0
+    now = __import__("time").time()
+    seed_rolling(eng, now)
+    eng._rolling_open_direction = "sell_entropy"
+    eng._rolling_open_qty = 1.0
+    eng._rolling_entry_ts = now - 60.0
+    eng.hedge.position = 99.0
+    eng.entropy.position = -99.0
+    eng.entropy.set_book(100.11, 100.13)
+    eng.hedge.set_book(99.99, 100.01)
+
+    best = run_scan(eng)
+
+    assert best is not None
+    buy, sell, plan = best
+    headroom = eng._headroom(buy, sell, plan.buy_limit)
+    assert plan.buy_notional <= headroom + 1e-6
+
+
+def test_rolling_same_direction_fill_accumulates_and_preserves_cycle_timeout(
+        caplog):
+    eng = make_engine(mode="rolling")
+    first_entry_ts = 100.0
+    eng._update_rolling_position(
+        rolling_execution("sell_entropy", 0.4, first_entry_ts),
+        {"status": "filled", "filled_qty": 0.4},
+    )
+    eng._update_rolling_position(
+        rolling_execution("sell_entropy", 0.6, 200.0),
+        {"status": "filled", "filled_qty": 0.6},
+    )
+
+    assert eng._rolling_open_direction == "sell_entropy"
+    assert eng._rolling_open_qty == pytest.approx(1.0)
+    assert eng._rolling_entry_ts == first_entry_ts
+    assert "second entry" not in caplog.text
+
+
+def test_rolling_reduce_only_exit_closes_accumulated_inventory():
+    eng = make_engine(mode="rolling")
+    eng._update_rolling_position(
+        rolling_execution("buy_entropy", 0.75, 100.0),
+        {"status": "filled", "filled_qty": 0.75},
+    )
+    eng._update_rolling_position(
+        rolling_execution("buy_entropy", 0.75, 200.0),
+        {"status": "filled", "filled_qty": 0.75},
+    )
+    exit_execution = rolling_execution(
+        "sell_entropy", 0.5, 300.0, reduce_only=True)
+
+    eng._update_rolling_position(
+        exit_execution, {"status": "filled", "filled_qty": 0.0})
+
+    assert eng._rolling_open_direction == "buy_entropy"
+    assert eng._rolling_open_qty == pytest.approx(1.0)
+    assert eng._rolling_entry_ts == 100.0
+
+    eng._update_rolling_position(
+        rolling_execution("sell_entropy", 1.0, 400.0, reduce_only=True),
+        {"status": "filled", "filled_qty": 0.0},
+    )
+
+    assert eng._rolling_open_direction is None
+    assert eng._rolling_open_qty == 0.0
+    assert eng._rolling_entry_ts is None
+
+
+def test_rolling_state_rejects_opposite_entry_without_changing_inventory(
+        caplog):
+    eng = make_engine(mode="rolling")
+    eng._update_rolling_position(
+        rolling_execution("sell_entropy", 1.0, 100.0),
+        {"status": "filled", "filled_qty": 1.0},
+    )
+
+    eng._update_rolling_position(
+        rolling_execution("buy_entropy", 0.5, 200.0),
+        {"status": "filled", "filled_qty": 0.5},
+    )
+
+    assert eng._rolling_open_direction == "sell_entropy"
+    assert eng._rolling_open_qty == pytest.approx(1.0)
+    assert eng._rolling_entry_ts == 100.0
+    assert "opposite entry" in caplog.text
 
 
 def test_rolling_scan_exits_on_reversal_to_mean():
