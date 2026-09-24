@@ -669,7 +669,7 @@ class Engine:
         return best
 
     def _scan_rolling(self, now: float):
-        """Evaluate one flat-to-flat rolling-window position."""
+        """Evaluate rolling entry, add, and directional exit signals."""
         rolling = self._rolling
         if rolling is None:
             return None
@@ -688,57 +688,66 @@ class Engine:
         if premium is None:
             return None
 
-        if self._rolling_open_direction is not None:
+        open_direction = self._rolling_open_direction
+        if open_direction is not None:
             if self._rolling_entry_ts is None:
                 return None
-            signal = rolling.exit_signal(
+            exit_signal = rolling.exit_signal(
                 premium, now, entropy_spread, hedge_spread,
-                self._rolling_entry_ts, self._rolling_open_direction)
+                self._rolling_entry_ts, open_direction)
+            if exit_signal is not None:
+                buy, sell = self._direction_venues(exit_signal.direction,
+                                                    entropy, hedge)
+                dkey = exit_signal.direction
+                if (self._vlock(buy.key).locked()
+                        or self._vlock(sell.key).locked()
+                        or self._venue_limited(buy)
+                        or self._venue_limited(sell)
+                        or not (self._venue_rate_ok(buy)
+                                and self._venue_rate_ok(sell))):
+                    return None
+                if (buy.book.last_update_ts <= buy.last_traded_ts
+                        or sell.book.last_update_ts <= sell.last_traded_ts):
+                    return None
+                ref_px = buy.book.best_ask()
+                if ref_px is None:
+                    return None
+                cap_notional = min(cfg.max_order_notional,
+                                   self._rolling_open_qty * ref_px)
+                plan, reason = self._plan(
+                    buy, sell, cap_notional, threshold_bps=0.0,
+                    require_edge=False, reduce_only=True)
+                if plan is None:
+                    self._skiplog("rolling exit %s unavailable: %s",
+                                  dkey, reason)
+                    return None
+                self._reset_rolling_arming()
+                self._rolling_signal_meta = self._rolling_signal_meta_for(
+                    exit_signal)
+                return buy, sell, plan
+
+            signal = rolling.entry_signal(
+                premium, now, entropy_spread, hedge_spread)
+            if signal is None or signal.direction != open_direction:
+                self._reset_rolling_arming()
+                self._rolling_signal_meta = {}
+                return None
+        else:
+            # Do not build a second spread on top of a known residual leg. The
+            # reconcile loop may still be able to flatten a below-minimum or
+            # temporarily unavailable residual position.
+            if any(abs(v.position) > cfg.net_tolerance_base
+                   for v in self.venues.values()):
+                self._skiplog("rolling blocked: non-flat residual position")
+                return None
+
+            signal = rolling.entry_signal(
+                premium, now, entropy_spread, hedge_spread)
             if signal is None:
+                self._reset_rolling_arming()
+                self._rolling_signal_meta = {}
                 return None
-            buy, sell = self._direction_venues(signal.direction,
-                                                entropy, hedge)
-            dkey = signal.direction
-            if (self._vlock(buy.key).locked()
-                    or self._vlock(sell.key).locked()
-                    or self._venue_limited(buy)
-                    or self._venue_limited(sell)
-                    or not (self._venue_rate_ok(buy)
-                            and self._venue_rate_ok(sell))):
-                return None
-            if (buy.book.last_update_ts <= buy.last_traded_ts
-                    or sell.book.last_update_ts <= sell.last_traded_ts):
-                return None
-            ref_px = buy.book.best_ask()
-            if ref_px is None:
-                return None
-            cap_notional = min(cfg.max_order_notional,
-                               self._rolling_open_qty * ref_px)
-            plan, reason = self._plan(
-                buy, sell, cap_notional, threshold_bps=0.0,
-                require_edge=False, reduce_only=True)
-            if plan is None:
-                self._skiplog("rolling exit %s unavailable: %s", dkey, reason)
-                return None
-            self._reset_rolling_arming()
-            self._rolling_signal_meta = self._rolling_signal_meta_for(signal)
-            return buy, sell, plan
 
-        # Do not build a second spread on top of a known residual leg. The
-        # reconcile loop may still be able to flatten a below-minimum or
-        # temporarily unavailable residual position.
-        if any(abs(v.position) > cfg.net_tolerance_base
-               for v in self.venues.values()):
-            self._skiplog("rolling blocked: non-flat residual position")
-            return None
-
-        signal = rolling.entry_signal(
-            premium, now, entropy_spread, hedge_spread)
-        if signal is None:
-            self._armed["sell_entropy"] = None
-            self._armed["buy_entropy"] = None
-            self._rolling_signal_meta = {}
-            return None
         buy, sell = self._direction_venues(signal.direction, entropy, hedge)
         dkey = signal.direction
         for direction in self._armed:
@@ -752,8 +761,10 @@ class Engine:
         if (buy.book.last_update_ts <= buy.last_traded_ts
                 or sell.book.last_update_ts <= sell.last_traded_ts):
             return None
+        threshold_bps = self._inv_add_bps(buy, sell)
         plan, reason = self._plan(
-            buy, sell, cfg.max_order_notional, threshold_bps=0.0)
+            buy, sell, cfg.max_order_notional,
+            threshold_bps=threshold_bps)
         if reason in ("no_edge", "empty_book"):
             self._armed[dkey] = None
             return None
@@ -771,7 +782,7 @@ class Engine:
         if headroom < plan.buy_notional:
             plan, _ = self._plan(
                 buy, sell, min(cfg.max_order_notional, headroom),
-                threshold_bps=0.0)
+                threshold_bps=threshold_bps)
             if plan is None:
                 self._skiplog("rolling %s blocked by position caps", dkey)
                 return None
@@ -807,8 +818,10 @@ class Engine:
             self._rolling_open_direction = execution["direction"]
             self._rolling_open_qty = matched
             self._rolling_entry_ts = execution["settled_ts"]
+        elif execution["direction"] == self._rolling_open_direction:
+            self._rolling_open_qty += matched
         else:
-            log.error("rolling position state received a second entry; "
+            log.error("rolling position state received an opposite entry; "
                       "keeping the original position state")
         if matched > 0 or (plan.reduce_only and hedge_fill > 0):
             self._reset_rolling_arming()
