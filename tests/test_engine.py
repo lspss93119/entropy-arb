@@ -274,6 +274,97 @@ def test_rolling_opposite_signal_plans_reduce_only_close():
     assert eng._rolling_open_qty == 1.0
 
 
+@pytest.mark.parametrize(
+    ("direction", "blocked_entropy", "blocked_hedge", "allowed_entropy",
+     "allowed_hedge", "entry_buy_px", "entry_sell_px"),
+    [
+        (
+            "sell_entropy",
+            (99.0, 99.99), (99.99, 100.01),
+            (99.0, 99.0), (99.99, 100.01),
+            100.0, 100.0,
+        ),
+        (
+            "buy_entropy",
+            (100.0, 101.0), (99.99, 100.01),
+            (101.0, 101.0), (99.99, 100.01),
+            99.0, 100.0,
+        ),
+    ],
+)
+def test_rolling_reduce_requires_executable_opposite_dynamic_threshold(
+        direction, blocked_entropy, blocked_hedge, allowed_entropy,
+        allowed_hedge, entry_buy_px, entry_sell_px):
+    eng = make_engine(mode="rolling")
+    now = __import__("time").time()
+    eng._update_rolling_position(
+        rolling_execution(direction, 1.0, now - 60.0,
+                          buy_px=entry_buy_px, sell_px=entry_sell_px),
+        {"status": "filled", "filled_qty": 0.0},
+    )
+    seed_rolling(eng, now)
+
+    eng.entropy.set_book(*blocked_entropy)
+    eng.hedge.set_book(*blocked_hedge)
+    assert run_scan(eng) is None
+
+    eng.entropy.set_book(*allowed_entropy)
+    eng.hedge.set_book(*allowed_hedge)
+    best = run_scan(eng)
+
+    assert best is not None
+    buy, sell, plan = best
+    assert plan.reduce_only is True
+    if direction == "sell_entropy":
+        assert buy.key == "entropy" and sell.key == "hedge"
+    else:
+        assert buy.key == "hedge" and sell.key == "entropy"
+
+
+def test_rolling_reduce_threshold_excludes_inventory_surcharge(monkeypatch):
+    eng = make_engine(mode="rolling")
+    now = __import__("time").time()
+    eng._update_rolling_position(
+        rolling_execution("sell_entropy", 1.0, now - 60.0,
+                          buy_px=100.0, sell_px=100.0),
+        {"status": "filled", "filled_qty": 0.0},
+    )
+    seed_rolling(eng, now)
+    monkeypatch.setattr(eng, "_inv_add_bps", lambda *_: 1_000.0)
+    eng.entropy.set_book(99.7, 99.7)
+    eng.hedge.set_book(99.99, 100.01)
+
+    best = run_scan(eng)
+
+    assert best is not None
+    assert best[2].reduce_only is True
+
+
+def test_rolling_reduce_gate_includes_both_venue_fees():
+    eng = make_engine(mode="rolling")
+    now = __import__("time").time()
+    eng._update_rolling_position(
+        rolling_execution("buy_entropy", 1.0, now - 60.0,
+                          buy_px=99.0, sell_px=100.0),
+        {"status": "filled", "filled_qty": 0.0},
+    )
+    seed_rolling(eng, now)
+    eng.entropy.fee_bps = 2.0
+    eng.hedge.fee_bps = 3.0
+
+    # Gross BBO premium is 8 bps, below the 4 bps dynamic hurdle plus 5 bps
+    # of fees, even though the mid/mid signal is already on the exit side.
+    eng.entropy.set_book(100.08, 100.08)
+    eng.hedge.set_book(100.0, 100.0)
+    assert run_scan(eng) is None
+
+    # At 10 bps gross, the executable opposite threshold is satisfied.
+    eng.entropy.set_book(100.10, 100.10)
+    best = run_scan(eng)
+    assert best is not None
+    assert best[2].reduce_only is True
+
+
 def test_rolling_add_entry_uses_inventory_surcharge(monkeypatch):
     eng = make_engine(mode="rolling")
     eng.cfg.inventory_scale_bps = 10.0
@@ -598,6 +689,74 @@ def test_rolling_partial_exit_counts_successful_residual_hedge():
 
     assert eng._rolling_open_qty == pytest.approx(0.6)
     assert eng._rolling_result_meta["closed_qty"] == pytest.approx(0.4)
+
+
+def test_rolling_complete_actual_exit_fills_populate_realized_capture():
+    eng = make_engine(mode="rolling")
+    eng._update_rolling_position(
+        rolling_execution("sell_entropy", 1.0, 100.0,
+                          buy_px=100.0, sell_px=102.0),
+        {"status": "filled", "filled_qty": 0.0},
+    )
+    exit_execution = rolling_execution(
+        "buy_entropy", 1.0, 200.0, reduce_only=True,
+        lot_id="event-100", buy_px=101.0, sell_px=101.5)
+
+    eng._update_rolling_position(
+        exit_execution, {"status": "filled", "filled_qty": 0.0})
+
+    assert eng._rolling_result_meta["realized_capture_usd"] == pytest.approx(2.5)
+    assert eng._rolling_result_meta["realized_capture_bps"] == pytest.approx(
+        2.5 / 101.0 * 1e4)
+    assert eng._rolling_open_qty == 0.0
+
+
+def test_rolling_residual_hedge_actual_price_is_blended_into_capture():
+    eng = make_engine(mode="rolling")
+    eng._update_rolling_position(
+        rolling_execution("sell_entropy", 1.0, 100.0,
+                          buy_px=100.0, sell_px=102.0),
+        {"status": "filled", "filled_qty": 0.0},
+    )
+    exit_execution = rolling_execution(
+        "buy_entropy", 0.75, 200.0, reduce_only=True,
+        buy_px=101.0, sell_px=101.5)
+    exit_execution["plan"] = replace(
+        exit_execution["plan"], qty=1.0,
+        lot_allocations=({"lot_id": "event-100", "qty": 1.0},))
+
+    eng._update_rolling_position(
+        exit_execution,
+        {"status": "filled", "filled_qty": 0.25,
+         "venue": "RH", "avg_px": 102.5},
+    )
+
+    # Entry cash is +2.0/base. Exit sell price is the blend of .75 at 101.5
+    # and .25 at 102.5, while the actual buy price is 101.0.
+    assert eng._rolling_result_meta["realized_capture_usd"] == pytest.approx(2.75)
+    assert eng._rolling_open_qty == 0.0
+
+
+def test_rolling_missing_actual_exit_price_closes_ledger_without_capture(
+        caplog):
+    eng = make_engine(mode="rolling")
+    eng._update_rolling_position(
+        rolling_execution("sell_entropy", 1.0, 100.0,
+                          buy_px=100.0, sell_px=102.0),
+        {"status": "filled", "filled_qty": 0.0},
+    )
+    exit_execution = rolling_execution(
+        "buy_entropy", 1.0, 200.0, reduce_only=True,
+        lot_id="event-100", buy_px=101.0, sell_px=101.5)
+    exit_execution["buy_info"]["avg_px"] = None
+
+    eng._update_rolling_position(
+        exit_execution, {"status": "filled", "filled_qty": 0.0})
+
+    assert eng._rolling_result_meta["realized_capture_usd"] is None
+    assert eng._rolling_result_meta["realized_capture_bps"] is None
+    assert eng._rolling_open_qty == 0.0
+    assert "realized capture unavailable" in caplog.text
 
 
 def test_rolling_filled_hedge_with_residual_net_position_halts():

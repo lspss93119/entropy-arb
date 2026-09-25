@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import csv
 import logging
+import math
 import os
 import time
 from collections import deque
@@ -536,6 +537,36 @@ class Engine:
             base = self.cfg.lower_bps - signal.center_bps
         return base + self._inv_add_bps(buy, sell)
 
+    def _rolling_reduce_gate(self, signal: RollingSignal, buy, sell) -> bool:
+        """Require the opposite rolling signal at the executable BBO.
+
+        This deliberately omits the inventory surcharge: a reduction is
+        judged against the dynamic rolling hurdle and venue fees only.
+        """
+        if signal.center_bps is None:
+            return False
+        buy_ask = buy.book.best_ask()
+        sell_bid = sell.book.best_bid()
+        if buy_ask is None or sell_bid is None:
+            return False
+        try:
+            buy_ask = float(buy_ask)
+            sell_bid = float(sell_bid)
+            buy_fee = float(buy.fee_bps) / 1e4
+            sell_fee = float(sell.fee_bps) / 1e4
+            if sell.key == "entropy":
+                threshold_bps = signal.center_bps + self.cfg.upper_bps
+            else:
+                threshold_bps = self.cfg.lower_bps - signal.center_bps
+            threshold = float(threshold_bps) / 1e4
+        except (TypeError, ValueError):
+            return False
+        if not all(math.isfinite(value) for value in (
+                buy_ask, sell_bid, buy_fee, sell_fee, threshold)):
+            return False
+        return (sell_bid * (1.0 - sell_fee)
+                >= buy_ask * (1.0 + buy_fee) * (1.0 + threshold))
+
     def _headroom(self, buy, sell, ref_px: float) -> float:
         hb = buy.cap_usd - buy.position * ref_px
         hs = sell.cap_usd + sell.position * ref_px
@@ -761,6 +792,11 @@ class Engine:
             if (buy.book.last_update_ts <= buy.last_traded_ts
                     or sell.book.last_update_ts <= sell.last_traded_ts):
                 return None
+            if not self._rolling_reduce_gate(signal, buy, sell):
+                self._skiplog(
+                    "rolling exit %s blocked by executable dynamic threshold",
+                    signal.direction)
+                return None
             ref_px = buy.book.best_ask()
             if ref_px is None:
                 return None
@@ -886,27 +922,38 @@ class Engine:
             if not allocations:
                 self._halt_rolling("rolling reduce has no lot allocations")
                 return
-            buy_px, sell_px = self._rolling_exit_prices(execution, hedge)
+            exit_prices = self._rolling_exit_prices(execution, hedge)
+            realized_usd = None
+            realized_bps = None
             try:
-                realized_usd = 0.0
                 reference_notional = 0.0
-                for allocation in allocations:
-                    usd, _ = self._rolling_ledger.realized_capture(
-                        allocation["lot_id"], allocation["qty"],
-                        buy_px=buy_px, sell_px=sell_px,
-                        buy_fee_bps=execution["buy"].fee_bps,
-                        sell_fee_bps=execution["sell"].fee_bps)
-                    realized_usd += usd
-                    lot = next(lot for lot in self._rolling_ledger.lots
-                               if lot.lot_id == allocation["lot_id"])
-                    reference_notional += (allocation["qty"]
-                                           * lot.reference_entry_notional_per_base)
+                if exit_prices is not None:
+                    buy_px, sell_px = exit_prices
+                    realized_usd = 0.0
+                    for allocation in allocations:
+                        usd, _ = self._rolling_ledger.realized_capture(
+                            allocation["lot_id"], allocation["qty"],
+                            buy_px=buy_px, sell_px=sell_px,
+                            buy_fee_bps=execution["buy"].fee_bps,
+                            sell_fee_bps=execution["sell"].fee_bps)
+                        realized_usd += usd
+                        lot = next(lot for lot in self._rolling_ledger.lots
+                                   if lot.lot_id == allocation["lot_id"])
+                        reference_notional += (
+                            allocation["qty"]
+                            * lot.reference_entry_notional_per_base)
+                    realized_bps = (realized_usd / reference_notional * 1e4
+                                    if reference_notional > 0 else None)
+                else:
+                    log.warning(
+                        "rolling realized capture unavailable for event %s: "
+                        "missing actual exit fill price; closing ledger "
+                        "quantity without capture telemetry",
+                        execution.get("event_id", ""))
                 self._rolling_ledger.close_allocations(allocations)
             except (LotLedgerError, StopIteration, TypeError, ValueError) as exc:
                 self._halt_rolling(f"rolling lot close failed: {exc}")
                 return
-            realized_bps = (realized_usd / reference_notional * 1e4
-                            if reference_notional > 0 else None)
             self._rolling_result_meta = {
                 "action": "reduce",
                 "closed_qty": closed_qty,
@@ -949,37 +996,53 @@ class Engine:
         self._rolling_signal_meta = {}
 
     @staticmethod
-    def _rolling_exit_prices(execution: dict, hedge: dict) -> tuple[float, float]:
-        """Return effective exit prices, blending a settled residual hedge."""
-        plan = execution["plan"]
+    def _rolling_exit_prices(execution: dict, hedge: dict):
+        """Return actual effective exit prices, or None when unavailable."""
         buy_info = execution.get("buy_info") or {}
         sell_info = execution.get("sell_info") or {}
-        buy_px = buy_info.get("avg_px") or plan.buy_limit
-        sell_px = sell_info.get("avg_px") or plan.sell_limit
+        buy_px = buy_info.get("avg_px")
+        sell_px = sell_info.get("avg_px")
+        if buy_px is None or sell_px is None:
+            return None
         try:
+            buy_px = float(buy_px)
+            sell_px = float(sell_px)
+            if not (math.isfinite(buy_px) and math.isfinite(sell_px)
+                    and buy_px > 0 and sell_px > 0):
+                return None
+            matched_qty = execution.get("matched_qty") or 0.0
             buy_qty = float(buy_info.get("filled_base")
-                            or execution.get("matched_qty") or 0.0)
+                            if buy_info.get("filled_base") is not None
+                            else matched_qty)
             sell_qty = float(sell_info.get("filled_base")
-                             or execution.get("matched_qty") or 0.0)
+                             if sell_info.get("filled_base") is not None
+                             else matched_qty)
             hedge_qty = max(float(hedge.get("filled_qty") or 0.0), 0.0)
             hedge_px = hedge.get("avg_px")
         except (TypeError, ValueError):
-            return float(buy_px), float(sell_px)
+            return None
         if hedge_qty <= 0 or hedge_px is None:
-            return float(buy_px), float(sell_px)
-        hedge_px = float(hedge_px)
+            return buy_px, sell_px
+        try:
+            hedge_px = float(hedge_px)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(hedge_px) or hedge_px <= 0:
+            return None
         hedge_venue = str(hedge.get("venue") or "")
         if hedge_venue == getattr(execution["buy"], "name", ""):
             total = buy_qty + hedge_qty
-            if total > 0:
-                buy_px = (buy_qty * float(buy_px)
-                          + hedge_qty * hedge_px) / total
+            if total <= 0:
+                return None
+            buy_px = (buy_qty * buy_px + hedge_qty * hedge_px) / total
         elif hedge_venue == getattr(execution["sell"], "name", ""):
             total = sell_qty + hedge_qty
-            if total > 0:
-                sell_px = (sell_qty * float(sell_px)
-                           + hedge_qty * hedge_px) / total
-        return float(buy_px), float(sell_px)
+            if total <= 0:
+                return None
+            sell_px = (sell_qty * sell_px + hedge_qty * hedge_px) / total
+        else:
+            return None
+        return buy_px, sell_px
 
     @staticmethod
     def _scaled_lot_allocations(allocations, qty: float) -> tuple:
