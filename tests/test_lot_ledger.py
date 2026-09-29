@@ -200,12 +200,51 @@ def test_reduce_planner_closes_be_safe_terminal_remainder():
         0.015)
 
 
+def test_reduce_planner_closes_terminal_remainder_when_fraction_is_below_min_notional():
+    ledger = LotLedger()
+    _lot(ledger, "lot-1", "sell_entropy", 0.018, 2_100.0, 2_100.0,
+         buy_fee_bps=0.0, sell_fee_bps=0.0)
+    buy = _book([], [(2_100.0, 0.018)])
+    sell = _book([(2_100.0, 0.018)], [])
+
+    fractional_qty = floor_step(0.018 * 0.25, 0.001)
+    assert fractional_qty == pytest.approx(0.004)
+    assert fractional_qty * 2_100.0 == pytest.approx(8.4)
+
+    plan, reason = plan_reduce_arb(
+        buy, sell, candidates=ledger.exit_candidates(0.0),
+        buy_fee_bps=0.0, sell_fee_bps=0.0, take_fraction=0.25,
+        cap_notional=1_000.0, min_base=0.0032, min_notional=10.0,
+        size_step=0.001)
+
+    assert reason == "ok"
+    assert plan.qty == pytest.approx(0.018)
+    assert plan.qty * 2_100.0 == pytest.approx(37.8)
+
+
 def test_reduce_planner_does_not_bypass_missing_terminal_be_depth():
     ledger = LotLedger()
     _lot(ledger, "lot-1", "sell_entropy", 0.015, 2_000.0, 2_000.0,
          buy_fee_bps=0.0, sell_fee_bps=0.0)
     buy = _book([], [(2_000.0, 0.010)])
     sell = _book([(2_000.0, 0.010)], [])
+
+    plan, reason = plan_reduce_arb(
+        buy, sell, candidates=ledger.exit_candidates(0.0),
+        buy_fee_bps=0.0, sell_fee_bps=0.0, take_fraction=0.25,
+        cap_notional=1_000.0, min_base=0.0032, min_notional=10.0,
+        size_step=0.001)
+
+    assert plan is None
+    assert reason == "below_min_base"
+
+
+def test_reduce_planner_does_not_bypass_missing_terminal_be_depth_at_min_notional_boundary():
+    ledger = LotLedger()
+    _lot(ledger, "lot-1", "sell_entropy", 0.018, 2_100.0, 2_100.0,
+         buy_fee_bps=0.0, sell_fee_bps=0.0)
+    buy = _book([], [(2_100.0, 0.012)])
+    sell = _book([(2_100.0, 0.012)], [])
 
     plan, reason = plan_reduce_arb(
         buy, sell, candidates=ledger.exit_candidates(0.0),
@@ -275,6 +314,56 @@ def test_reduce_planner_terminal_fallback_still_requires_min_notional():
          buy_fee_bps=0.0, sell_fee_bps=0.0)
     buy = _book([], [(100.0, 0.015)])
     sell = _book([(100.0, 0.015)], [])
+
+    plan, reason = plan_reduce_arb(
+        buy, sell, candidates=ledger.exit_candidates(0.0),
+        buy_fee_bps=0.0, sell_fee_bps=0.0, take_fraction=0.25,
+        cap_notional=1_000.0, min_base=0.0032, min_notional=10.0,
+        size_step=0.001)
+
+    assert plan is None
+    assert reason == "below_min_notional"
+
+
+def test_reduce_planner_terminal_fallback_respects_cap():
+    ledger = LotLedger()
+    _lot(ledger, "lot-1", "sell_entropy", 0.018, 2_100.0, 2_100.0,
+         buy_fee_bps=0.0, sell_fee_bps=0.0)
+    buy = _book([], [(2_100.0, 0.018)])
+    sell = _book([(2_100.0, 0.018)], [])
+
+    plan, _ = plan_reduce_arb(
+        buy, sell, candidates=ledger.exit_candidates(0.0),
+        buy_fee_bps=0.0, sell_fee_bps=0.0, take_fraction=0.25,
+        cap_notional=30.0, min_base=0.0032, min_notional=10.0,
+        size_step=0.001)
+
+    assert plan is None
+
+
+def test_reduce_planner_terminal_min_notional_exact_boundary_is_legal():
+    ledger = LotLedger()
+    _lot(ledger, "lot-1", "sell_entropy", 0.05, 200.0, 200.0,
+         buy_fee_bps=0.0, sell_fee_bps=0.0)
+    buy = _book([], [(200.0, 0.05)])
+    sell = _book([(200.0, 0.05)], [])
+
+    plan, reason = plan_reduce_arb(
+        buy, sell, candidates=ledger.exit_candidates(0.0),
+        buy_fee_bps=0.0, sell_fee_bps=0.0, take_fraction=0.25,
+        cap_notional=1_000.0, min_base=0.0032, min_notional=10.0,
+        size_step=0.001)
+
+    assert reason == "ok"
+    assert plan.qty == pytest.approx(0.05)
+
+
+def test_reduce_planner_terminal_min_notional_just_below_boundary_is_blocked():
+    ledger = LotLedger()
+    _lot(ledger, "lot-1", "sell_entropy", 0.05, 199.0, 199.0,
+         buy_fee_bps=0.0, sell_fee_bps=0.0)
+    buy = _book([], [(199.0, 0.05)])
+    sell = _book([(199.0, 0.05)], [])
 
     plan, reason = plan_reduce_arb(
         buy, sell, candidates=ledger.exit_candidates(0.0),

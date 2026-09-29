@@ -384,14 +384,16 @@ def plan_reduce_arb(buy_book: OrderBook, sell_book: OrderBook, *,
     target = min(q_max * float(take_fraction),
                  float(cap_notional) / asks[0][0])
     target = floor_step(target, size_step)
+    remaining_qty = sum(candidate["open_qty"] for candidate in normalized)
+    terminal_qty = floor_step(remaining_qty, size_step)
+    terminal_eligible = (
+        remaining_qty >= float(min_base)
+        and abs(terminal_qty - remaining_qty) <= 1e-9
+        and q_max + 1e-12 >= remaining_qty
+        and terminal_qty <= float(cap_notional) / asks[0][0] + 1e-12
+    )
     if target < min_base:
-        remaining_qty = sum(candidate["open_qty"] for candidate in normalized)
-        terminal_qty = floor_step(remaining_qty, size_step)
-        step_aligned = abs(terminal_qty - remaining_qty) <= 1e-9
-        if (remaining_qty < float(min_base)
-                or not step_aligned
-                or q_max + 1e-12 < remaining_qty
-                or terminal_qty > float(cap_notional) / asks[0][0] + 1e-12):
+        if not terminal_eligible:
             return None, "below_min_base"
         # The full candidate inventory is already covered by the
         # break-even-safe depth walk. Keep the normal sizing path above for
@@ -399,22 +401,39 @@ def plan_reduce_arb(buy_book: OrderBook, sell_book: OrderBook, *,
         # attempted as one reduce-only plan.
         target = terminal_qty
 
-    selected_segments = []
-    left = target
-    for segment in segments:
-        if left <= 1e-12:
-            break
-        take = min(left, segment["qty"])
-        if take > 1e-12:
-            selected_segments.append({**segment, "qty": take})
-            left -= take
+    def select_segments(target_qty):
+        selected = []
+        left = target_qty
+        for segment in segments:
+            if left <= 1e-12:
+                break
+            take = min(left, segment["qty"])
+            if take > 1e-12:
+                selected.append({**segment, "qty": take})
+                left -= take
+        return selected, left
+
+    selected_segments, left = select_segments(target)
     if left > 1e-9:
         return None, "below_min_base"
 
     buy_notional = sum(s["qty"] * s["buy_px"] for s in selected_segments)
     sell_notional = sum(s["qty"] * s["sell_px"] for s in selected_segments)
     if buy_notional < min_notional or sell_notional < min_notional:
-        return None, "below_min_notional"
+        # A fractional target can clear min_base while still being too small
+        # for a venue's notional minimum. If the full remainder is already
+        # BE-safe and executable, use it as the terminal reduction instead.
+        if (target < terminal_qty and terminal_eligible):
+            target = terminal_qty
+            selected_segments, left = select_segments(target)
+            if left > 1e-9:
+                return None, "below_min_base"
+            buy_notional = sum(
+                s["qty"] * s["buy_px"] for s in selected_segments)
+            sell_notional = sum(
+                s["qty"] * s["sell_px"] for s in selected_segments)
+        if buy_notional < min_notional or sell_notional < min_notional:
+            return None, "below_min_notional"
     buy_limit = max(s["buy_px"] for s in selected_segments)
     sell_limit = min(s["sell_px"] for s in selected_segments)
     top_premium_bps = (bids[0][0] / asks[0][0] - 1.0) * 1e4
