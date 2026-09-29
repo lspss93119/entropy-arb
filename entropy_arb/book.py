@@ -385,7 +385,19 @@ def plan_reduce_arb(buy_book: OrderBook, sell_book: OrderBook, *,
                  float(cap_notional) / asks[0][0])
     target = floor_step(target, size_step)
     if target < min_base:
-        return None, "below_min_base"
+        remaining_qty = sum(candidate["open_qty"] for candidate in normalized)
+        terminal_qty = floor_step(remaining_qty, size_step)
+        step_aligned = abs(terminal_qty - remaining_qty) <= 1e-9
+        if (remaining_qty < float(min_base)
+                or not step_aligned
+                or q_max + 1e-12 < remaining_qty
+                or terminal_qty > float(cap_notional) / asks[0][0] + 1e-12):
+            return None, "below_min_base"
+        # The full candidate inventory is already covered by the
+        # break-even-safe depth walk. Keep the normal sizing path above for
+        # every non-terminal reduction, but allow this legal remainder to be
+        # attempted as one reduce-only plan.
+        target = terminal_qty
 
     selected_segments = []
     left = target

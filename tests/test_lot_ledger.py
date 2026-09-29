@@ -7,7 +7,11 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from entropy_arb.book import OrderBook, plan_reduce_arb  # noqa: E402
+from entropy_arb.book import (  # noqa: E402
+    OrderBook,
+    floor_step,
+    plan_reduce_arb,
+)
 from entropy_arb.lot_ledger import LotLedger, LotLedgerError  # noqa: E402
 
 
@@ -18,7 +22,8 @@ def _book(bids, asks):
     return book
 
 
-def _lot(ledger, lot_id, direction, qty, buy_px, sell_px):
+def _lot(ledger, lot_id, direction, qty, buy_px, sell_px,
+         buy_fee_bps=10.0, sell_fee_bps=20.0):
     return ledger.add_lot(
         lot_id=lot_id,
         source_event_id=lot_id,
@@ -29,8 +34,8 @@ def _lot(ledger, lot_id, direction, qty, buy_px, sell_px):
         sell_venue="RH" if direction == "buy_entropy" else "ENTROPY",
         buy_avg_px=buy_px,
         sell_avg_px=sell_px,
-        buy_fee_bps=10.0,
-        sell_fee_bps=20.0,
+        buy_fee_bps=buy_fee_bps,
+        sell_fee_bps=sell_fee_bps,
     )
 
 
@@ -171,6 +176,114 @@ def test_reduce_planner_rejects_losing_depth():
 
     assert plan is None
     assert reason == "no_break_even_depth"
+
+
+def test_reduce_planner_closes_be_safe_terminal_remainder():
+    ledger = LotLedger()
+    _lot(ledger, "lot-1", "sell_entropy", 0.001, 2_000.0, 2_000.0,
+         buy_fee_bps=0.0, sell_fee_bps=0.0)
+    _lot(ledger, "lot-2", "sell_entropy", 0.014, 2_000.0, 2_000.0,
+         buy_fee_bps=0.0, sell_fee_bps=0.0)
+    buy = _book([], [(2_000.0, 0.015)])
+    sell = _book([(2_000.0, 0.015)], [])
+
+    assert floor_step(0.015 * 0.25, 0.001) == pytest.approx(0.003)
+    plan, reason = plan_reduce_arb(
+        buy, sell, candidates=ledger.exit_candidates(0.0),
+        buy_fee_bps=0.0, sell_fee_bps=0.0, take_fraction=0.25,
+        cap_notional=1_000.0, min_base=0.0032, min_notional=10.0,
+        size_step=0.001)
+
+    assert reason == "ok"
+    assert plan.qty == pytest.approx(0.015)
+    assert sum(item["qty"] for item in plan.lot_allocations) == pytest.approx(
+        0.015)
+
+
+def test_reduce_planner_does_not_bypass_missing_terminal_be_depth():
+    ledger = LotLedger()
+    _lot(ledger, "lot-1", "sell_entropy", 0.015, 2_000.0, 2_000.0,
+         buy_fee_bps=0.0, sell_fee_bps=0.0)
+    buy = _book([], [(2_000.0, 0.010)])
+    sell = _book([(2_000.0, 0.010)], [])
+
+    plan, reason = plan_reduce_arb(
+        buy, sell, candidates=ledger.exit_candidates(0.0),
+        buy_fee_bps=0.0, sell_fee_bps=0.0, take_fraction=0.25,
+        cap_notional=1_000.0, min_base=0.0032, min_notional=10.0,
+        size_step=0.001)
+
+    assert plan is None
+    assert reason == "below_min_base"
+
+
+def test_reduce_planner_keeps_fractional_sizing_when_remainder_is_larger():
+    ledger = LotLedger()
+    _lot(ledger, "lot-1", "sell_entropy", 0.100, 2_000.0, 2_000.0,
+         buy_fee_bps=0.0, sell_fee_bps=0.0)
+    buy = _book([], [(2_000.0, 0.080)])
+    sell = _book([(2_000.0, 0.080)], [])
+
+    plan, reason = plan_reduce_arb(
+        buy, sell, candidates=ledger.exit_candidates(0.0),
+        buy_fee_bps=0.0, sell_fee_bps=0.0, take_fraction=0.25,
+        cap_notional=1_000.0, min_base=0.0032, min_notional=10.0,
+        size_step=0.001)
+
+    assert reason == "ok"
+    assert plan.qty == pytest.approx(0.020)
+    assert plan.q_max == pytest.approx(0.080)
+
+
+def test_reduce_planner_keeps_true_dust_blocked():
+    ledger = LotLedger()
+    _lot(ledger, "lot-1", "sell_entropy", 0.003, 2_000.0, 2_000.0,
+         buy_fee_bps=0.0, sell_fee_bps=0.0)
+    buy = _book([], [(2_000.0, 0.003)])
+    sell = _book([(2_000.0, 0.003)], [])
+
+    plan, reason = plan_reduce_arb(
+        buy, sell, candidates=ledger.exit_candidates(0.0),
+        buy_fee_bps=0.0, sell_fee_bps=0.0, take_fraction=0.25,
+        cap_notional=1_000.0, min_base=0.0032, min_notional=1.0,
+        size_step=0.001)
+
+    assert plan is None
+    assert reason == "below_min_base"
+
+
+def test_reduce_planner_rejects_non_step_aligned_terminal_remainder():
+    ledger = LotLedger()
+    _lot(ledger, "lot-1", "sell_entropy", 0.0155, 2_000.0, 2_000.0,
+         buy_fee_bps=0.0, sell_fee_bps=0.0)
+    buy = _book([], [(2_000.0, 0.0155)])
+    sell = _book([(2_000.0, 0.0155)], [])
+
+    plan, reason = plan_reduce_arb(
+        buy, sell, candidates=ledger.exit_candidates(0.0),
+        buy_fee_bps=0.0, sell_fee_bps=0.0, take_fraction=0.25,
+        cap_notional=1_000.0, min_base=0.0032, min_notional=10.0,
+        size_step=0.001)
+
+    assert plan is None
+    assert reason == "below_min_base"
+
+
+def test_reduce_planner_terminal_fallback_still_requires_min_notional():
+    ledger = LotLedger()
+    _lot(ledger, "lot-1", "sell_entropy", 0.015, 100.0, 100.0,
+         buy_fee_bps=0.0, sell_fee_bps=0.0)
+    buy = _book([], [(100.0, 0.015)])
+    sell = _book([(100.0, 0.015)], [])
+
+    plan, reason = plan_reduce_arb(
+        buy, sell, candidates=ledger.exit_candidates(0.0),
+        buy_fee_bps=0.0, sell_fee_bps=0.0, take_fraction=0.25,
+        cap_notional=1_000.0, min_base=0.0032, min_notional=10.0,
+        size_step=0.001)
+
+    assert plan is None
+    assert reason == "below_min_notional"
 
 
 def test_ledger_json_has_versioned_schema(tmp_path):
