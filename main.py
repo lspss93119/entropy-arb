@@ -161,6 +161,9 @@ def main() -> None:
     p.add_argument("--resume", action="store_true",
                    help="explicitly resume a persisted safety halt after "
                         "strict reconciliation")
+    p.add_argument("--halt", action="store_true",
+                   help="persist an operator HALT and exit without starting "
+                        "the engine")
     p.add_argument("--cn", action="store_true",
                    help="display the dashboard in Chinese / 仪表盘使用中文")
     disp = p.add_mutually_exclusive_group()
@@ -184,6 +187,10 @@ def main() -> None:
               f"got {invalid[0]!r}", file=sys.stderr)
         sys.exit(2)
     pairs = _record_pairs(symbols, hedges)
+    if args.halt and (args.resume or args.record_only):
+        print("config error: --halt cannot be combined with --resume or "
+              "--record-only", file=sys.stderr)
+        sys.exit(2)
     if args.resume and args.record_only:
         print("config error: --resume cannot be combined with "
               "--record-only", file=sys.stderr)
@@ -213,6 +220,15 @@ def main() -> None:
         return
 
     cfg = configs[0]
+
+    if args.halt:
+        try:
+            path = Engine.write_operator_halt(cfg)
+        except (OSError, RuntimeError, ValueError) as e:
+            print(f"halt error: {e}", file=sys.stderr)
+            sys.exit(1)
+        print(f"operator halt persisted: {path}")
+        return
 
     use_dashboard = (cfg.dashboard or args.dashboard) and not args.no_dashboard
     force_tty = args.dashboard

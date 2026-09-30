@@ -210,21 +210,29 @@ class Engine:
         return os.path.join(
             directory, f"runs-{self.cfg.symbol}-{self.cfg.hedge_venue}.csv")
 
-    def _rolling_state_path(self) -> str:
+    @staticmethod
+    def _rolling_state_path_for_config(cfg: Config) -> str:
         """Return the ignored pair-specific runtime ledger path."""
-        trade_dir = os.path.dirname(os.path.abspath(self.cfg.trades_csv))
+        trade_dir = os.path.dirname(os.path.abspath(cfg.trades_csv))
         if os.path.basename(trade_dir) == "trades":
             root = os.path.dirname(trade_dir)
         else:
             root = trade_dir
         return os.path.join(root, "state",
-                            f"lots-{self.cfg.symbol}-{self.cfg.hedge_venue}.json")
+                            f"lots-{cfg.symbol}-{cfg.hedge_venue}.json")
+
+    def _rolling_state_path(self) -> str:
+        return self._rolling_state_path_for_config(self.cfg)
+
+    @classmethod
+    def _halt_state_path_for_config(cls, cfg: Config) -> str:
+        """Return the separate pair-specific persisted safety halt path."""
+        state_dir = os.path.dirname(cls._rolling_state_path_for_config(cfg))
+        return os.path.join(
+            state_dir, f"halt-{cfg.symbol}-{cfg.hedge_venue}.json")
 
     def _halt_state_path(self) -> str:
-        """Return the separate pair-specific persisted safety halt path."""
-        state_dir = os.path.dirname(self._rolling_state_path())
-        return os.path.join(
-            state_dir, f"halt-{self.cfg.symbol}-{self.cfg.hedge_venue}.json")
+        return self._halt_state_path_for_config(self.cfg)
 
     @staticmethod
     def _utc_timestamp() -> str:
@@ -257,6 +265,64 @@ class Engine:
                 pass
             raise
 
+    @staticmethod
+    def _halt_payload(*, halted: bool, reason: str, timestamp: str,
+                      source: str,
+                      resume_timestamp: Optional[str] = None) -> dict:
+        payload = {
+            "schema_version": 1,
+            "halted": bool(halted),
+            "reason": str(reason),
+            "timestamp": str(timestamp),
+            "source": str(source),
+        }
+        if resume_timestamp is not None:
+            payload["resume_timestamp"] = str(resume_timestamp)
+        return payload
+
+    @staticmethod
+    def _validate_halt_payload(payload: object) -> dict:
+        if not isinstance(payload, dict):
+            raise ValueError("root must be an object")
+        if payload.get("schema_version") != 1:
+            raise ValueError(
+                f"unsupported schema_version {payload.get('schema_version')!r}")
+        if not isinstance(payload.get("halted"), bool):
+            raise ValueError("halted must be true or false")
+        for key in ("reason", "timestamp", "source"):
+            if not isinstance(payload.get(key), str) or not payload[key].strip():
+                raise ValueError(f"{key} must be a non-empty string")
+        if not payload["halted"]:
+            if not isinstance(payload.get("resume_timestamp"), str) \
+                    or not payload["resume_timestamp"].strip():
+                raise ValueError(
+                    "resume_timestamp is required when halted is false")
+        return payload
+
+    @classmethod
+    def write_operator_halt(cls, cfg: Config,
+                            reason: str = "operator/manual halt") -> str:
+        """Persist and verify an operator HALT without constructing an engine."""
+        timestamp = cls._utc_timestamp()
+        payload = cls._halt_payload(
+            halted=True,
+            reason=reason,
+            timestamp=timestamp,
+            source="operator",
+        )
+        path = cls._halt_state_path_for_config(cfg)
+        cls._atomic_json_write(path, payload)
+        try:
+            with open(path) as fh:
+                readback = json.load(fh)
+            cls._validate_halt_payload(readback)
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            raise RuntimeError(
+                f"operator HALT read-back failed: {exc}") from exc
+        if readback != payload or readback.get("halted") is not True:
+            raise RuntimeError("operator HALT read-back mismatch")
+        return path
+
     def _load_persisted_halt(self) -> None:
         """Load the pair's safety halt before any live strategy can start."""
         path = self._halt_state_path()
@@ -266,22 +332,7 @@ class Engine:
         try:
             with open(path) as fh:
                 payload = json.load(fh)
-            if not isinstance(payload, dict):
-                raise ValueError("root must be an object")
-            if payload.get("schema_version") != 1:
-                raise ValueError(
-                    f"unsupported schema_version {payload.get('schema_version')!r}")
-            if not isinstance(payload.get("halted"), bool):
-                raise ValueError("halted must be true or false")
-            for key in ("reason", "timestamp", "source"):
-                if not isinstance(payload.get(key), str) \
-                        or not payload[key].strip():
-                    raise ValueError(f"{key} must be a non-empty string")
-            if not payload["halted"]:
-                if not isinstance(payload.get("resume_timestamp"), str) \
-                        or not payload["resume_timestamp"].strip():
-                    raise ValueError(
-                        "resume_timestamp is required when halted is false")
+            self._validate_halt_payload(payload)
             self._halt_state_halted = bool(payload["halted"])
             self._halt_reason = payload["reason"]
             self._halt_timestamp = payload["timestamp"]
@@ -302,15 +353,13 @@ class Engine:
     def _persist_halt_state(self, *, halted: bool, reason: str,
                             timestamp: str, source: str,
                             resume_timestamp: Optional[str] = None) -> None:
-        payload = {
-            "schema_version": 1,
-            "halted": bool(halted),
-            "reason": str(reason),
-            "timestamp": str(timestamp),
-            "source": str(source),
-        }
-        if resume_timestamp is not None:
-            payload["resume_timestamp"] = str(resume_timestamp)
+        payload = self._halt_payload(
+            halted=halted,
+            reason=reason,
+            timestamp=timestamp,
+            source=source,
+            resume_timestamp=resume_timestamp,
+        )
         self._atomic_json_write(self._halt_state_path(), payload)
         self._halt_state_present = True
         self._halt_state_halted = bool(halted)
