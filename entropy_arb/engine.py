@@ -16,12 +16,15 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import json
 import logging
 import math
 import os
+import tempfile
 import time
 from collections import deque
 from dataclasses import replace
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 import aiohttp
@@ -98,9 +101,11 @@ def _csv_error(*items) -> str:
 
 
 class Engine:
-    def __init__(self, cfg: Config, record_only: bool = False) -> None:
+    def __init__(self, cfg: Config, record_only: bool = False,
+                 resume_requested: bool = False) -> None:
         self.cfg = cfg
         self.record_only = record_only
+        self._resume_requested = bool(resume_requested)
         self.session: Optional[aiohttp.ClientSession] = None
         self.entropy = None
         self.hedge = None
@@ -115,6 +120,13 @@ class Engine:
         self._venue_locks: Dict[str, asyncio.Lock] = {}
         self._exec_tasks: set = set()
         self.halted = False
+        self._halt_reason: Optional[str] = None
+        self._halt_timestamp: Optional[str] = None
+        self._halt_source: Optional[str] = None
+        self._halt_resume_timestamp: Optional[str] = None
+        self._halt_state_present = False
+        self._halt_state_halted = False
+        self._halt_state_error: Optional[str] = None
         self.consec_errors = 0
         self.last_trade_ts = 0.0
         self.trades = 0
@@ -141,6 +153,7 @@ class Engine:
         self._rolling_ledger_loaded = False
         self._rolling_signal_meta: dict = {}
         self._rolling_result_meta: dict = {}
+        self._load_persisted_halt()
         # A successful primary execution remains active until its residual
         # hedge and rolling-ledger update have both completed. Reconcile can
         # use this narrow state to distinguish an explainable temporary
@@ -206,6 +219,179 @@ class Engine:
             root = trade_dir
         return os.path.join(root, "state",
                             f"lots-{self.cfg.symbol}-{self.cfg.hedge_venue}.json")
+
+    def _halt_state_path(self) -> str:
+        """Return the separate pair-specific persisted safety halt path."""
+        state_dir = os.path.dirname(self._rolling_state_path())
+        return os.path.join(
+            state_dir, f"halt-{self.cfg.symbol}-{self.cfg.hedge_venue}.json")
+
+    @staticmethod
+    def _utc_timestamp() -> str:
+        return datetime.now(timezone.utc).isoformat(timespec="microseconds") \
+            .replace("+00:00", "Z")
+
+    @staticmethod
+    def _atomic_json_write(path: str, payload: dict) -> None:
+        directory = os.path.dirname(os.path.abspath(path)) or "."
+        os.makedirs(directory, exist_ok=True)
+        fd, temp_path = tempfile.mkstemp(
+            prefix=".halt-", suffix=".tmp", dir=directory, text=True)
+        try:
+            with os.fdopen(fd, "w") as fh:
+                json.dump(payload, fh, sort_keys=True,
+                          separators=(",", ":"))
+                fh.write("\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(temp_path, path)
+            dir_fd = os.open(directory, os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except Exception:
+            try:
+                os.unlink(temp_path)
+            except FileNotFoundError:
+                pass
+            raise
+
+    def _load_persisted_halt(self) -> None:
+        """Load the pair's safety halt before any live strategy can start."""
+        path = self._halt_state_path()
+        if not os.path.exists(path):
+            return
+        self._halt_state_present = True
+        try:
+            with open(path) as fh:
+                payload = json.load(fh)
+            if not isinstance(payload, dict):
+                raise ValueError("root must be an object")
+            if payload.get("schema_version") != 1:
+                raise ValueError(
+                    f"unsupported schema_version {payload.get('schema_version')!r}")
+            if not isinstance(payload.get("halted"), bool):
+                raise ValueError("halted must be true or false")
+            for key in ("reason", "timestamp", "source"):
+                if not isinstance(payload.get(key), str) \
+                        or not payload[key].strip():
+                    raise ValueError(f"{key} must be a non-empty string")
+            if not payload["halted"]:
+                if not isinstance(payload.get("resume_timestamp"), str) \
+                        or not payload["resume_timestamp"].strip():
+                    raise ValueError(
+                        "resume_timestamp is required when halted is false")
+            self._halt_state_halted = bool(payload["halted"])
+            self._halt_reason = payload["reason"]
+            self._halt_timestamp = payload["timestamp"]
+            self._halt_source = payload["source"]
+            self._halt_resume_timestamp = payload.get("resume_timestamp")
+            if self._halt_state_halted:
+                self.halted = True
+                log.critical("HALTED (persisted): %s", self._halt_reason)
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            self._halt_state_error = str(exc)
+            self._halt_state_halted = True
+            self.halted = True
+            self._halt_reason = f"malformed persisted halt state: {exc}"
+            self._halt_timestamp = None
+            self._halt_source = "malformed-state"
+            log.critical("HALTED (persisted state invalid): %s", exc)
+
+    def _persist_halt_state(self, *, halted: bool, reason: str,
+                            timestamp: str, source: str,
+                            resume_timestamp: Optional[str] = None) -> None:
+        payload = {
+            "schema_version": 1,
+            "halted": bool(halted),
+            "reason": str(reason),
+            "timestamp": str(timestamp),
+            "source": str(source),
+        }
+        if resume_timestamp is not None:
+            payload["resume_timestamp"] = str(resume_timestamp)
+        self._atomic_json_write(self._halt_state_path(), payload)
+        self._halt_state_present = True
+        self._halt_state_halted = bool(halted)
+
+    def _set_halted(self, reason: str, *, source: str = "safety") -> None:
+        """Set and persist a sticky safety halt without changing trade state."""
+        self.halted = True
+        self._halt_reason = str(reason)
+        self._halt_timestamp = self._utc_timestamp()
+        self._halt_source = source
+        self._halt_resume_timestamp = None
+        self._halt_state_error = None
+        try:
+            self._persist_halt_state(
+                halted=True,
+                reason=self._halt_reason,
+                timestamp=self._halt_timestamp,
+                source=source,
+            )
+        except Exception as exc:
+            # A failed state write must never clear the in-memory safety stop.
+            self._halt_state_error = f"cannot persist halt state: {exc}"
+            log.critical("cannot persist safety halt state: %s", exc)
+        self._rolling_signal_meta = {}
+        self._reconcile_evt.set()
+        log.critical("HALTED: %s — explicit resume is required before trading",
+                     reason)
+
+    def resume_after_reconcile(self) -> None:
+        """Clear a persisted halt only after strict runtime safety checks."""
+        if not self.halted:
+            raise RuntimeError("no persisted HALT is active")
+        if self._halt_state_error:
+            raise RuntimeError(
+                f"resume rejected: persisted halt state is invalid: "
+                f"{self._halt_state_error}")
+        if not self._halt_state_present or not self._halt_state_halted:
+            raise RuntimeError("resume rejected: no persisted HALT is active")
+        if self._exec_tasks:
+            raise RuntimeError("resume rejected: in-flight execution exists")
+        if self._inflight_reconciliation is not None:
+            raise RuntimeError("resume rejected: reconciliation is in flight")
+        if self.consec_errors:
+            raise RuntimeError(
+                "resume rejected: execution error state is not clean")
+        if self._venue_down:
+            raise RuntimeError("resume rejected: venue outage is active")
+        if self._rolling is not None:
+            if self._rolling_ledger is None or not self._rolling_ledger_loaded:
+                raise RuntimeError(
+                    "resume rejected: rolling ledger is not validated")
+            try:
+                self._rolling_ledger.validate_positions({
+                    key: venue.position for key, venue in self.venues.items()})
+            except LotLedgerError as exc:
+                raise RuntimeError(
+                    f"resume rejected: position reconciliation mismatch: {exc}") \
+                    from exc
+        net = sum(float(venue.position) for venue in self.venues.values())
+        if abs(net) > self.cfg.net_tolerance_base:
+            raise RuntimeError(
+                f"resume rejected: net position {net:+.12g} exceeds "
+                f"tolerance {self.cfg.net_tolerance_base:.12g}")
+        resume_timestamp = self._utc_timestamp()
+        try:
+            self._persist_halt_state(
+                halted=False,
+                reason=self._halt_reason or "operator resume",
+                timestamp=self._halt_timestamp or resume_timestamp,
+                source="operator_resume",
+                resume_timestamp=resume_timestamp,
+            )
+        except Exception as exc:
+            self._halt_state_error = f"cannot persist resume state: {exc}"
+            raise RuntimeError(f"resume rejected: {exc}") from exc
+        self.halted = False
+        self._halt_state_halted = False
+        self._halt_resume_timestamp = resume_timestamp
+        self._reconcile_evt.set()
+        self._update_evt.set()
+        log.warning("explicit resume accepted after strict reconciliation")
 
     def _runtime_metadata(self) -> dict:
         """Return small deployment identifiers for local/AWS comparisons."""
@@ -293,11 +479,7 @@ class Engine:
         """Stop rolling entries until a human reconciles and restarts."""
         if self._rolling is None:
             return
-        self.halted = True
-        self._rolling_signal_meta = {}
-        self._reconcile_evt.set()
-        log.critical("ROLLING HALTED after %s — reconcile positions and "
-                     "restart before trading", reason)
+        self._set_halted(reason, source="rolling")
 
     def _validate_rolling_runtime(self, live: bool) -> None:
         if live and self._rolling is not None and not self.cfg.recorder_enabled:
@@ -386,6 +568,10 @@ class Engine:
                         "for credential-less data collection)")
             await self._reconcile_positions(hedge=False, strict=True)
             self._check_rolling_start_state()
+            if self._resume_requested:
+                self.resume_after_reconcile()
+            elif self.halted and self._halt_reason:
+                log.critical("HALTED (persisted): %s", self._halt_reason)
             log.info("starting positions: %s (net %+.6g)",
                      " ".join(f"{v.name}={v.position:+.6g}"
                               for v in self.venues.values()),
@@ -403,7 +589,7 @@ class Engine:
                                            if self._rolling is not None else None)
             tasks.append(asyncio.create_task(self.recorder.run(self.stop),
                                              name="recorder"))
-        if not self.record_only:
+        if not self.record_only and not self.halted:
             tasks.append(asyncio.create_task(self._strategy_loop(),
                                              name="strategy"))
             tasks.append(asyncio.create_task(self._balance_loop(),
@@ -1339,10 +1525,12 @@ class Engine:
         elif not rate_limited:
             self.consec_errors += 1
             if self.consec_errors >= cfg.max_consecutive_errors:
-                self.halted = True
+                self._set_halted(
+                    f"{self.consec_errors} consecutive execution problems",
+                    source="execution")
                 log.critical("HALTED after %d consecutive execution problems "
-                             "— flatten manually and restart / 连续执行异常，"
-                             "引擎已停止，请手动平仓后重启", self.consec_errors)
+                             "— explicit resume is required / 连续执行异常，"
+                             "引擎已停止，需要明确恢复", self.consec_errors)
         if sent_ok:
             self.trades += 1
             self.total_exp_edge += plan.exp_edge_usd
@@ -1617,7 +1805,7 @@ class Engine:
             if self.stop.is_set():
                 break
             try:
-                await self._reconcile_positions(hedge=True)
+                await self._reconcile_positions(hedge=not self.halted)
             except asyncio.CancelledError:
                 raise
             except Exception:

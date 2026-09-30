@@ -67,8 +67,9 @@ class StubVenue:
 def make_engine(mode="fixed", **thr):
     cfg = make_cfg(mode=mode, **thr)
     if mode == "rolling":
-        cfg.trades_csv = tempfile.mktemp(prefix="entropy-arb-trades-",
-                                          suffix=".csv")
+        runtime_dir = tempfile.mkdtemp(prefix="entropy-arb-runtime-")
+        cfg.trades_csv = os.path.join(runtime_dir, "logs", "trades",
+                                      "trades.csv")
     eng = Engine(cfg)
     eng.entropy = StubVenue("entropy", "ENTROPY")
     eng.hedge = StubVenue("hedge", "RH")

@@ -102,8 +102,9 @@ def setup_logging(level: str, log_file: str = None,
 
 
 async def amain(cfg, record_only: bool, use_dashboard: bool, force_tty: bool,
-                log_buffer, lang: str) -> None:
-    eng = Engine(cfg, record_only=record_only)
+                log_buffer, lang: str, resume_requested: bool = False) -> None:
+    eng = Engine(cfg, record_only=record_only,
+                 resume_requested=resume_requested)
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, eng.request_stop)
@@ -157,6 +158,9 @@ def main() -> None:
     p.add_argument("--record-only", action="store_true",
                    help="only collect minute data, run no strategy, send no "
                         "orders (needs no credentials)")
+    p.add_argument("--resume", action="store_true",
+                   help="explicitly resume a persisted safety halt after "
+                        "strict reconciliation")
     p.add_argument("--cn", action="store_true",
                    help="display the dashboard in Chinese / 仪表盘使用中文")
     disp = p.add_mutually_exclusive_group()
@@ -180,6 +184,10 @@ def main() -> None:
               f"got {invalid[0]!r}", file=sys.stderr)
         sys.exit(2)
     pairs = _record_pairs(symbols, hedges)
+    if args.resume and args.record_only:
+        print("config error: --resume cannot be combined with "
+              "--record-only", file=sys.stderr)
+        sys.exit(2)
     if len(pairs) > 1 and not args.record_only:
         print("config error: multiple --symbol/--hedge values are supported "
               "only with --record-only", file=sys.stderr)
@@ -230,7 +238,8 @@ def main() -> None:
         asyncio.run(amain(cfg, record_only=args.record_only,
                           use_dashboard=use_dashboard, force_tty=force_tty,
                           log_buffer=log_buffer,
-                          lang="zh" if args.cn else "en"))
+                          lang="zh" if args.cn else "en",
+                          resume_requested=args.resume))
     except RuntimeError as e:
         # startup failures (missing credentials, market not found, venue
         # unreachable) — a clean message, not a traceback
