@@ -162,6 +162,235 @@ def rolling_execution(direction, matched_qty, settled_ts,
     }
 
 
+def set_authoritative_positions(eng, entropy_qty, hedge_qty):
+    eng.entropy.set_book(100.0, 100.1)
+    eng.hedge.set_book(100.0, 100.1)
+
+    async def fetch_entropy():
+        return entropy_qty
+
+    async def fetch_hedge():
+        return hedge_qty
+
+    eng.entropy.fetch_position = fetch_entropy
+    eng.hedge.fetch_position = fetch_hedge
+
+
+def seed_open_rolling_position(eng, direction="buy_entropy", qty=0.49):
+    eng._update_rolling_position(
+        rolling_execution(direction, qty, 100.0),
+        {"status": "filled", "filled_qty": 0.0},
+    )
+    if direction == "buy_entropy":
+        eng.entropy.position = qty
+        eng.hedge.position = -qty
+    else:
+        eng.entropy.position = -qty
+        eng.hedge.position = qty
+    eng._rolling_ledger_loaded = True
+
+
+def partial_sell_entropy_reduce(first_leg="entropy"):
+    execution = rolling_execution(
+        "sell_entropy", 0.0, 200.0, reduce_only=True)
+    execution["plan"] = replace(
+        execution["plan"],
+        qty=0.028,
+        buy_notional=2.8,
+        sell_notional=2.8,
+        q_max=0.028,
+        q_max_notional=2.8,
+        lot_allocations=({"lot_id": "event-100", "qty": 0.028},),
+    )
+    execution["matched_qty"] = 0.0
+    if first_leg == "entropy":
+        execution["buy_info"] = {"avg_px": 101.0, "filled_base": 0.0}
+        execution["sell_info"] = {"avg_px": 101.5, "filled_base": 0.028}
+    else:
+        execution["buy_info"] = {"avg_px": 101.0, "filled_base": 0.028}
+        execution["sell_info"] = {"avg_px": 101.5, "filled_base": 0.0}
+    return execution
+
+
+def test_reconcile_allows_exact_active_partial_reduce_without_halting():
+    eng = make_engine(mode="rolling")
+    seed_open_rolling_position(eng)
+    execution = partial_sell_entropy_reduce(first_leg="entropy")
+
+    eng._begin_inflight_reconciliation(execution)
+    set_authoritative_positions(eng, entropy_qty=0.462, hedge_qty=-0.49)
+
+    asyncio.run(eng._reconcile_positions(hedge=False))
+
+    assert eng.halted is False
+    assert eng._rolling_ledger.total_qty == pytest.approx(0.49)
+
+
+def test_execute_locked_keeps_reconcile_provisional_until_ledger_update():
+    eng = make_engine(mode="rolling")
+    seed_open_rolling_position(eng)
+    execution = partial_sell_entropy_reduce(first_leg="entropy")
+    execution["unresolved"] = False
+    eng._log_csv = lambda *_args: None
+    reconcile_seen = {}
+
+    async def execute(_buy, _sell, _plan):
+        eng.entropy.position = 0.462
+        eng.hedge.position = -0.49
+        set_authoritative_positions(eng, entropy_qty=0.462,
+                                    hedge_qty=-0.49)
+        return execution
+
+    async def hedge():
+        await eng._reconcile_positions(hedge=False)
+        reconcile_seen["ledger_qty"] = eng._rolling_ledger.total_qty
+        eng.hedge.position = -0.462
+        return {
+            "status": "filled", "filled_qty": 0.028, "venue": "RH",
+            "side": "buy", "avg_px": 101.2, "remaining_net_qty": 0.0,
+        }
+
+    eng._execute = execute
+    eng._maybe_hedge = hedge
+
+    async def run_execution():
+        await eng._vlock("entropy").acquire()
+        await eng._vlock("hedge").acquire()
+        await eng._execute_locked(eng.hedge, eng.entropy,
+                                  execution["plan"])
+
+    asyncio.run(run_execution())
+
+    assert reconcile_seen["ledger_qty"] == pytest.approx(0.49)
+    assert eng._rolling_ledger.total_qty == pytest.approx(0.462)
+    assert eng._inflight_reconciliation is None
+    assert eng.halted is False
+
+
+def test_reconcile_passes_after_active_reduce_closes_ledger():
+    eng = make_engine(mode="rolling")
+    seed_open_rolling_position(eng)
+    execution = partial_sell_entropy_reduce(first_leg="entropy")
+    eng._begin_inflight_reconciliation(execution)
+    hedge = {
+        "status": "filled", "filled_qty": 0.028, "venue": "RH",
+        "side": "buy", "avg_px": 101.2, "remaining_net_qty": 0.0,
+    }
+    eng._advance_inflight_reconciliation(hedge)
+    eng.entropy.position = 0.462
+    eng.hedge.position = -0.462
+    eng._update_rolling_position(execution, hedge)
+    eng._finish_inflight_reconciliation()
+    set_authoritative_positions(eng, entropy_qty=0.462, hedge_qty=-0.462)
+
+    asyncio.run(eng._reconcile_positions(hedge=False))
+
+    assert eng.halted is False
+    assert eng._rolling_ledger.total_qty == pytest.approx(0.462)
+
+
+def test_reconcile_still_halts_unexplained_mismatch():
+    eng = make_engine(mode="rolling")
+    seed_open_rolling_position(eng)
+    set_authoritative_positions(eng, entropy_qty=0.462, hedge_qty=-0.49)
+
+    asyncio.run(eng._reconcile_positions(hedge=False))
+
+    assert eng.halted is True
+
+
+def test_reconcile_halts_when_active_mismatch_quantity_is_wrong():
+    eng = make_engine(mode="rolling")
+    seed_open_rolling_position(eng)
+    execution = partial_sell_entropy_reduce(first_leg="entropy")
+    eng._begin_inflight_reconciliation(execution)
+    set_authoritative_positions(eng, entropy_qty=0.44, hedge_qty=-0.49)
+
+    asyncio.run(eng._reconcile_positions(hedge=False))
+
+    assert eng.halted is True
+
+
+@pytest.mark.parametrize("status", ["send-failed", "timeout", "unresolved"])
+def test_reconcile_halts_when_active_hedge_fails(status):
+    eng = make_engine(mode="rolling")
+    seed_open_rolling_position(eng)
+    execution = partial_sell_entropy_reduce(first_leg="entropy")
+    eng._begin_inflight_reconciliation(execution)
+    eng._advance_inflight_reconciliation({
+        "status": status, "filled_qty": 0.0,
+        "remaining_net_qty": 0.028,
+    })
+    set_authoritative_positions(eng, entropy_qty=0.462, hedge_qty=-0.49)
+
+    asyncio.run(eng._reconcile_positions(hedge=False))
+
+    assert eng.halted is True
+
+
+def test_reconcile_halts_when_mismatch_remains_after_execution_finishes():
+    eng = make_engine(mode="rolling")
+    seed_open_rolling_position(eng)
+    execution = partial_sell_entropy_reduce(first_leg="entropy")
+    eng._begin_inflight_reconciliation(execution)
+    hedge = {
+        "status": "filled", "filled_qty": 0.028, "venue": "RH",
+        "side": "buy", "avg_px": 101.2, "remaining_net_qty": 0.0,
+    }
+    eng._advance_inflight_reconciliation(hedge)
+    eng.entropy.position = 0.45
+    eng.hedge.position = -0.462
+    eng._update_rolling_position(execution, hedge)
+    eng._finish_inflight_reconciliation()
+    set_authoritative_positions(eng, entropy_qty=0.45, hedge_qty=-0.462)
+
+    asyncio.run(eng._reconcile_positions(hedge=False))
+
+    assert eng.halted is True
+
+
+def test_reconcile_allows_exact_active_partial_reduce_when_rh_fills_first():
+    eng = make_engine(mode="rolling")
+    seed_open_rolling_position(eng)
+    execution = partial_sell_entropy_reduce(first_leg="rh")
+    eng._begin_inflight_reconciliation(execution)
+    set_authoritative_positions(eng, entropy_qty=0.49, hedge_qty=-0.462)
+
+    asyncio.run(eng._reconcile_positions(hedge=False))
+
+    assert eng.halted is False
+    assert eng._rolling_ledger.total_qty == pytest.approx(0.49)
+
+
+def test_reconcile_allows_inflight_entry_without_mutating_empty_ledger():
+    eng = make_engine(mode="rolling")
+    eng._rolling_ledger_loaded = True
+    execution = rolling_execution("buy_entropy", 0.0, 300.0)
+    execution["buy_info"] = {"avg_px": 101.0, "filled_base": 0.028}
+    execution["sell_info"] = {"avg_px": 101.5, "filled_base": 0.0}
+    execution["matched_qty"] = 0.0
+    eng._begin_inflight_reconciliation(execution)
+    set_authoritative_positions(eng, entropy_qty=0.028, hedge_qty=0.0)
+
+    asyncio.run(eng._reconcile_positions(hedge=False))
+
+    assert eng.halted is False
+    assert eng._rolling_ledger.total_qty == pytest.approx(0.0)
+
+
+def test_provisional_reconciliation_does_not_clear_existing_halt():
+    eng = make_engine(mode="rolling")
+    seed_open_rolling_position(eng)
+    execution = partial_sell_entropy_reduce(first_leg="entropy")
+    eng._begin_inflight_reconciliation(execution)
+    eng.halted = True
+    set_authoritative_positions(eng, entropy_qty=0.462, hedge_qty=-0.49)
+
+    asyncio.run(eng._reconcile_positions(hedge=False))
+
+    assert eng.halted is True
+
+
 def test_scan_fires_sell_entropy_above_band():
     eng = make_engine(midline=5.0, upper=4.0, lower=3.0)
     # entropy 15 bps rich vs hedge: above midline+upper=9 -> sell entropy

@@ -141,6 +141,11 @@ class Engine:
         self._rolling_ledger_loaded = False
         self._rolling_signal_meta: dict = {}
         self._rolling_result_meta: dict = {}
+        # A successful primary execution remains active until its residual
+        # hedge and rolling-ledger update have both completed. Reconcile can
+        # use this narrow state to distinguish an explainable temporary
+        # position delta from an unexplained mismatch that must halt.
+        self._inflight_reconciliation: Optional[dict] = None
         self._step = 1e-4
         self._min_base = 0.0
         self._min_notional = 10.0
@@ -445,6 +450,130 @@ class Engine:
         self._rolling_entry_ts = self._rolling_ledger.first_entry_ts
         self._rolling_open_lot_count = len(self._rolling_ledger.lots)
 
+    def _rolling_ledger_positions(self) -> dict:
+        """Return the venue positions implied by the persistent ledger."""
+        if self._rolling_ledger is None:
+            return {"entropy": 0.0, "hedge": 0.0}
+        direction = self._rolling_ledger.direction
+        qty = self._rolling_ledger.total_qty
+        if direction == "sell_entropy":
+            return {"entropy": -qty, "hedge": qty}
+        if direction == "buy_entropy":
+            return {"entropy": qty, "hedge": -qty}
+        return {"entropy": 0.0, "hedge": 0.0}
+
+    def _venue_key_for(self, venue) -> Optional[str]:
+        key = getattr(venue, "key", None)
+        if key in self.venues:
+            return key
+        name = getattr(venue, "name", None)
+        for candidate_key, candidate in self.venues.items():
+            if candidate is venue or getattr(candidate, "name", None) == name:
+                return candidate_key
+        return None
+
+    @staticmethod
+    def _known_fill(info: dict) -> Optional[float]:
+        if "filled_base" not in info or info.get("filled_base") is None:
+            return None
+        value = info["filled_base"]
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return None
+        return value if math.isfinite(value) and value >= 0.0 else None
+
+    def _begin_inflight_reconciliation(self, execution: dict) -> bool:
+        """Track known primary fills before residual hedging can yield."""
+        if (self._rolling is None or self._rolling_ledger is None
+                or not execution.get("ok")):
+            return False
+        ledger_positions = self._rolling_ledger_positions()
+        expected = dict(ledger_positions)
+        for venue_key, info, sign in (
+                (self._venue_key_for(execution.get("buy")),
+                 execution.get("buy_info") or {}, 1.0),
+                (self._venue_key_for(execution.get("sell")),
+                 execution.get("sell_info") or {}, -1.0)):
+            fill = self._known_fill(info)
+            if venue_key is None or fill is None:
+                self._inflight_reconciliation = {
+                    "allow": False,
+                    "expected": expected,
+                    "ledger": ledger_positions,
+                    "event_id": execution.get("event_id", ""),
+                }
+                return True
+            expected[venue_key] += sign * fill
+        self._inflight_reconciliation = {
+            "allow": any(
+                abs(expected[key] - ledger_positions[key])
+                > self.cfg.net_tolerance_base
+                for key in expected),
+            "expected": expected,
+            "ledger": ledger_positions,
+            "event_id": execution.get("event_id", ""),
+        }
+        return True
+
+    def _advance_inflight_reconciliation(self, hedge: dict) -> None:
+        """Add a known successful residual hedge to temporary expectations."""
+        state = self._inflight_reconciliation
+        if state is None:
+            return
+        status = hedge.get("status", "not_needed")
+        if (status not in ("not_needed", "filled", "settled")
+                or hedge.get("error")):
+            state["allow"] = False
+            return
+        if ("remaining_net_qty" not in hedge
+                or hedge.get("remaining_net_qty") is None
+                or "filled_qty" not in hedge
+                or hedge.get("filled_qty") is None):
+            state["allow"] = False
+            return
+        try:
+            remaining_net = float(hedge["remaining_net_qty"])
+            if abs(remaining_net) > self.cfg.net_tolerance_base:
+                state["allow"] = False
+                return
+            fill = max(float(hedge["filled_qty"]), 0.0)
+        except (TypeError, ValueError):
+            state["allow"] = False
+            return
+        if fill <= self.cfg.net_tolerance_base:
+            return
+        venue_name = str(hedge.get("venue") or "")
+        venue = next((candidate for candidate in self.venues.values()
+                      if getattr(candidate, "name", "") == venue_name), None)
+        venue_key = self._venue_key_for(venue)
+        side = hedge.get("side")
+        if venue_key is None or side not in ("buy", "sell"):
+            state["allow"] = False
+            return
+        state["expected"][venue_key] += fill if side == "buy" else -fill
+
+    def _finish_inflight_reconciliation(self) -> None:
+        """End provisional accounting and trigger the normal strict pass."""
+        if self._inflight_reconciliation is None:
+            return
+        self._inflight_reconciliation = None
+        self._reconcile_evt.set()
+
+    def _inflight_reconciliation_explains(self,
+                                          positions: dict) -> bool:
+        state = self._inflight_reconciliation
+        if state is None or not state.get("allow"):
+            return False
+        expected = state["expected"]
+        ledger = state["ledger"]
+        tolerance = self.cfg.net_tolerance_base
+        if not any(abs(expected[key] - ledger[key]) > tolerance
+                   for key in expected):
+            return False
+        return all(abs(float(positions.get(key, 0.0)) - expected[key])
+                   <= tolerance for key in expected)
+
     def _check_rolling_start_state(self) -> None:
         """Load and validate the persisted rolling inventory before live mode."""
         if self._rolling is None or self._rolling_ledger is None:
@@ -682,13 +811,19 @@ class Engine:
             self._halt_rolling("unresolved primary execution")
             self._log_csv(execution, hedge)
         else:
-            hedge = await self._maybe_hedge()
-            if hedge.get("status") == "unresolved":
-                self._halt_rolling("unresolved hedge execution")
-            if not execution["ok"]:
-                self._halt_rolling("failed primary execution")
-            self._update_rolling_position(execution, hedge)
-            self._log_csv(execution, hedge)
+            inflight = self._begin_inflight_reconciliation(execution)
+            try:
+                hedge = await self._maybe_hedge()
+                if hedge.get("status") == "unresolved":
+                    self._halt_rolling("unresolved hedge execution")
+                if not execution["ok"]:
+                    self._halt_rolling("failed primary execution")
+                self._advance_inflight_reconciliation(hedge)
+                self._update_rolling_position(execution, hedge)
+                self._log_csv(execution, hedge)
+            finally:
+                if inflight:
+                    self._finish_inflight_reconciliation()
         self._update_evt.set()  # freed venues may have a queued opportunity
 
     def _scan(self, now: float):
@@ -1405,13 +1540,21 @@ class Engine:
         for r in got:
             if isinstance(r, BaseException):
                 raise r  # strict startup: fail loudly
-        if hedge:
+        if hedge and self._inflight_reconciliation is None:
             await self._maybe_hedge()
         if (self._rolling_ledger_loaded and not self._venue_down
                 and self._rolling_ledger is not None):
+            positions = {
+                key: venue.position for key, venue in self.venues.items()}
+            if self._inflight_reconciliation_explains(positions):
+                log.info(
+                    "rolling reconciliation provisional for active "
+                    "execution %s",
+                    self._inflight_reconciliation.get("event_id", ""),
+                )
+                return
             try:
-                self._rolling_ledger.validate_positions({
-                    key: venue.position for key, venue in self.venues.items()})
+                self._rolling_ledger.validate_positions(positions)
                 self._sync_rolling_cache()
             except LotLedgerError as exc:
                 self._halt_rolling(f"position reconciliation mismatch: {exc}")
