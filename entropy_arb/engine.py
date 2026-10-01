@@ -1292,7 +1292,8 @@ class Engine:
             if not allocations:
                 self._halt_rolling("rolling reduce has no lot allocations")
                 return
-            exit_prices = self._rolling_exit_prices(execution, hedge)
+            exit_prices = self._rolling_exit_prices(
+                execution, hedge, closed_qty)
             realized_usd = None
             realized_bps = None
             try:
@@ -1366,51 +1367,110 @@ class Engine:
         self._rolling_signal_meta = {}
 
     @staticmethod
-    def _rolling_exit_prices(execution: dict, hedge: dict):
-        """Return actual effective exit prices, or None when unavailable."""
+    def _rolling_exit_prices(execution: dict, hedge: dict,
+                             closed_qty: Optional[float] = None):
+        """Return actual effective exit prices, or None when unavailable.
+
+        A primary leg may have no fill at all when the residual hedge supplies
+        that side of the completed reduction.  Build each effective side from
+        the actual primary and hedge fills, clipped to the quantity that the
+        ledger is about to close.  Missing actual prices remain fail-safe.
+        """
         buy_info = execution.get("buy_info") or {}
         sell_info = execution.get("sell_info") or {}
-        buy_px = buy_info.get("avg_px")
-        sell_px = sell_info.get("avg_px")
-        if buy_px is None or sell_px is None:
-            return None
         try:
-            buy_px = float(buy_px)
-            sell_px = float(sell_px)
-            if not (math.isfinite(buy_px) and math.isfinite(sell_px)
-                    and buy_px > 0 and sell_px > 0):
-                return None
             matched_qty = execution.get("matched_qty") or 0.0
+            matched_qty = float(matched_qty)
+            if not math.isfinite(matched_qty) or matched_qty < 0:
+                return None
             buy_qty = float(buy_info.get("filled_base")
                             if buy_info.get("filled_base") is not None
                             else matched_qty)
             sell_qty = float(sell_info.get("filled_base")
                              if sell_info.get("filled_base") is not None
                              else matched_qty)
-            hedge_qty = max(float(hedge.get("filled_qty") or 0.0), 0.0)
+            if (not math.isfinite(buy_qty) or buy_qty < 0
+                    or not math.isfinite(sell_qty) or sell_qty < 0):
+                return None
+            hedge_qty = float(hedge.get("filled_qty") or 0.0)
             hedge_px = hedge.get("avg_px")
         except (TypeError, ValueError):
             return None
-        if hedge_qty <= 0 or hedge_px is None:
-            return buy_px, sell_px
+        if not math.isfinite(hedge_qty) or hedge_qty < 0:
+            return None
+        if closed_qty is None:
+            closed_qty = matched_qty + hedge_qty
         try:
-            hedge_px = float(hedge_px)
+            closed_qty = float(closed_qty)
         except (TypeError, ValueError):
             return None
-        if not math.isfinite(hedge_px) or hedge_px <= 0:
+        if not math.isfinite(closed_qty) or closed_qty <= 0:
             return None
-        hedge_venue = str(hedge.get("venue") or "")
-        if hedge_venue == getattr(execution["buy"], "name", ""):
-            total = buy_qty + hedge_qty
-            if total <= 0:
+
+        def primary_fill(info, qty):
+            if qty <= 0:
+                return []
+            try:
+                px = float(info.get("avg_px"))
+            except (TypeError, ValueError):
                 return None
-            buy_px = (buy_qty * buy_px + hedge_qty * hedge_px) / total
-        elif hedge_venue == getattr(execution["sell"], "name", ""):
-            total = sell_qty + hedge_qty
-            if total <= 0:
+            if not math.isfinite(px) or px <= 0:
                 return None
-            sell_px = (sell_qty * sell_px + hedge_qty * hedge_px) / total
-        else:
+            return [(qty, px)]
+
+        buy_fills = primary_fill(buy_info, buy_qty)
+        sell_fills = primary_fill(sell_info, sell_qty)
+        if buy_fills is None or sell_fills is None:
+            return None
+
+        if hedge_qty > 0:
+            try:
+                hedge_px = float(hedge_px)
+            except (TypeError, ValueError):
+                return None
+            if not math.isfinite(hedge_px) or hedge_px <= 0:
+                return None
+            hedge_venue = str(hedge.get("venue") or "")
+            known_venues = {
+                getattr(execution["buy"], "name", ""),
+                getattr(execution["sell"], "name", ""),
+            }
+            if hedge_venue not in known_venues:
+                return None
+            hedge_side = str(hedge.get("side") or "")
+            if hedge_side == "buy":
+                buy_fills.append((hedge_qty, hedge_px))
+            elif hedge_side == "sell":
+                sell_fills.append((hedge_qty, hedge_px))
+            elif hedge_side:
+                return None
+            elif hedge_venue == getattr(execution["buy"], "name", ""):
+                # Older fixtures/results did not persist hedge_side.  Keep
+                # their venue-based interpretation as a narrow compatibility
+                # fallback; live hedge results include the side explicitly.
+                buy_fills.append((hedge_qty, hedge_px))
+            elif hedge_venue == getattr(execution["sell"], "name", ""):
+                sell_fills.append((hedge_qty, hedge_px))
+            else:
+                return None
+
+        def effective_price(fills):
+            remaining = closed_qty
+            notional = 0.0
+            for qty, px in fills:
+                take = min(qty, remaining)
+                if take > 0:
+                    notional += take * px
+                    remaining -= take
+                if remaining <= 1e-12:
+                    break
+            if remaining > 1e-9:
+                return None
+            return notional / closed_qty
+
+        buy_px = effective_price(buy_fills)
+        sell_px = effective_price(sell_fills)
+        if buy_px is None or sell_px is None:
             return None
         return buy_px, sell_px
 
