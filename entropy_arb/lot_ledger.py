@@ -308,7 +308,11 @@ class LotLedger:
         candidate = []
         for lot in self._lots:
             remaining = lot.open_qty - decrements.get(lot.lot_id, 0.0)
-            if remaining > self.tolerance:
+            # ``tolerance`` is also the live reconciliation tolerance, which
+            # for ANTH is one complete 0.001 base-unit step. Preserve a
+            # remainder at that boundary (including normal float noise), but
+            # continue normalizing genuinely sub-step dust.
+            if remaining >= self.tolerance - _EPS:
                 candidate.append(replace(lot, open_qty=remaining))
         self._persist(candidate)
         self._lots = candidate

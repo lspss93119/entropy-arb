@@ -1098,6 +1098,70 @@ def test_rolling_reduce_capture_uses_actual_partial_hedge_closed_qty():
     assert eng._rolling_open_qty == pytest.approx(0.008)
 
 
+def test_rolling_reduce_clips_allocations_and_preserves_one_step_remainder():
+    eng = make_engine(mode="rolling")
+    for lot_id, qty in (("lot-a", 0.028), ("lot-b", 0.015),
+                        ("lot-c", 0.212)):
+        eng._rolling_ledger.add_lot(
+            lot_id=lot_id,
+            source_event_id=lot_id,
+            direction="sell_entropy",
+            open_qty=qty,
+            entry_ts=100.0,
+            buy_venue="RH",
+            sell_venue="ENTROPY",
+            buy_avg_px=100.0,
+            sell_avg_px=101.0,
+            buy_fee_bps=0.0,
+            sell_fee_bps=0.0,
+        )
+    eng._sync_rolling_cache()
+    before_qty = eng._rolling_ledger.total_qty
+
+    execution = rolling_execution(
+        "buy_entropy", 0.042, 200.0, reduce_only=True,
+        lot_id="lot-a", buy_px=100.0, sell_px=102.0)
+    execution["plan"] = replace(
+        execution["plan"], qty=0.042,
+        lot_allocations=(
+            {"lot_id": "lot-a", "qty": 0.028},
+            {"lot_id": "lot-b", "qty": 0.015},
+        ),
+    )
+
+    eng._update_rolling_position(
+        execution, {"status": "not_needed", "filled_qty": 0.0,
+                    "remaining_net_qty": 0.0})
+
+    assert eng._rolling_result_meta["closed_qty"] == pytest.approx(0.042)
+    assert eng._rolling_ledger.total_qty == pytest.approx(0.213)
+    assert (before_qty - eng._rolling_ledger.total_qty
+            == pytest.approx(0.042))
+    assert eng._rolling_ledger.lots[0].lot_id == "lot-b"
+    assert eng._rolling_ledger.lots[0].open_qty == pytest.approx(0.001)
+    assert eng._rolling_open_qty == pytest.approx(0.213)
+
+
+def test_rolling_repeated_reductions_preserve_completed_quantity():
+    eng = make_engine(mode="rolling")
+    eng._rolling_ledger.add_lot(
+        lot_id="lot-1", source_event_id="lot-1",
+        direction="sell_entropy", open_qty=0.339, entry_ts=100.0,
+        buy_venue="RH", sell_venue="ENTROPY", buy_avg_px=100.0,
+        sell_avg_px=101.0, buy_fee_bps=0.0, sell_fee_bps=0.0)
+    eng._sync_rolling_cache()
+
+    expected = (0.297, 0.255, 0.213, 0.171)
+    for index, remaining in enumerate(expected, start=1):
+        execution = rolling_execution(
+            "buy_entropy", 0.042, 200.0 + index, reduce_only=True,
+            lot_id="lot-1", buy_px=100.0, sell_px=102.0)
+        eng._update_rolling_position(
+            execution, {"status": "not_needed", "filled_qty": 0.0,
+                        "remaining_net_qty": 0.0})
+        assert eng._rolling_ledger.total_qty == pytest.approx(remaining)
+
+
 def test_rolling_reduce_capture_is_unavailable_when_hedge_unsettled(caplog):
     eng = make_engine(mode="rolling")
     eng._update_rolling_position(

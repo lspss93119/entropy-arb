@@ -88,6 +88,34 @@ def test_close_allocations_decrement_only_actual_quantity():
     assert ledger.lots[1].open_qty == pytest.approx(0.2)
 
 
+def test_close_allocations_preserves_exact_one_step_remainder():
+    ledger = LotLedger(tolerance=0.001)
+    _lot(ledger, "lot-1", "buy_entropy", 0.015, 100.0, 101.0)
+
+    closed = ledger.close_allocations([
+        # Leave the legal 0.001 step just below the binary tolerance
+        # boundary, as ordinary float arithmetic can do.
+        {"lot_id": "lot-1", "qty": 0.0140000000005},
+    ])
+
+    assert closed == pytest.approx(0.0140000000005)
+    assert ledger.total_qty == pytest.approx(0.001)
+    assert len(ledger.lots) == 1
+    assert ledger.lots[0].open_qty == pytest.approx(0.001)
+
+
+def test_close_allocations_still_normalizes_true_sub_step_dust():
+    ledger = LotLedger(tolerance=0.001)
+    _lot(ledger, "lot-1", "buy_entropy", 0.0015, 100.0, 101.0)
+
+    ledger.close_allocations([
+        {"lot_id": "lot-1", "qty": 0.0010},
+    ])
+
+    assert ledger.total_qty == pytest.approx(0.0)
+    assert not ledger.lots
+
+
 def test_position_validation_requires_direction_and_quantity_match():
     ledger = LotLedger(tolerance=1e-6)
     _lot(ledger, "lot-1", "sell_entropy", 1.0, 100.0, 102.0)
