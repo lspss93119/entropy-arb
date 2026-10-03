@@ -170,6 +170,7 @@ class LighterVenue:
         self.signer = None
         self.orders_feed: Optional[AccountOrdersFeed] = None
         self._coi = int(time.time() * 1000)
+        self._nonce_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------ REST
 
@@ -207,7 +208,7 @@ class LighterVenue:
         c = self.conf.lighter_creds
         assert c is not None and c.complete, f"[{self.name}] missing credentials"
         try:
-            from lighter import SignerClient
+            from lighter import SignerClient, nonce_manager
         except ImportError as e:
             raise RuntimeError(
                 "live trading on Lighter needs the official SDK — "
@@ -218,6 +219,7 @@ class LighterVenue:
             account_index=c.account_index,
             api_private_keys={c.api_key_index: c.api_private_key},
             chain_id=self.profile.chain_id,
+            nonce_management_type=nonce_manager.NonceManagerType.API,
         )
         err = signer.check_client()
         if err is not None:
@@ -281,17 +283,32 @@ class LighterVenue:
         base_amount = int(round(qty * 10 ** self.size_decimals))
         price = int(round(limit_px * 10 ** self.price_decimals))
         try:
-            _tx, resp, err = await self.signer.create_order(
-                market_index=self.market_id,
-                client_order_index=coi,
-                base_amount=base_amount,
-                price=price,
-                is_ask=not is_buy,
-                order_type=SignerClient.ORDER_TYPE_MARKET,
-                time_in_force=SignerClient.ORDER_TIME_IN_FORCE_IMMEDIATE_OR_CANCEL,
-                reduce_only=reduce_only,
-                order_expiry=SignerClient.DEFAULT_IOC_EXPIRY,
-            )
+            creds = self.conf.lighter_creds
+            assert creds is not None and creds.api_key_index is not None
+            # Refresh from the server and hold one application-level lock
+            # through submission.  This is deliberately not a retry: an
+            # invalid nonce remains a failed execution and keeps the engine's
+            # existing fail-closed behavior.
+            async with self._nonce_lock:
+                api_key_index, nonce = (
+                    await self.signer.nonce_manager.async_next_nonce(
+                        creds.api_key_index))
+                log.debug("[%s] submit coi=%d api_key=%d nonce=%d "
+                          "reduce_only=%s", self.name, coi, api_key_index,
+                          nonce, reduce_only)
+                _tx, resp, err = await self.signer.create_order(
+                    market_index=self.market_id,
+                    client_order_index=coi,
+                    base_amount=base_amount,
+                    price=price,
+                    is_ask=not is_buy,
+                    order_type=SignerClient.ORDER_TYPE_MARKET,
+                    time_in_force=SignerClient.ORDER_TIME_IN_FORCE_IMMEDIATE_OR_CANCEL,
+                    reduce_only=reduce_only,
+                    order_expiry=SignerClient.DEFAULT_IOC_EXPIRY,
+                    nonce=nonce,
+                    api_key_index=api_key_index,
+                )
         except Exception as e:
             if fut is not None:
                 self.orders_feed.unwatch(coi)
