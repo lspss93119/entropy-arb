@@ -1049,6 +1049,19 @@ class Engine:
             inflight = self._begin_inflight_reconciliation(execution)
             try:
                 hedge = await self._maybe_hedge()
+                try:
+                    remaining_net = hedge.get("remaining_net_qty")
+                    residual_net = (remaining_net is not None
+                                    and abs(float(remaining_net))
+                                    > self.cfg.net_tolerance_base)
+                except (TypeError, ValueError):
+                    residual_net = True
+                if hedge.get("repair_required") or residual_net:
+                    # A primary pair can settle without an execution-level
+                    # uncertainty while still leaving a known venue delta.
+                    # Keep the CSV's unresolved flag truthful for the full
+                    # paired outcome; rolling state remains fail-closed below.
+                    execution["unresolved"] = True
                 if hedge.get("status") == "unresolved":
                     self._halt_rolling("unresolved hedge execution")
                 if not execution["ok"]:
@@ -1720,6 +1733,7 @@ class Engine:
         is_sell = net > 0
         sgn = 1.0 if net > 0 else -1.0
         slip = cfg.hedge_slippage_bps / 1e4
+        blocked_by_venue_minimum = False
         for v in sorted(self.venues.values(),
                         key=lambda x: (self._venue_limited(x), -x.position * sgn)):
             if v.position * sgn <= 0:
@@ -1730,15 +1744,27 @@ class Engine:
             lk = self._vlock(v.key)
             if lk.locked():
                 continue
-            qty = floor_step(min(abs(net), abs(v.position)), self._step)
+            # Residual hedges are risk-reducing and must use the target
+            # venue's quantity grid.  The pair-wide step is for normal
+            # strategy orders and can round a venue-valid residual down below
+            # that venue's minimum.
+            try:
+                venue_step = 10 ** -int(v.size_decimals)
+            except (AttributeError, TypeError, ValueError):
+                venue_step = self._step
+            raw_qty = min(abs(net), abs(v.position))
+            qty = floor_step(raw_qty, venue_step)
             if qty < v.min_base:
+                if raw_qty > 0:
+                    blocked_by_venue_minimum = True
                 continue
             ref = v.book.best_bid() if is_sell else v.book.best_ask()
             if ref is None:
                 continue
             limit = v.px_round(ref * (1 - slip), False) if is_sell \
                 else v.px_round(ref * (1 + slip), True)
-            if qty * limit < max(cfg.min_order_notional, v.min_quote):
+            if qty * limit < v.min_quote:
+                blocked_by_venue_minimum = True
                 continue
             await lk.acquire()  # verified free, no awaits since: fast path
             try:
@@ -1771,6 +1797,7 @@ class Engine:
                         "remaining_net_qty": sum(x.position
                                                   for x in self.venues.values()),
                         "error": info.get("err") or "unresolved",
+                        "repair_required": False,
                     }
                 else:
                     v.position += -fill if is_sell else fill
@@ -1794,11 +1821,15 @@ class Engine:
                     "remaining_net_qty": sum(x.position
                                               for x in self.venues.values()),
                     "error": "",
+                    "repair_required": False,
                 }
             finally:
                 lk.release()
-        log.warning("[HEDGE] net %+.6g below hedgeable minimum — carrying "
-                    "(next reconcile retries)", net)
+        error = ("repair_required: below_venue_minimum"
+                 if blocked_by_venue_minimum else
+                 "below_hedgeable_minimum")
+        log.warning("[HEDGE] net %+.6g unavailable (%s) — carrying "
+                    "(next reconcile retries)", net, error)
         return {
             "status": "unhedgeable",
             "venue": "",
@@ -1808,7 +1839,8 @@ class Engine:
             "notional": None,
             "duration_ms": 0.0,
             "remaining_net_qty": net,
-            "error": "below_hedgeable_minimum",
+            "error": error,
+            "repair_required": blocked_by_venue_minimum,
         }
 
     # --------------------------------------------------- reconcile / status

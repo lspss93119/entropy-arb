@@ -52,6 +52,7 @@ class StubVenue:
         self.cap_usd, self.fee_bps = cap, fee
         self.size_decimals, self.min_base, self.min_quote = 4, 1e-4, 10.0
         self.position, self.cash = 0.0, 0.0
+        self.volume_usd = 0.0
         self.orders_per_min = 30
         self.last_traded_ts = 0.0
         self.book = OrderBook()
@@ -62,6 +63,9 @@ class StubVenue:
     def set_book(self, bid, ask, sz=50.0):
         self.book.apply_hl([[{"px": str(bid), "sz": str(sz)}],
                             [{"px": str(ask), "sz": str(sz)}]])
+
+    def px_round(self, px, round_up):
+        return px
 
 
 def make_engine(mode="fixed", **thr):
@@ -1220,6 +1224,166 @@ def test_rolling_filled_hedge_with_residual_net_position_halts():
 
     assert eng.halted is True
     assert not eng._rolling_ledger.lots
+
+
+def _prepare_residual_hedge_engine(*, residual=0.00335, price=2000.0,
+                                   size_decimals=5, min_base=0.0032,
+                                   min_quote=5.0):
+    eng = make_engine()
+    eng.cfg.hedge_slippage_bps = 0.0
+    eng.entropy.position = 0.0
+    eng.hedge.position = -residual
+    eng.hedge.size_decimals = size_decimals
+    eng.hedge.min_base = min_base
+    eng.hedge.min_quote = min_quote
+    eng.hedge.set_book(price - 1.0, price)
+    calls = []
+
+    async def send_taker(**kwargs):
+        calls.append(kwargs)
+        return {
+            "status": "filled",
+            "filled_base": kwargs["qty"],
+            "avg_px": kwargs["limit_px"],
+            "err": None,
+            "unresolved": False,
+        }
+
+    eng.hedge.send_taker = send_taker
+    return eng, calls
+
+
+def test_residual_hedge_bypasses_strategy_minimum_at_venue_minimum():
+    eng, calls = _prepare_residual_hedge_engine(min_quote=5.0)
+
+    result = asyncio.run(eng._hedge(-0.00335))
+
+    assert 0.00335 * 2000.0 < eng.cfg.min_order_notional
+    assert result["status"] == "filled"
+    assert result["filled_qty"] == pytest.approx(0.00335)
+    assert result["remaining_net_qty"] == pytest.approx(0.0)
+    assert calls[0]["qty"] == pytest.approx(0.00335)
+    assert calls[0]["reduce_only"] is True
+
+
+def test_residual_below_venue_minimum_is_explicit_repair_required():
+    eng, calls = _prepare_residual_hedge_engine(min_quote=10.0)
+
+    result = asyncio.run(eng._hedge(-0.00335))
+
+    assert result["status"] == "unhedgeable"
+    assert result["repair_required"] is True
+    assert result["error"] == "repair_required: below_venue_minimum"
+    assert result["remaining_net_qty"] == pytest.approx(-0.00335)
+    assert calls == []
+
+
+def test_partial_reduce_incident_keeps_ledger_until_residual_is_hedged():
+    eng = make_engine(mode="rolling")
+    seed_open_rolling_position(eng, qty=0.535)
+    execution = rolling_execution(
+        "sell_entropy", 0.00665, 200.0, reduce_only=True,
+        lot_id="event-100", buy_px=2128.1, sell_px=2087.0)
+    execution["plan"] = replace(
+        execution["plan"], qty=0.01, buy_notional=21.281,
+        sell_notional=20.87, q_max=0.01, q_max_notional=21.281,
+        lot_allocations=({"lot_id": "event-100", "qty": 0.01},))
+    _set_reduce_fills(execution, buy_fill=0.00665, buy_px=2128.1,
+                      sell_fill=0.01, sell_px=2087.0)
+
+    eng._update_rolling_position(execution, {
+        "status": "unhedgeable",
+        "repair_required": True,
+        "filled_qty": 0.0,
+        "remaining_net_qty": -0.00335,
+        "error": "repair_required: below_venue_minimum",
+    })
+
+    assert eng.halted is True
+    assert eng._rolling_ledger.total_qty == pytest.approx(0.535)
+
+
+def test_partial_reduce_closes_actual_paired_qty_after_safety_hedge():
+    eng = make_engine(mode="rolling")
+    seed_open_rolling_position(eng, qty=0.535)
+    execution = rolling_execution(
+        "sell_entropy", 0.00665, 200.0, reduce_only=True,
+        lot_id="event-100", buy_px=2128.1, sell_px=2087.0)
+    execution["plan"] = replace(
+        execution["plan"], qty=0.01, buy_notional=21.281,
+        sell_notional=20.87, q_max=0.01, q_max_notional=21.281,
+        lot_allocations=({"lot_id": "event-100", "qty": 0.01},))
+    _set_reduce_fills(execution, buy_fill=0.00665, buy_px=2128.1,
+                      sell_fill=0.01, sell_px=2087.0)
+
+    eng._update_rolling_position(execution, {
+        "status": "filled",
+        "filled_qty": 0.00335,
+        "venue": "RH",
+        "side": "buy",
+        "avg_px": 2128.1,
+        "remaining_net_qty": 0.0,
+    })
+
+    assert eng.halted is False
+    assert eng._rolling_ledger.total_qty == pytest.approx(0.525)
+    assert eng._rolling_result_meta["closed_qty"] == pytest.approx(0.01)
+
+
+def test_unhedged_residual_marks_execution_unresolved_for_logging():
+    eng = make_engine(mode="rolling")
+    captured = {}
+
+    async def execute(_buy, _sell, _plan):
+        return {"unresolved": False, "ok": True}
+
+    async def maybe_hedge():
+        return {
+            "status": "unhedgeable",
+            "repair_required": True,
+            "remaining_net_qty": -0.00335,
+            "error": "repair_required: below_venue_minimum",
+        }
+
+    eng._execute = execute
+    eng._maybe_hedge = maybe_hedge
+    eng._begin_inflight_reconciliation = lambda execution: None
+    eng._advance_inflight_reconciliation = lambda hedge: None
+    eng._update_rolling_position = lambda execution, hedge: None
+    eng._log_csv = lambda execution, hedge: captured.update(
+        execution=execution, hedge=hedge)
+
+    async def run_execution():
+        await eng._vlock("entropy").acquire()
+        await eng._vlock("hedge").acquire()
+        await eng._execute_locked(eng.entropy, eng.hedge, object())
+
+    asyncio.run(run_execution())
+
+    assert captured["execution"]["unresolved"] is True
+    assert captured["hedge"]["remaining_net_qty"] == pytest.approx(-0.00335)
+
+
+def test_rolling_ledger_does_not_claim_reconciliation_with_repair_residual():
+    eng = make_engine(mode="rolling")
+    eng._update_rolling_position(
+        rolling_execution("buy_entropy", 0.1, 100.0),
+        {"status": "filled", "filled_qty": 0.0},
+    )
+    before = eng._rolling_ledger.total_qty
+    execution = rolling_execution("sell_entropy", 0.01, 200.0,
+                                  reduce_only=True, lot_id="event-100")
+
+    eng._update_rolling_position(execution, {
+        "status": "unhedgeable",
+        "repair_required": True,
+        "filled_qty": 0.0,
+        "remaining_net_qty": -0.00335,
+        "error": "repair_required: below_venue_minimum",
+    })
+
+    assert eng.halted is True
+    assert eng._rolling_ledger.total_qty == pytest.approx(before)
 
 
 if __name__ == "__main__":
