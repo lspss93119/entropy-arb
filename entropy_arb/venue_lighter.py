@@ -18,7 +18,7 @@ import logging
 import math
 import time
 from collections import OrderedDict
-from typing import Optional
+from typing import Callable, Optional
 
 import aiohttp
 
@@ -274,7 +274,8 @@ class LighterVenue:
         return self._coi
 
     async def send_taker(self, *, is_buy: bool, qty: float, limit_px: float,
-                         reduce_only: bool = False) -> dict:
+                         reduce_only: bool = False,
+                         submit_guard: Optional[Callable[[], bool]] = None) -> dict:
         """Market order with avg-price protection; settle via account ws."""
         assert self.signer is not None
         from lighter import SignerClient
@@ -293,6 +294,12 @@ class LighterVenue:
                 api_key_index, nonce = (
                     await self.signer.nonce_manager.async_next_nonce(
                         creds.api_key_index))
+                if submit_guard is not None and not submit_guard():
+                    if fut is not None:
+                        self.orders_feed.unwatch(coi)
+                    return {"status": "pre-submit-blocked", "filled_base": 0.0,
+                            "avg_px": None, "err": None, "unresolved": False,
+                            "not_submitted": True}
                 log.debug("[%s] submit coi=%d api_key=%d nonce=%d "
                           "reduce_only=%s", self.name, coi, api_key_index,
                           nonce, reduce_only)

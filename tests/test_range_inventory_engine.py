@@ -2,6 +2,7 @@
 import asyncio
 import json
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
@@ -267,3 +268,112 @@ def test_range_live_requires_recorder(tmp_path, monkeypatch):
     eng.cfg.recorder_enabled = False
     with pytest.raises(RuntimeError, match="requires recorder"):
         eng._validate_rolling_runtime(live=True)
+
+
+@pytest.mark.parametrize("change", ["stale_signal", "halt", "stop", "depth", "stale_bbo", "cap"])
+def test_scheduler_gap_cannot_bypass_submission_guards(tmp_path, monkeypatch, change):
+    eng, calls, clock = make_range(tmp_path, monkeypatch)
+    eng._on_minute(row(50, -20))
+    original_gather = asyncio.gather
+    async def delayed(*coros, **kwargs):
+        if change == "stale_signal":
+            clock["now"] = 3076
+        elif change == "halt":
+            eng._set_halted("operator", source="operator")
+        elif change == "stop":
+            eng.request_stop()
+        elif change == "depth":
+            eng.hedge.book.bids = {99.9: .01}
+        elif change == "stale_bbo":
+            clock["now"] += 4
+        else:
+            eng.hedge.cap_usd = 5
+        return await original_gather(*coros, **kwargs)
+    monkeypatch.setattr("entropy_arb.engine.asyncio.gather", delayed)
+    asyncio.run(eng._evaluate())
+    assert calls == []
+    assert eng._range.state["pending_intent"] is None  # proven zero submissions
+    assert eng._range.signed_qty == 0
+
+
+def test_persistence_delay_rechecks_books_before_send(tmp_path, monkeypatch):
+    eng, calls, clock = make_range(tmp_path, monkeypatch)
+    eng._on_minute(row(50, -20))
+    reserve = eng._range.reserve
+    def delayed(result, *, now):
+        reserve(result, now=now)
+        clock["now"] += 4  # signal still young, BBO now exceeds 3s freshness
+    monkeypatch.setattr(eng._range, "reserve", delayed)
+    asyncio.run(eng._evaluate())
+    assert calls == []
+    assert eng._range.state["pending_intent"] is None
+
+
+def test_delayed_transport_keeps_guard_and_repairs_actual_one_leg_fill(tmp_path, monkeypatch):
+    eng, _, clock = make_range(tmp_path, monkeypatch)
+    eng._on_minute(row(50, -20))
+    signed = []
+    async def entropy_send(**kw):
+        signed.append("entropy-primary" if not kw["reduce_only"] else "entropy-residual")
+        return {"status": "filled", "filled_base": kw["qty"], "avg_px": 100,
+                "err": None, "unresolved": False}
+    async def rh_send(**kw):
+        await asyncio.sleep(0)  # models await nonce after the other primary submitted
+        clock["now"] += 4
+        assert "submit_guard" in kw, "guard must reach the actual transport"
+        assert not kw["submit_guard"]()
+        for venue in eng.venues.values():
+            venue.set_book(99.9, 100.1, sz=100)  # fresh feed for existing safety hedge
+        return {"status": "pre-submit-blocked", "filled_base": 0,
+                "avg_px": None, "err": None, "unresolved": False, "not_submitted": True}
+    eng.entropy.send_taker, eng.hedge.send_taker = entropy_send, rh_send
+    asyncio.run(eng._evaluate())
+    assert signed == ["entropy-primary", "entropy-residual"]
+    assert eng._range.signed_qty == 0
+    assert eng._range.state["pending_intent"] is None
+    assert not eng.halted
+
+
+def test_new_minute_cannot_bypass_existing_persist_arming(tmp_path, monkeypatch):
+    eng, calls, clock = make_range(tmp_path, monkeypatch)
+    eng._on_minute(row(50, -20))
+    selected = eng._scan(clock["now"])
+    eng.cfg.premium_persist_sec = .5
+    clock["now"] = 3121
+    for venue in eng.venues.values():
+        venue.set_book(99.9, 100.1, sz=100)
+    eng._on_minute(row(51, -30))
+    buy, sell, planned = selected
+    async def go():
+        await eng._vlock(buy.key).acquire()
+        await eng._vlock(sell.key).acquire()
+        await eng._execute_locked(buy, sell, planned)
+    asyncio.run(go())
+    assert calls == []
+    assert eng._range.state["pending_intent"] is None
+
+
+@pytest.mark.parametrize("allow", [False, True])
+def test_hl_transport_guard_is_optional_and_before_post(allow):
+    from entropy_arb.venue_hl import HLVenue, NonceAllocator
+    venue = object.__new__(HLVenue)
+    venue.account = SimpleNamespace(nonces=NonceAllocator(), wallet=None, is_mainnet=True)
+    venue.asset_id, venue.coin = 1, "ANTH"
+    venue._next_cloid = lambda: "test-only-cloid"
+    venue._signing = SimpleNamespace(order_request_to_order_wire=lambda req, asset: req,
+        order_wires_to_order_action=lambda wires: wires, sign_l1_action=lambda *args: "test-only")
+    posted = []
+    async def post(payload):
+        posted.append(payload)
+        return {"status": "ok", "response": {"data": {"statuses": [
+            {"filled": {"totalSz": ".2", "avgPx": "100", "oid": 1}},
+        ]}}}, None, False
+    venue._post_exchange = post
+    kwargs = {} if allow else {"submit_guard": lambda: False}
+    result = asyncio.run(venue.send_taker(is_buy=True, qty=.2, limit_px=100, **kwargs))
+    if allow:
+        assert len(posted) == 1
+        assert result["filled_base"] == .2
+    else:
+        assert posted == []
+        assert result["not_submitted"] is True

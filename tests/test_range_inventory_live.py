@@ -273,3 +273,66 @@ def test_budget_accounts_for_execution_price_bounds(tmp_path):
         min_base=.0001, min_notional=10, max_order_notional=90,
         staleness_sec=3, leg_slippage_bps=10)
     assert result.plan.qty * result.plan.buy_limit * 1.001 <= 53
+
+
+@pytest.mark.parametrize("primary_px,hedge_px", [(None, None), (None, 100), (100, None)])
+def test_unknown_price_roundtrip_persists_unavailable_not_zero(tmp_path, primary_px, hedge_px):
+    live = adapter(tmp_path)
+    live.on_minute(row(50, -20), now=3061)
+    result, _ = plan(live)
+    live.reserve(result, now=3061)
+    settled = live.settle({"entropy": 0, "hedge": 0}, [
+        fill("entropy", "buy", .2, primary_px),
+        fill("entropy", "sell", .2, hedge_px),
+    ])
+    assert settled["paired_fill_qty"] == 0
+    assert settled["realized_capture_usd"] is None
+    assert live.state["cumulative_realized_capture_usd"] is None
+    assert live.state["pending_intent"] is None
+    restarted = live_type()(live.path, symbol="ANTH", hedge="lighter-rh", params=live.params)
+    restarted.load_and_reconcile({"entropy": 0, "hedge": 0})
+    assert restarted.state["cumulative_realized_capture_usd"] is None
+
+
+@pytest.mark.parametrize("inventory", [.1, -.1])
+def test_minimum_notional_checked_at_rounded_protective_prices(tmp_path, inventory):
+    live = adapter(tmp_path)
+    build(live, qty=abs(inventory))
+    if inventory < 0:
+        live._commit(dict(live.state, entropy_qty=inventory, hedge_qty=-inventory,
+                          current_direction="sell_entropy"))
+    live.on_minute(row(51, 100 if inventory > 0 else -100), now=3121)
+    e, h = venues()
+    for venue in (e, h):
+        venue.set_book(100, 100)
+        venue.book.last_update_ts = 3121
+    e.position, h.position = inventory, -inventory
+    result, reason = live.plan(now=3121, entropy=e, hedge=h, step=.001,
+        min_base=.001, min_notional=10, max_order_notional=90,
+        staleness_sec=3, leg_slippage_bps=10)
+    assert result is None  # 0.1 * sell protection 99.9 = 9.99, not legal $10
+    assert reason == "below_min_notional"
+
+
+@pytest.mark.parametrize("inventory", [5.0, -5.0])
+def test_gate_blocked_metadata_cannot_block_price_drift_reduction(tmp_path, inventory):
+    from entropy_arb.range_inventory_live import CANARY_PARAMS
+    live = adapter(tmp_path, params=replace(CANARY_PARAMS, long_window_minutes=4,
+        short_window_minutes=50, range_gate_window_minutes=4, min_coverage_pct=100,
+        range_gate_min_bps=1000))
+    live._commit(dict(live.state, entropy_qty=inventory, hedge_qty=-inventory,
+        current_direction="buy_entropy" if inventory > 0 else "sell_entropy",
+        mean_cost_per_base=0))
+    live.on_minute(row(50, -20 if inventory > 0 else 100), now=3061)
+    assert live.signal.exposure_blocked
+    assert not live.signal.range_gate_open
+    e, h = venues()
+    for venue in (e, h):
+        venue.set_book(110, 110, sz=100)
+        venue.book.last_update_ts = 3061
+    e.position, h.position = inventory, -inventory
+    result, reason = live.plan(now=3061, entropy=e, hedge=h, step=.001,
+        min_base=.001, min_notional=10, max_order_notional=90, staleness_sec=3)
+    assert reason == "ok"
+    assert result.plan.reduce_only
+    assert result.plan.qty < abs(inventory)

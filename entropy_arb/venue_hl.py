@@ -18,7 +18,7 @@ import json
 import logging
 import math
 import time
-from typing import Optional
+from typing import Callable, Optional
 
 import aiohttp
 
@@ -180,7 +180,8 @@ class HLVenue:
         return Cloid.from_int(self._cloid)
 
     async def send_taker(self, *, is_buy: bool, qty: float, limit_px: float,
-                         reduce_only: bool = False) -> dict:
+                         reduce_only: bool = False,
+                         submit_guard: Optional[Callable[[], bool]] = None) -> dict:
         assert self.account is not None and self.asset_id >= 0
         s = self._signing
         cloid = self._next_cloid()
@@ -202,6 +203,10 @@ class HLVenue:
                     "avg_px": None, "err": reason, "reason": reason,
                     "unresolved": False}
 
+        if submit_guard is not None and not submit_guard():
+            return {"status": "pre-submit-blocked", "filled_base": 0.0,
+                    "avg_px": None, "err": None, "unresolved": False,
+                    "not_submitted": True}
         body, err, unresolved = await self._post_exchange(payload)
         if err is not None:
             return {"status": "send-failed", "filled_base": 0.0,

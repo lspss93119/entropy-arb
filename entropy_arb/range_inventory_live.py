@@ -237,13 +237,13 @@ class RangeInventoryLive:
             return "minute_consumed"
         if self.signal.target_usd is None:
             return "coverage"
-        if self.signal.exposure_blocked:
+        if self.signal.exposure_blocked and not self.signed_qty:
             return "range_gate"
         return None
 
     def plan(self, *, now, entropy, hedge, step, min_base, min_notional,
-             max_order_notional, staleness_sec, leg_slippage_bps=0.0):
-        block = self.signal_block(now)
+             max_order_notional, staleness_sec, leg_slippage_bps=0.0, reserved=False):
+        block = self.signal_block(now, reserved=reserved)
         if block:
             return None, block
         self.validate_positions({"entropy": entropy.position, "hedge": hedge.position})
@@ -271,7 +271,7 @@ class RangeInventoryLive:
         need = target / ref - self.signed_qty
         action = signal_action(inv, target)
         if abs(need) < 1e-12:
-            return None, "at_target"
+            return None, "range_gate" if self.signal.exposure_blocked else "at_target"
         reduce = self.signed_qty * need < 0
         if reduce:
             need = math.copysign(min(abs(need), abs(self.signed_qty)), need)
@@ -298,6 +298,13 @@ class RangeInventoryLive:
             min_base=min_base, min_notional=min_notional, require_edge=False)
         if planned is None:
             return None, reason
+        buy_bound = buy.px_round(planned.buy_limit * (1 + slip), round_up=False)
+        sell_bound = sell.px_round(planned.sell_limit * (1 - slip), round_up=True)
+        for venue, bound in ((buy, buy_bound), (sell, sell_bound)):
+            if planned.qty + EPS < venue.min_base:
+                return None, "below_min_base"
+            if bound <= 0 or planned.qty * bound + EPS < max(min_notional, venue.min_quote):
+                return None, "below_min_notional"
         planned = replace(planned, reduce_only=reduce)
         return RangePlan(planned, "buy_entropy" if need > 0 else "sell_entropy",
                          action, self.signal, inv, need * ref,
@@ -376,6 +383,10 @@ class RangeInventoryLive:
             # Keep the actual safety-hedge cash flow, not a guessed execution.
             realized = cash if priced else None
             cumulative = cumulative + realized if cumulative is not None and realized is not None else None
+        if not priced:
+            # Unknown positive fills remain unknown even when a roundtrip has
+            # zero paired quantity and the known-price cash subtotal is zero.
+            realized = cumulative = None
         direction = "buy_entropy" if after > 0 else "sell_entropy" if after < 0 else None
         self._commit(dict(self.state, entropy_qty=after, hedge_qty=-after,
                           current_direction=direction, mean_cost_per_base=cost,

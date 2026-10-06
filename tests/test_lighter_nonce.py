@@ -185,5 +185,25 @@ def test_rh_credentials_keep_existing_account_and_api_key_mapping():
     assert venue.profile.chain_id == 466324
 
 
+def test_optional_submit_guard_rechecks_after_authoritative_nonce_await():
+    venue = _venue()
+    allowed = {"value": True}
+    class DelayedNonce(_ServerNonceManager):
+        async def async_next_nonce(self, api_key_index):
+            result = await super().async_next_nonce(api_key_index)
+            allowed["value"] = False
+            return result
+    manager = DelayedNonce()
+    signer = _RecordingSigner(manager)
+    venue.signer = signer
+    result = asyncio.run(venue.send_taker(is_buy=False, qty=.2, limit_px=100,
+        submit_guard=lambda: allowed["value"]))
+    assert manager.calls == [8]
+    assert signer.calls == []  # nonce query is read-only; no signed submission
+    assert result["not_submitted"] is True
+    assert result["filled_base"] == 0
+    assert not result["unresolved"]
+
+
 if __name__ == "__main__":
     pytest.main([__file__])

@@ -197,4 +197,3 @@ class RangeInventoryCore:
         action = "blocked" if blocked else signal_action(inventory_usd, target)
         return RangeSignal(r["minute_ts"], r["minute_ts"] + 60, lp, sp, rg,
                            gate, target, blocked, action)
-

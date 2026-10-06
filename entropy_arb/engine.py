@@ -1132,19 +1132,19 @@ class Engine:
             return self._scan_rolling(now)
         return self._scan_fixed(now)
 
-    def _range_plan_now(self, now: float):
+    def _range_plan_now(self, now: float, *, reserved=False):
         return self._range.plan(now=now, entropy=self.entropy, hedge=self.hedge,
             step=self._step, min_base=self._min_base, min_notional=self._min_notional,
             max_order_notional=self.cfg.max_order_notional,
             staleness_sec=self.cfg.staleness_sec,
-            leg_slippage_bps=self.cfg.leg_slippage_bps)
+            leg_slippage_bps=self.cfg.leg_slippage_bps, reserved=reserved)
 
-    def _range_venues_ready(self, now: float, *, check_locks=True) -> bool:
+    def _range_venues_ready(self, now: float, *, check_locks=True, check_rate=True) -> bool:
         if self.halted or self.stop.is_set() or self._venue_down:
             return False
         for v in self.venues.values():
             if (not v.ready_to_trade() or self._venue_limited(v)
-                    or not self._venue_rate_ok(v)
+                    or (check_rate and not self._venue_rate_ok(v))
                     or v.book.last_update_ts <= v.last_traded_ts
                     or (check_locks and self._vlock(v.key).locked())):
                 return False
@@ -1177,7 +1177,7 @@ class Engine:
         return buy, sell, result.plan
 
     def _prepare_range_submit(self, buy, sell):
-        """Last synchronous guard; no awaits between durable reserve and send."""
+        """Durable intent first; actual transport also rechecks this intent."""
         self._load_persisted_halt()
         now = time.time()
         if not self._range_venues_ready(now, check_locks=False):
@@ -1185,8 +1185,15 @@ class Engine:
         result, _ = self._range_plan_now(now)
         if result is None or (result.direction == "buy_entropy") != (buy.key == "entropy"):
             return None
+        armed = self._armed[result.direction]
+        if (self._range_arm_minute != result.signal.minute_ts or armed is None
+                or now - armed < self.cfg.premium_persist_sec):
+            return None
         self._range.reserve(result, now=now)
-        if self._range.signal_block(time.time(), reserved=True) or self.stop.is_set() or self.halted:
+        slip = self.cfg.leg_slippage_bps / 1e4
+        bounds = (buy.px_round(result.plan.buy_limit * (1 + slip), round_up=False),
+                  sell.px_round(result.plan.sell_limit * (1 - slip), round_up=True))
+        if not self._range_submission_valid(result, buy, sell, *bounds):
             self._range.abandon_unsent()
             return None
         log.info("range submit minute=%s action=%s target_usd=%s inventory_usd=%s "
@@ -1195,7 +1202,37 @@ class Engine:
                  result.current_inventory_usd, result.requested_adjustment_usd,
                  result.plan.qty, result.depth_used_fraction,
                  (now - result.signal.completed_ts) * 1000)
-        return result.plan
+        return result
+
+    def _range_submission_valid(self, reserved, buy, sell, buy_bound, sell_bound):
+        """Check after fsync / scheduler / nonce awaits, without repricing intent."""
+        self._load_persisted_halt()
+        now = time.time()
+        if not self._range_venues_ready(now, check_locks=False, check_rate=False):
+            return False
+        try:
+            current, reason = self._range_plan_now(now, reserved=True)
+        except RangeStateError as exc:
+            self._halt_rolling(f"range pre-submit state mismatch: {exc}")
+            return False
+        intent = self._range.state["pending_intent"]
+        if (current is None or current.signal != reserved.signal or intent is None
+                or intent["minute_ts"] != reserved.signal.minute_ts
+                or intent["qty"] != reserved.plan.qty
+                or current.direction != reserved.direction
+                or current.plan.reduce_only != reserved.plan.reduce_only
+                or current.plan.qty + 1e-9 < reserved.plan.qty):
+            log.info("range pre-submit blocked reason=%s", reason if current is None else "changed_plan")
+            return False
+        slip = self.cfg.leg_slippage_bps / 1e4
+        fresh_buy_bound = buy.px_round(current.plan.buy_limit * (1 + slip), round_up=False)
+        fresh_sell_bound = sell.px_round(current.plan.sell_limit * (1 - slip), round_up=True)
+        if not (buy.book.best_ask() <= buy_bound <= fresh_buy_bound + 1e-9
+                and fresh_sell_bound - 1e-9 <= sell_bound <= sell.book.best_bid()):
+            return False
+        return all(reserved.plan.qty + 1e-9 >= v.min_base and bound > 0
+                   and reserved.plan.qty * bound + 1e-9 >= max(self._min_notional, v.min_quote)
+                   for v, bound in ((buy, buy_bound), (sell, sell_bound)))
 
     def _settle_range(self, execution: dict, hedge: dict) -> None:
         if self._range is None:
@@ -1650,12 +1687,14 @@ class Engine:
         """Send both legs and settle the fills. Both venue locks are held by
         the caller. Returns the execution record, or None when halted."""
         self._range_unsent = False
+        range_submission = None
         if self._range is not None:
             guarded = self._prepare_range_submit(buy, sell)
             if guarded is None:
                 self._range_unsent = True
                 return None
-            plan = guarded
+            range_submission = guarded
+            plan = guarded.plan
         if self.halted:
             return None
         cfg = self.cfg
@@ -1699,16 +1738,34 @@ class Engine:
                                      round_up=False)
             sell_bound = sell.px_round(plan.sell_limit * (1 - slip),
                                        round_up=True)
-        self._record_send(buy)
-        self._record_send(sell)
+        if self._range is None:
+            self._record_send(buy)
+            self._record_send(sell)
 
         async def send_with_completion_ts(venue, *, is_buy, qty, limit_px,
                                           reduce_only):
             started_ts = time.time()
             try:
-                info = await venue.send_taker(is_buy=is_buy, qty=qty,
-                                               limit_px=limit_px,
-                                               reduce_only=reduce_only)
+                kwargs = dict(is_buy=is_buy, qty=qty, limit_px=limit_px,
+                              reduce_only=reduce_only)
+                if range_submission is not None:
+                    counted = False
+                    def submit_guard():
+                        nonlocal counted
+                        if (not self._range_submission_valid(range_submission, buy, sell,
+                                                             buy_bound, sell_bound)
+                                or (not counted and not self._venue_rate_ok(venue))):
+                            return False
+                        if not counted:
+                            self._record_send(venue)
+                            counted = True
+                        return True
+                    if not submit_guard():
+                        return ({"status": "pre-submit-blocked", "filled_base": 0.0,
+                                 "avg_px": None, "err": None, "unresolved": False,
+                                 "not_submitted": True}, started_ts, time.time())
+                    kwargs["submit_guard"] = submit_guard
+                info = await venue.send_taker(**kwargs)
             except Exception as exc:
                 info = {"status": "send-failed", "filled_base": 0.0,
                         "avg_px": None, "err": repr(exc),
@@ -1736,6 +1793,12 @@ class Engine:
         (binfo, buy_started_ts, buy_done_ts), (sinfo, sell_started_ts,
                                                sell_done_ts) = (
             unpack_send_result(result) for result in res)
+        if (range_submission is not None and binfo.get("not_submitted")
+                and sinfo.get("not_submitted") and not binfo["filled_base"]
+                and not sinfo["filled_base"]):
+            self._range.abandon_unsent()  # neither transport submitted an order
+            self._range_unsent = True
+            return None
         buy_settle_ms = (
             max(0.0, buy_done_ts - buy_started_ts) * 1000.0
             if buy_started_ts is not None and buy_done_ts is not None else None)
