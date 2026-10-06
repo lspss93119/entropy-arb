@@ -33,11 +33,11 @@
 
 **Interfaces:** produce `FrozenRangeInventoryParams`, `RangeSignal`, `RangeInventoryCore(params, use_range_gate)`, `warmup_row(row)`, `on_row(row, inventory_usd)` and `signal_action(inventory_usd, target_usd)`; preserve shadow public imports/CSV.
 
-- [ ] Write tests for core metadata, causal windows, gate add-only, directional target, shared-core ownership and original shadow oracle parity.
-- [ ] Run `python3 -m pytest tests/test_range_inventory.py -q`; expected RED for missing core.
-- [ ] Extract only signal/target math and validation; shadow keeps all execution/accounting.
-- [ ] Run `python3 -m pytest tests/ -q`; expected all PASS, original behavior unchanged.
-- [ ] Commit `refactor: share pure range inventory strategy core`.
+- [x] Write tests for core metadata, causal windows, gate add-only, directional target, shared-core ownership and original shadow oracle parity.
+- [x] Run `python3 -m pytest tests/test_range_inventory.py -q`; expected RED for missing core.
+- [x] Extract only signal/target math and validation; shadow keeps all execution/accounting.
+- [x] Run `python3 -m pytest tests/ -q`; expected all PASS, original behavior unchanged.
+- [x] Commit `refactor: share pure range inventory strategy core`.
 
 ### Task 2: Atomic independent state and live planning adapter
 
@@ -45,11 +45,11 @@
 
 **Interfaces:** consume Task 1 core; produce `RangeInventoryLive` with `load_and_reconcile`, `on_minute`, `plan`, `reserve`, `settle`, `expected_positions`; use existing `ArbPlan` and `plan_arb`.
 
-- [ ] Write failing tests for fresh completed-minute immediate plan, stale/partial/duplicate signals, frozen canary profile, gate add-only, 53 budget, 75% depth, headroom/minima, reversal, restart reconciliation, corrupt state/HALT/in-flight intent, actual partial/residual fills and price-unavailable telemetry.
-- [ ] Run `python3 -m pytest tests/test_range_inventory_live.py -q`; expected RED for missing adapter.
-- [ ] Implement strict atomic independent state, single-attempt budget and one-level planner; no API access.
-- [ ] Run `python3 -m pytest tests/ -q`; expected all PASS.
-- [ ] Commit `feat: add persisted range inventory live adapter`.
+- [x] Write failing tests for fresh completed-minute immediate plan, stale/partial/duplicate signals, frozen canary profile, gate add-only, 53 budget, 75% depth, headroom/minima, reversal, restart reconciliation, corrupt state/HALT/in-flight intent, actual partial/residual fills and price-unavailable telemetry.
+- [x] Run `python3 -m pytest tests/test_range_inventory_live.py -q`; expected RED for missing adapter.
+- [x] Implement strict atomic independent state, single-attempt budget and one-level planner; no API access.
+- [x] Run `python3 -m pytest tests/ -q`; expected all PASS.
+- [x] Commit `feat: add persisted range inventory live adapter`.
 
 ### Task 3: Thin opt-in engine integration and safety lifecycle
 
@@ -57,11 +57,11 @@
 
 **Interfaces:** engine routes completed minute and live BBO to Task 2; sends returned plans through existing paired executor and residual hedge; settles actual outcomes and strictly reconciles Range expected positions.
 
-- [ ] Write failing integration tests for opt-in config, completed-minute wakeup, actual no-order stale/HALT guards, partial/residual settlement, strict restart/resume and mismatch HALT, budget persistence before orders and Range reduce without rolling gates.
-- [ ] Run `python3 -m pytest tests/test_range_inventory_engine.py -q`; expected RED for mode/integration missing.
-- [ ] Integrate only range-mode branches; retain fixed/rolling functions and execution transports unchanged.
-- [ ] Run `python3 -m pytest tests/ -q`; expected all PASS.
-- [ ] Commit `feat: integrate range inventory with safe paired execution`.
+- [x] Write failing integration tests for opt-in config, completed-minute wakeup, actual no-order stale/HALT guards, partial/residual settlement, strict restart/resume and mismatch HALT, budget persistence before orders and Range reduce without rolling gates.
+- [x] Run `python3 -m pytest tests/test_range_inventory_engine.py -q`; expected RED for mode/integration missing.
+- [x] Integrate only range-mode branches; retain fixed/rolling functions and execution transports unchanged.
+- [x] Run `python3 -m pytest tests/ -q`; expected all PASS.
+- [x] Commit `feat: integrate range inventory with safe paired execution`.
 
 ### Task 4: Offline parity evidence and final review
 
@@ -69,10 +69,10 @@
 
 **Interfaces:** consume core, shadow and live adapter signal path; CSV input plus exact old shadow git oracle; fail on any target/action or historical accounting divergence.
 
-- [ ] Write test asserting parity and intentional target/action divergence rejection; run targeted pytest, expected RED for missing runner.
-- [ ] Implement offline runner, no env/API; read frozen historical recorder and compare every minute/variant, same profile/inventory and T+1 executor.
-- [ ] Run full actual historical parity and canary target/action parity, report input hash/cutoff and exact totals; expected zero divergence.
-- [ ] Run full pytest, `python3 -m compileall entropy_arb tools`, `ruff check .`, `git diff --check`; expected PASS.
-- [ ] Fresh-context whole-branch review focused on the five risks above; fix important findings with RED/GREEN tests.
-- [ ] Read-only verify production SHA/PID/config/env and HALT remains true; no repair.
-- [ ] Commit `test: verify range inventory historical and live target parity`; report final clean branch and deployment blockers.
+- [x] Write test asserting parity and intentional target/action divergence rejection; run targeted pytest, expected RED for missing runner.
+- [x] Implement offline runner, no env/API; read frozen historical recorder and compare every minute/variant, same profile/inventory and T+1 executor.
+- [x] Run full actual historical parity and canary target/action parity, report input hash/cutoff and exact totals; expected zero divergence.
+- [x] Run full pytest, `python3 -m compileall entropy_arb tools`, `ruff check .`, `git diff --check`; expected PASS.
+- [x] Fresh-context whole-branch review focused on the five risks above; fix important findings with RED/GREEN tests.
+- [x] Read-only verify production SHA/PID/config/env and HALT remains true; no repair.
+- [x] Commit `test: verify range inventory historical and live target parity`; report final clean branch and deployment blockers.
