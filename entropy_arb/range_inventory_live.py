@@ -189,7 +189,7 @@ class RangeInventoryLive:
             return False
         try:
             normalized = self.core._row(row)
-            self.signal = self.core.on_row(normalized, inventory_usd=self.signed_qty * self.core._ref(normalized))
+            self.signal = self.signal_for_inventory(normalized, inventory_usd=self.signed_qty * self.core._ref(normalized))
         except ValueError as exc:
             raise RangeStateError(str(exc)) from exc
         self._last_ingested = ts
@@ -198,6 +198,10 @@ class RangeInventoryLive:
                      signal_metadata=asdict(self.signal))
         self._commit(state)
         return True
+
+    def signal_for_inventory(self, row: Mapping, *, inventory_usd: float) -> RangeSignal:
+        """Shared signal path; offline parity injects simulated, never live, inventory."""
+        return self.core.on_row(row, inventory_usd=inventory_usd)
 
     def load_csv(self, path: str, *, now: float) -> int:
         """History only: never replay execution/targets into live inventory."""
