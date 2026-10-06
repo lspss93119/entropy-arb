@@ -1,6 +1,7 @@
 """Thin Range planner and atomic independent state; never submits an order."""
 from __future__ import annotations
 
+import csv
 import json
 import logging
 import math
@@ -198,6 +199,26 @@ class RangeInventoryLive:
         self._commit(state)
         return True
 
+    def load_csv(self, path: str, *, now: float) -> int:
+        """History only: never replay execution/targets into live inventory."""
+        if not os.path.exists(path):
+            return 0
+        minutes = {}
+        cutoff = now - max(self.params.long_window_minutes, self.params.short_window_minutes,
+                           self.params.range_gate_window_minutes) * 60 - 60
+        with open(path, newline="") as fh:
+            for row in csv.DictReader(fh):
+                try:
+                    r = self.core._row(row)
+                    ts = r["minute_ts"]
+                    if cutoff <= ts and ts + 60 <= now and ts % 60 == 0:
+                        minutes[ts] = r
+                except ValueError:
+                    continue
+        for ts in sorted(minutes):
+            self.core.warmup_row(minutes[ts])
+        return len(minutes)
+
     def signal_block(self, now: float, *, reserved=False) -> Optional[str]:
         if not self.loaded:
             return "state_not_reconciled"
@@ -217,7 +238,7 @@ class RangeInventoryLive:
         return None
 
     def plan(self, *, now, entropy, hedge, step, min_base, min_notional,
-             max_order_notional, staleness_sec):
+             max_order_notional, staleness_sec, leg_slippage_bps=0.0):
         block = self.signal_block(now)
         if block:
             return None, block
@@ -232,7 +253,10 @@ class RangeInventoryLive:
                or not 0 <= now - v.book.last_update_ts <= staleness_sec
                for v in (entropy, hedge)):
             return None, "stale_book"
-        ref, risk_ref = sum(prices) / 4.0, max(prices)
+        slip = finite(leg_slippage_bps, "leg_slippage_bps") / 1e4
+        if slip < 0:
+            raise RangeStateError("negative execution slippage")
+        ref, risk_ref = sum(prices) / 4.0, max(prices) * (1 + slip)
         inv = self.signed_qty * ref
         target = self.signal.target_usd
         # Re-apply the exposure gate against actual current inventory / price.
@@ -253,13 +277,14 @@ class RangeInventoryLive:
         if not reduce:
             direction_cap = self.params.long_cap_usd if need > 0 else self.params.short_cap_usd
             for venue in (entropy, hedge):
-                venue_ref = max(venue.book.best_bid(), venue.book.best_ask())
+                venue_ref = max(venue.book.best_bid(), venue.book.best_ask()) * (1 + slip)
                 cap_qty = min(cap_qty, max(0.0, min(venue.cap_usd, direction_cap,
                                                   self.params.hard_cap_usd) / venue_ref - abs(venue.position)))
         ask, bid = buy.book.best_ask(), sell.book.best_bid()
-        depth = min(buy.book.asks[ask], sell.book.bids[bid])
-        if not math.isfinite(depth) or depth <= 0:
+        quantities = (buy.book.asks[ask], sell.book.bids[bid])
+        if any(not math.isfinite(q) or q <= 0 for q in quantities):
             return None, "empty_depth"
+        depth = min(quantities)
         bb, sb = OrderBook(), OrderBook()
         bb.asks, sb.bids = {ask: buy.book.asks[ask]}, {bid: sell.book.bids[bid]}
         planned, reason = plan_arb(bb, sb, threshold_bps=0.0,

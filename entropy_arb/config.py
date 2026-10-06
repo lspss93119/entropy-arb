@@ -379,8 +379,8 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
                           "(the round trip nets upper+lower bps after fees)")
 
     strategy_mode = str(_get(raw, "strategy", "mode", "fixed")).lower()
-    if strategy_mode not in ("fixed", "rolling"):
-        raise ConfigError("strategy.mode must be 'fixed' or 'rolling'")
+    if strategy_mode not in ("fixed", "rolling", "range_inventory"):
+        raise ConfigError("strategy.mode must be 'fixed', 'rolling' or 'range_inventory'")
     try:
         rolling = RollingConf(
             window_hours=float(_get(raw, "rolling", "window_hours", 12.0)),

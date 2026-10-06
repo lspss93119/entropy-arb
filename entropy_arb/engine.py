@@ -33,6 +33,7 @@ from .book import ArbPlan, floor_step, plan_arb, plan_reduce_arb
 from .config import Config
 from .lot_ledger import LotLedger, LotLedgerError
 from .recorder import MinuteRecorder
+from .range_inventory_live import RangeInventoryLive, RangeStateError
 from .rolling import RollingSignal, RollingWindow
 from .venue_hl import HLVenue
 from .venue_lighter import LighterVenue
@@ -153,6 +154,13 @@ class Engine:
         self._rolling_ledger_loaded = False
         self._rolling_signal_meta: dict = {}
         self._rolling_result_meta: dict = {}
+        self._range = (RangeInventoryLive(
+            os.path.join(os.path.dirname(self._rolling_state_path()),
+                         f"range-{cfg.symbol}-{cfg.hedge_venue}.json"),
+            symbol=cfg.symbol, hedge=cfg.hedge_venue)
+            if cfg.strategy_mode == "range_inventory" else None)
+        self._range_unsent = False
+        self._range_arm_minute = None
         self._load_persisted_halt()
         # A successful primary execution remains active until its residual
         # hedge and rolling-ledger update have both completed. Reconcile can
@@ -407,6 +415,10 @@ class Engine:
                 "resume rejected: execution error state is not clean")
         if self._venue_down:
             raise RuntimeError("resume rejected: venue outage is active")
+        if self._range is not None:
+            if not self._range.loaded or self._range.state["pending_intent"] is not None:
+                raise RuntimeError("resume rejected: range state not validated or execution unresolved")
+            self._range.validate_positions({key: v.position for key, v in self.venues.items()})
         if self._rolling is not None:
             if self._rolling_ledger is None or not self._rolling_ledger_loaded:
                 raise RuntimeError(
@@ -526,11 +538,16 @@ class Engine:
 
     def _halt_rolling(self, reason: str) -> None:
         """Stop rolling entries until a human reconciles and restarts."""
+        if self._range is not None:
+            self._set_halted(reason, source="range_inventory")
+            return
         if self._rolling is None:
             return
         self._set_halted(reason, source="rolling")
 
     def _validate_rolling_runtime(self, live: bool) -> None:
+        if live and self._range is not None and not self.cfg.recorder_enabled:
+            raise RuntimeError("range inventory requires recorder.enabled=true")
         if live and self._rolling is not None and not self.cfg.recorder_enabled:
             raise RuntimeError(
                 "rolling strategy requires recorder.enabled=true so live "
@@ -567,6 +584,10 @@ class Engine:
             seeded = self._rolling.load_csv(cfg.recorder_csv)
             log.info("rolling window seeded with %d recorder row(s) from %s",
                      seeded, cfg.recorder_csv)
+        if self._range is not None:
+            seeded = self._range.load_csv(cfg.recorder_csv, now=time.time())
+            log.info("range inventory seeded %d completed minutes; profile=%s",
+                     seeded, json.dumps(self._range.state["parameters"], sort_keys=True))
 
         live = not self.record_only
         self._validate_rolling_runtime(live)
@@ -592,7 +613,11 @@ class Engine:
                              self._step)
         self._min_notional = max(cfg.min_order_notional,
                                  self.entropy.min_quote, self.hedge.min_quote)
-        if cfg.strategy_mode == "rolling":
+        if self._range is not None:
+            log.info("pair range_inventory: strategy caps=$1500/$1500 hard=$1500 "
+                     "adjustment=$53/min depth<=75%% signal_age<=15s; "
+                     "reductions without rolling threshold or lot BE gate")
+        elif cfg.strategy_mode == "rolling":
             log.info("pair ENTROPY(%s)-%s(%s): center=rolling-median "
                      "band=[-%.2f, +%.2f] fees=%.2f+%.2f step=%g "
                      "min_ntl=$%g",
@@ -617,6 +642,7 @@ class Engine:
                         "for credential-less data collection)")
             await self._reconcile_positions(hedge=False, strict=True)
             self._check_rolling_start_state()
+            self._check_range_start_state()
             if self._resume_requested:
                 self.resume_after_reconcile()
             elif self.halted and self._halt_reason:
@@ -635,7 +661,7 @@ class Engine:
                                            symbol=cfg.symbol,
                                            hedge=cfg.hedge_venue,
                                            on_minute=self._on_minute
-                                           if self._rolling is not None else None)
+                                           if (self._rolling is not None or self._range is not None) else None)
             tasks.append(asyncio.create_task(self.recorder.run(self.stop),
                                              name="recorder"))
         if not self.record_only and not self.halted:
@@ -671,6 +697,28 @@ class Engine:
         """Feed completed recorder bars into the live rolling calculator."""
         if self._rolling is not None and self._rolling.ingest_row(row):
             self._update_evt.set()
+        if self._range is not None and not self.record_only and not self.stop.is_set():
+            try:
+                if self._range.on_minute(row, now=time.time()):
+                    signal = self._range.signal
+                    log.info("range minute=%s long_pct=%s short_pct=%s range_4h=%s "
+                             "gate=%s target_usd=%s signal_action=%s",
+                             signal.minute_ts, signal.long_percentile,
+                             signal.short_percentile, signal.range_4h_bps,
+                             signal.range_gate_open, signal.target_usd, signal.action)
+                    self._update_evt.set()
+            except RangeStateError as exc:
+                self._halt_rolling(f"range minute/state failure: {exc}")
+
+    def _check_range_start_state(self) -> None:
+        if self._range is None:
+            return
+        try:
+            self._range.load_and_reconcile({key: v.position for key, v in self.venues.items()})
+        except RangeStateError as exc:
+            self._halt_rolling(f"range startup reconciliation mismatch: {exc}")
+            raise RuntimeError(str(exc)) from exc
+        log.info("range startup reconciliation PASS: positions=%s", self._range.expected_positions())
 
     def _sync_rolling_cache(self) -> None:
         """Mirror the persistent lot ledger into the hot-path cache."""
@@ -720,10 +768,11 @@ class Engine:
 
     def _begin_inflight_reconciliation(self, execution: dict) -> bool:
         """Track known primary fills before residual hedging can yield."""
-        if (self._rolling is None or self._rolling_ledger is None
-                or not execution.get("ok")):
+        if (not execution.get("ok") or
+                (self._range is None and (self._rolling is None or self._rolling_ledger is None))):
             return False
-        ledger_positions = self._rolling_ledger_positions()
+        ledger_positions = (self._range.expected_positions() if self._range is not None
+                            else self._rolling_ledger_positions())
         expected = dict(ledger_positions)
         for venue_key, info, sign in (
                 (self._venue_key_for(execution.get("buy")),
@@ -991,7 +1040,7 @@ class Engine:
 
     async def _evaluate(self) -> None:
         cfg = self.cfg
-        if self.halted:
+        if self.halted or (self._range is not None and self.stop.is_set()):
             return
         now = time.time()
         if now - self.last_trade_ts < cfg.cooldown_sec:
@@ -1028,7 +1077,8 @@ class Engine:
             self._vlock(buy.key).release()
             self._vlock(sell.key).release()
         if execution is None:
-            self._halt_rolling("execution failed before settlement")
+            if not self._range_unsent:
+                self._halt_rolling("execution failed before settlement")
         elif execution["unresolved"]:
             hedge = {
                 "status": "not_attempted",
@@ -1068,6 +1118,7 @@ class Engine:
                     self._halt_rolling("failed primary execution")
                 self._advance_inflight_reconciliation(hedge)
                 self._update_rolling_position(execution, hedge)
+                self._settle_range(execution, hedge)
                 self._log_csv(execution, hedge)
             finally:
                 if inflight:
@@ -1075,9 +1126,102 @@ class Engine:
         self._update_evt.set()  # freed venues may have a queued opportunity
 
     def _scan(self, now: float):
+        if self._range is not None:
+            return self._scan_range(now)
         if self.cfg.strategy_mode == "rolling":
             return self._scan_rolling(now)
         return self._scan_fixed(now)
+
+    def _range_plan_now(self, now: float):
+        return self._range.plan(now=now, entropy=self.entropy, hedge=self.hedge,
+            step=self._step, min_base=self._min_base, min_notional=self._min_notional,
+            max_order_notional=self.cfg.max_order_notional,
+            staleness_sec=self.cfg.staleness_sec,
+            leg_slippage_bps=self.cfg.leg_slippage_bps)
+
+    def _range_venues_ready(self, now: float, *, check_locks=True) -> bool:
+        if self.halted or self.stop.is_set() or self._venue_down:
+            return False
+        for v in self.venues.values():
+            if (not v.ready_to_trade() or self._venue_limited(v)
+                    or not self._venue_rate_ok(v)
+                    or v.book.last_update_ts <= v.last_traded_ts
+                    or (check_locks and self._vlock(v.key).locked())):
+                return False
+        return True
+
+    def _scan_range(self, now: float):
+        if not self._range_venues_ready(now):
+            return None
+        try:
+            result, reason = self._range_plan_now(now)
+        except RangeStateError as exc:
+            self._halt_rolling(f"range planning/state mismatch: {exc}")
+            return None
+        if result is None:
+            self._skiplog("range blocked minute=%s reason=%s action=blocked",
+                          self._range.state["latest_completed_minute_ts"], reason)
+            return None
+        if self._range_arm_minute != result.signal.minute_ts:
+            self._range_arm_minute = result.signal.minute_ts
+            self._reset_rolling_arming()
+        armed = self._armed[result.direction]
+        if armed is None:
+            self._armed[result.direction] = now
+            armed = now
+        if now - armed < self.cfg.premium_persist_sec:
+            self._schedule_poke(self.cfg.premium_persist_sec - (now - armed))
+            return None
+        buy, sell = ((self.entropy, self.hedge) if result.direction == "buy_entropy"
+                     else (self.hedge, self.entropy))
+        return buy, sell, result.plan
+
+    def _prepare_range_submit(self, buy, sell):
+        """Last synchronous guard; no awaits between durable reserve and send."""
+        self._load_persisted_halt()
+        now = time.time()
+        if not self._range_venues_ready(now, check_locks=False):
+            return None
+        result, _ = self._range_plan_now(now)
+        if result is None or (result.direction == "buy_entropy") != (buy.key == "entropy"):
+            return None
+        self._range.reserve(result, now=now)
+        if self._range.signal_block(time.time(), reserved=True) or self.stop.is_set() or self.halted:
+            self._range.abandon_unsent()
+            return None
+        log.info("range submit minute=%s action=%s target_usd=%s inventory_usd=%s "
+                 "requested_usd=%s planned_qty=%s depth_fraction=%s signal_age_ms=%s",
+                 result.signal.minute_ts, result.action, result.signal.target_usd,
+                 result.current_inventory_usd, result.requested_adjustment_usd,
+                 result.plan.qty, result.depth_used_fraction,
+                 (now - result.signal.completed_ts) * 1000)
+        return result.plan
+
+    def _settle_range(self, execution: dict, hedge: dict) -> None:
+        if self._range is None:
+            return
+        try:
+            if (not execution.get("ok") or execution.get("unresolved")
+                    or hedge.get("error") or hedge.get("status") not in ("not_needed", "filled", "settled")):
+                raise RangeStateError("unresolved/failed range paired execution")
+            fills = []
+            for role, side in (("buy", "buy"), ("sell", "sell")):
+                venue, info = execution[role], execution[role + "_info"]
+                fills.append({"venue": venue.key, "side": side,
+                              "qty": self._known_fill(info), "avg_px": info.get("avg_px"),
+                              "fee_bps": venue.fee_bps})
+            if hedge.get("filled_qty", 0) > 0:
+                venue = next(v for v in self.venues.values() if v.name == hedge.get("venue"))
+                fills.append({"venue": venue.key, "side": hedge.get("side"),
+                              "qty": hedge["filled_qty"], "avg_px": hedge.get("avg_px"),
+                              "fee_bps": venue.fee_bps})
+            result = self._range.settle({key: v.position for key, v in self.venues.items()}, fills)
+            log.info("range settled event=%s actual_paired_fill=%s action=%s "
+                     "inventory_qty=%s realized_capture_usd=%s", execution["event_id"],
+                     result["paired_fill_qty"], result["action"],
+                     result["inventory_qty"], result["realized_capture_usd"])
+        except (RangeStateError, KeyError, TypeError, ValueError, StopIteration) as exc:
+            self._halt_rolling(f"range settlement/state failure: {exc}")
 
     def _scan_fixed(self, now: float):
         """Evaluate both directions; returns the best executable
@@ -1505,6 +1649,13 @@ class Engine:
     async def _execute(self, buy, sell, plan: ArbPlan) -> Optional[dict]:
         """Send both legs and settle the fills. Both venue locks are held by
         the caller. Returns the execution record, or None when halted."""
+        self._range_unsent = False
+        if self._range is not None:
+            guarded = self._prepare_range_submit(buy, sell)
+            if guarded is None:
+                self._range_unsent = True
+                return None
+            plan = guarded
         if self.halted:
             return None
         cfg = self.cfg
@@ -1525,7 +1676,7 @@ class Engine:
         entropy_book_server_age_ms = self.entropy.book.server_age_ms(signal_ts)
         entropy_update_gap_ms = self.entropy.book.last_update_gap_ms
         hedge_update_gap_ms = self.hedge.book.last_update_gap_ms
-        inv_bps = 0.0 if plan.reduce_only else self._inv_add_bps(buy, sell)
+        inv_bps = 0.0 if plan.reduce_only or self._range is not None else self._inv_add_bps(buy, sell)
         direction = "sell_entropy" if sell.key == "entropy" else "buy_entropy"
         rolling_signal_meta = (
             dict(self._rolling_signal_meta)
@@ -1869,6 +2020,18 @@ class Engine:
         for r in got:
             if isinstance(r, BaseException):
                 raise r  # strict startup: fail loudly
+        if self._range is not None and self._range.loaded and not self._venue_down:
+            positions = {key: v.position for key, v in self.venues.items()}
+            if self._inflight_reconciliation_explains(positions):
+                log.info("range reconciliation provisional for known active fill")
+                return
+            try:
+                self._range.validate_positions(positions)
+            except RangeStateError as exc:
+                self._halt_rolling(f"range position reconciliation mismatch: {exc}")
+                if strict:
+                    raise RuntimeError(str(exc)) from exc
+                return  # never auto-hedge an unexplained Range mismatch
         if hedge and self._inflight_reconciliation is None:
             await self._maybe_hedge()
         if (self._rolling_ledger_loaded and not self._venue_down

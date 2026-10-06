@@ -250,3 +250,26 @@ def test_unknown_residual_retains_intent_not_false_flat(tmp_path):
         ])
     assert live.signed_qty == .3
     assert live.state["pending_intent"] is not None
+
+
+def test_nonfinite_live_depth_on_either_leg_is_blocked(tmp_path):
+    live = adapter(tmp_path)
+    live.on_minute(row(50, -20), now=3061)
+    e, h = venues()
+    e.book.last_update_ts = h.book.last_update_ts = 3061
+    h.book.bids = {99.9: float("nan")}
+    result, reason = live.plan(now=3061, entropy=e, hedge=h, step=.001,
+        min_base=.001, min_notional=10, max_order_notional=90, staleness_sec=3)
+    assert result is None
+    assert reason == "empty_depth"
+
+
+def test_budget_accounts_for_execution_price_bounds(tmp_path):
+    live = adapter(tmp_path)
+    live.on_minute(row(50, -20), now=3061)
+    e, h = venues()
+    e.book.last_update_ts = h.book.last_update_ts = 3061
+    result, _ = live.plan(now=3061, entropy=e, hedge=h, step=.0001,
+        min_base=.0001, min_notional=10, max_order_notional=90,
+        staleness_sec=3, leg_slippage_bps=10)
+    assert result.plan.qty * result.plan.buy_limit * 1.001 <= 53

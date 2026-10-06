@@ -1,0 +1,43 @@
+# Separate opt-in canary example. Never replace a production config implicitly.
+strategy:
+  mode: range_inventory
+
+# Loader-required legacy fields: NOT Range signal / reduction gates.
+thresholds:
+  midline_bps: 0
+  upper_bps: 10
+  lower_bps: 10
+
+entropy:
+  dex: io
+  taker_fee_bps: 0
+  max_position_usd: 1500
+  max_orders_per_min: 120
+hedge:
+  taker_fee_bps: 0
+  max_position_usd: 1500
+  max_orders_per_min: 30
+
+# Range separately caps each minute at $53 and visible BBO depth at 75%.
+# These existing values remain additional limits, not percentile parameters.
+sizing:
+  take_fraction: 0.75
+  max_order_notional_usd: 53
+  min_order_notional_usd: 10
+inventory:
+  scale_bps: 18
+  floor_frac: 0
+execution:
+  premium_persist_sec: 0.5
+  cooldown_sec: 1
+  settle_timeout_sec: 10
+  leg_slippage_bps: 10
+  hedge_slippage_bps: 15
+  net_tolerance_base: 0.001
+  staleness_sec: 3
+  reconcile_sec: 15
+recorder:
+  enabled: true
+  csv: logs/record/minutes-{symbol}-{hedge}.csv
+logging:
+  trades_csv: logs/trades/trades-{symbol}-{hedge}.csv
