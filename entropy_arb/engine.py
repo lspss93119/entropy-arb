@@ -68,6 +68,10 @@ CSV_HEADER = [
     "buy_transport_attempted", "sell_transport_attempted",
     "buy_pre_submit_wait_ms", "sell_pre_submit_wait_ms",
     "buy_nonce_wait_ms", "sell_nonce_wait_ms",
+    "nonce_prepared_ts", "nonce_prepare_ms",
+    "final_pair_preflight_ts", "final_pair_preflight_reason",
+    "pair_committed_ts", "pair_committed",
+    "entropy_transport_attempted", "rh_transport_attempted",
 ]
 RUN_CONFIG_HEADER = [
     "run_id", "start_ts", "mode", "symbol", "hedge",
@@ -1089,6 +1093,22 @@ class Engine:
         if execution is None:
             if not self._range_unsent:
                 self._halt_rolling("execution failed before settlement")
+        elif execution.get("precommit_aborted"):
+            # A pair-level preflight abort is an observable execution attempt,
+            # but it must not enter hedge/settlement: no primary transport ran.
+            hedge = {
+                "status": "not_attempted",
+                "venue": "",
+                "side": "",
+                "filled_qty": 0.0,
+                "avg_px": None,
+                "notional": None,
+                "duration_ms": 0.0,
+                "remaining_net_qty": sum(v.position
+                                          for v in self.venues.values()),
+                "error": None,
+            }
+            self._log_csv(execution, hedge)
         elif execution["unresolved"]:
             hedge = {
                 "status": "not_attempted",
@@ -1221,7 +1241,7 @@ class Engine:
         return buy, sell, result.plan
 
     def _prepare_range_submit(self, buy, sell):
-        """Durable intent first; actual transport also rechecks this intent."""
+        """Create the durable intent before the pair-level commit check."""
         self._load_persisted_halt()
         now = time.time()
         if not self._range_venues_ready(now, check_locks=False):
@@ -1234,12 +1254,6 @@ class Engine:
                 or now - armed < self.cfg.premium_persist_sec):
             return None
         self._range.reserve(result, now=now)
-        slip = self.cfg.leg_slippage_bps / 1e4
-        bounds = (buy.px_round(result.plan.buy_limit * (1 + slip), round_up=False),
-                  sell.px_round(result.plan.sell_limit * (1 - slip), round_up=True))
-        if not self._range_submission_valid(result, buy, sell, *bounds):
-            self._range.abandon_unsent()
-            return None
         log.info("range submit minute=%s action=%s target_usd=%s inventory_usd=%s "
                  "requested_usd=%s planned_qty=%s depth_fraction=%s signal_age_ms=%s",
                  result.signal.minute_ts, result.action, result.signal.target_usd,
@@ -1311,10 +1325,11 @@ class Engine:
             return {"ok": bool(ok), "reason": reason, "details": details}
 
         readiness = self._range_venues_verdict(
-            now, check_locks=False, check_rate=False)
+            now, check_locks=False, check_rate=True)
         readiness_details = readiness["details"]
         details["venue_ready"] = readiness_details["venue_ready"]
         details["venue_limited"] = readiness_details["venue_limited"]
+        details["rate_budget_ok"] = readiness_details["rate_budget_ok"]
         if not readiness["ok"]:
             return result(False, readiness["reason"])
         try:
@@ -1826,25 +1841,239 @@ class Engine:
                 remaining -= take
         return tuple(selected) if remaining <= 1e-9 else ()
 
+    def _range_nonce_venue(self):
+        """Return the venue that supports pre-commit nonce preparation."""
+        for venue in self.venues.values():
+            if callable(getattr(venue, "prepare_nonce", None)):
+                return venue
+        return None
+
+    @staticmethod
+    def _range_guard_trace(verdict, venue, *, stage, transport_attempted=None):
+        details = verdict.get("details", {})
+        rate_budget_ok = details.get("rate_budget_ok")
+        if isinstance(rate_budget_ok, dict):
+            rate_budget_ok = rate_budget_ok.get(venue.key)
+        return {
+            "timestamp": details.get("timestamp"),
+            "stage": stage,
+            "pair_level": True,
+            "ok": bool(verdict.get("ok")),
+            "reason": verdict.get("reason"),
+            "signal_age_ms": details.get("signal_age_ms"),
+            "current_minute": details.get("current_minute"),
+            "reserved_minute": details.get("reserved_minute"),
+            "reserved_qty": details.get("reserved_qty"),
+            "fresh_planned_qty": details.get("fresh_planned_qty"),
+            "buy_best_ask": details.get("buy_best_ask"),
+            "sell_best_bid": details.get("sell_best_bid"),
+            "reserved_buy_bound": details.get("reserved_buy_bound"),
+            "reserved_sell_bound": details.get("reserved_sell_bound"),
+            "fresh_buy_bound": details.get("fresh_buy_bound"),
+            "fresh_sell_bound": details.get("fresh_sell_bound"),
+            "venue_ready": details.get("venue_ready", {}).get(venue.key),
+            "venue_limited": details.get("venue_limited", {}).get(venue.key),
+            "venue_checks": {
+                "ready": dict(details.get("venue_ready", {})),
+                "limited": dict(details.get("venue_limited", {})),
+                "rate_budget_ok": dict(details.get("rate_budget_ok", {}))
+                if isinstance(details.get("rate_budget_ok"), dict) else {},
+            },
+            "venue_guard_ts": details.get("timestamp"),
+            "transport_attempted": transport_attempted,
+            "nonce_wait_ms": None,
+            "signing_ms": None,
+            "rate_budget_ok": rate_budget_ok,
+        }
+
+    def _range_abandon_precommit(self, nonce_venue, prepared_nonce) -> None:
+        """Clear an unsent intent and release a prepared nonce exactly once."""
+        try:
+            self._range.abandon_unsent()
+        finally:
+            if (prepared_nonce is not None
+                    and getattr(prepared_nonce, "lock_held", False)):
+                nonce_venue.release_prepared_nonce(prepared_nonce)
+        self._range_unsent = True
+
+    async def _range_prepare_commit(self, buy, sell):
+        """Reserve, nonce-prepare and validate a Range pair before transport."""
+        reserved = self._prepare_range_submit(buy, sell)
+        if reserved is None:
+            self._range_unsent = True
+            return None
+
+        plan = reserved.plan
+        slip = self.cfg.leg_slippage_bps / 1e4
+        buy_bound = buy.px_round(plan.buy_limit * (1 + slip), round_up=False)
+        sell_bound = sell.px_round(plan.sell_limit * (1 - slip), round_up=True)
+        nonce_venue = self._range_nonce_venue()
+        prepared_nonce = None
+        try:
+            if nonce_venue is not None:
+                prepared_nonce = await nonce_venue.prepare_nonce()
+            verdict = self._range_submission_verdict(
+                reserved, buy, sell, buy_bound, sell_bound)
+            if not verdict["ok"]:
+                self._range_abandon_precommit(nonce_venue, prepared_nonce)
+                details = verdict.get("details", {})
+                return {
+                    "reserved": reserved,
+                    "buy_bound": buy_bound,
+                    "sell_bound": sell_bound,
+                    "nonce_venue": nonce_venue,
+                    "prepared_nonce": prepared_nonce,
+                    "final_verdict": verdict,
+                    "nonce_prepared_ts": getattr(
+                        prepared_nonce, "nonce_prepared_ts", None),
+                    "nonce_prepare_ms": getattr(
+                        prepared_nonce, "nonce_prepare_ms", None),
+                    "final_pair_preflight_ts": details.get("timestamp"),
+                    "final_pair_preflight_reason": verdict["reason"],
+                    "pair_committed_ts": None,
+                    "pair_committed": False,
+                    "precommit_aborted": True,
+                }
+            details = verdict.get("details", {})
+            pair = {
+                "reserved": reserved,
+                "buy_bound": buy_bound,
+                "sell_bound": sell_bound,
+                "nonce_venue": nonce_venue,
+                "prepared_nonce": prepared_nonce,
+                "final_verdict": verdict,
+                "nonce_prepared_ts": getattr(
+                    prepared_nonce, "nonce_prepared_ts", None),
+                "nonce_prepare_ms": getattr(
+                    prepared_nonce, "nonce_prepare_ms", None),
+                "final_pair_preflight_ts": details.get("timestamp"),
+                "final_pair_preflight_reason": verdict["reason"],
+                "pair_committed_ts": self._utc_timestamp(),
+                "pair_committed": True,
+            }
+            return pair
+        except asyncio.CancelledError:
+            if self._range.state.get("pending_intent") is not None:
+                self._range_abandon_precommit(nonce_venue, prepared_nonce)
+            elif (prepared_nonce is not None
+                  and getattr(prepared_nonce, "lock_held", False)):
+                nonce_venue.release_prepared_nonce(prepared_nonce)
+            self._range_unsent = True
+            raise
+        except Exception as exc:
+            log.warning("range pair pre-commit aborted: %s", exc)
+            if self._range.state.get("pending_intent") is not None:
+                self._range_abandon_precommit(nonce_venue, prepared_nonce)
+            elif (prepared_nonce is not None
+                  and getattr(prepared_nonce, "lock_held", False)):
+                nonce_venue.release_prepared_nonce(prepared_nonce)
+            self._range_unsent = True
+            return None
+
+    def _range_precommit_execution(self, buy, sell, plan, range_commit,
+                                   signal_ts, event_id):
+        """Build a CSV-visible zero-transport pair-preflight result."""
+        cfg = self.cfg
+        settled_ts = time.time()
+        buy_bbo_px = buy.book.best_ask()
+        buy_bbo_qty = (buy.book.asks.get(buy_bbo_px)
+                       if buy_bbo_px is not None else None)
+        sell_bbo_px = sell.book.best_bid()
+        sell_bbo_qty = (sell.book.bids.get(sell_bbo_px)
+                        if sell_bbo_px is not None else None)
+        buy_quote_age_ms = (
+            max(0.0, signal_ts - buy.book.last_update_ts) * 1000.0
+            if buy.book.last_update_ts else None)
+        sell_quote_age_ms = (
+            max(0.0, signal_ts - sell.book.last_update_ts) * 1000.0
+            if sell.book.last_update_ts else None)
+        verdict = range_commit["final_verdict"]
+        nonce = range_commit["prepared_nonce"]
+
+        def blocked_info(venue):
+            info = {
+                "status": "pre-submit-blocked",
+                "filled_base": 0.0,
+                "avg_px": None,
+                "err": None,
+                "unresolved": False,
+                "reason": f"range_guard:{verdict['reason']}",
+                "transport_attempted": False,
+                "not_submitted": True,
+                "guard_trace": [self._range_guard_trace(
+                    verdict, venue, stage="pair_preflight",
+                    transport_attempted=False)],
+                "pre_submit_wait_ms": None,
+            }
+            if nonce is not None and venue is range_commit["nonce_venue"]:
+                info["nonce_wait_ms"] = getattr(nonce, "nonce_wait_ms", None)
+                info["nonce_prepared_ts"] = getattr(
+                    nonce, "nonce_prepared_ts", None)
+                info["nonce_prepare_ms"] = getattr(
+                    nonce, "nonce_prepare_ms", None)
+            return info
+
+        direction = "sell_entropy" if sell.key == "entropy" else "buy_entropy"
+        return {
+            "event_id": event_id,
+            "signal_ts": signal_ts,
+            "settled_ts": settled_ts,
+            "execution_ms": max(0.0, (settled_ts - signal_ts) * 1000.0),
+            "buy_settle_ms": None,
+            "sell_settle_ms": None,
+            "leg_settle_gap_ms": None,
+            "first_settled_leg": "",
+            "direction": direction,
+            "strategy_mode": cfg.strategy_mode,
+            "reduce_only": bool(plan.reduce_only),
+            "rolling_signal_meta": {},
+            "buy": buy,
+            "sell": sell,
+            "plan": plan,
+            "buy_bbo_px": buy_bbo_px,
+            "buy_bbo_qty": buy_bbo_qty,
+            "sell_bbo_px": sell_bbo_px,
+            "sell_bbo_qty": sell_bbo_qty,
+            "buy_quote_age_ms": buy_quote_age_ms,
+            "sell_quote_age_ms": sell_quote_age_ms,
+            "entropy_book_server_age_ms": self.entropy.book.server_age_ms(
+                signal_ts),
+            "entropy_update_gap_ms": self.entropy.book.last_update_gap_ms,
+            "hedge_update_gap_ms": self.hedge.book.last_update_gap_ms,
+            "buy_bound": range_commit["buy_bound"],
+            "sell_bound": range_commit["sell_bound"],
+            "buy_info": blocked_info(buy),
+            "sell_info": blocked_info(sell),
+            "matched_qty": 0.0,
+            "residual_qty": 0.0,
+            "fill_edge": 0.0,
+            "inv_bps": 0.0,
+            "unresolved": False,
+            "ok": False,
+            "range_commit": range_commit,
+            "precommit_aborted": True,
+        }
+
     async def _execute(self, buy, sell, plan: ArbPlan) -> Optional[dict]:
         """Send both legs and settle the fills. Both venue locks are held by
         the caller. Returns the execution record, or None when halted."""
         self._range_unsent = False
-        range_submission = None
+        range_commit = None
         if self._range is not None:
-            guarded = self._prepare_range_submit(buy, sell)
-            if guarded is None:
-                self._range_unsent = True
+            range_commit = await self._range_prepare_commit(buy, sell)
+            if range_commit is None:
                 return None
-            range_submission = guarded
-            plan = guarded.plan
-        if self.halted:
+            plan = range_commit["reserved"].plan
+        if self.halted and range_commit is None:
             return None
         cfg = self.cfg
         self._rolling_result_meta = {}
         signal_ts = time.time()
         self._event_seq += 1
         event_id = f"{int(self.start_ts * 1000)}-{self._event_seq:06d}"
+        if range_commit is not None and range_commit.get("precommit_aborted"):
+            return self._range_precommit_execution(
+                buy, sell, plan, range_commit, signal_ts, event_id)
         buy_bbo_px = buy.book.best_ask()
         buy_bbo_qty = (buy.book.asks.get(buy_bbo_px)
                        if buy_bbo_px is not None else None)
@@ -1869,7 +2098,10 @@ class Engine:
                  direction, buy.name, plan.qty, plan.buy_limit, sell.name,
                  plan.sell_limit, plan.buy_notional, plan.q_max_notional,
                  plan.marginal_premium_bps, plan.exp_edge_usd)
-        if plan.reduce_only and cfg.strategy_mode == "rolling":
+        if range_commit is not None:
+            buy_bound = range_commit["buy_bound"]
+            sell_bound = range_commit["sell_bound"]
+        elif plan.reduce_only and cfg.strategy_mode == "rolling":
             # Rolling reduce plans already contain break-even-safe protective
             # limits. Widening them with generic entry slippage could turn a
             # profitable lot close into a loss.
@@ -1884,6 +2116,12 @@ class Engine:
         if self._range is None:
             self._record_send(buy)
             self._record_send(sell)
+        else:
+            # The final pair verdict already reserved both rate slots.  Once
+            # committed, count both primary attempts before either transport;
+            # no per-leg guard may veto the second leg.
+            self._record_send(buy)
+            self._record_send(sell)
 
         async def send_with_completion_ts(venue, *, is_buy, qty, limit_px,
                                           reduce_only):
@@ -1892,122 +2130,44 @@ class Engine:
             try:
                 kwargs = dict(is_buy=is_buy, qty=qty, limit_px=limit_px,
                               reduce_only=reduce_only)
-                if range_submission is not None:
-                    counted = False
-                    guard_call = 0
-                    guard_trace = []
-                    first_guard_completed = None
-                    pre_submit_wait_ms = None
-
-                    def submit_guard():
-                        nonlocal counted, guard_call, first_guard_completed
-                        nonlocal pre_submit_wait_ms
-                        guard_call += 1
-                        guard_started = time.perf_counter()
-                        stage = ("engine_preflight" if guard_call == 1
-                                 else "venue_pre_submit")
-                        verdict = self._range_submission_verdict(
-                            range_submission, buy, sell, buy_bound, sell_bound)
-                        ok = verdict["ok"]
-                        reason = verdict["reason"]
-                        details = verdict["details"]
-                        rate_budget_ok = None
-                        if ok and not counted:
-                            rate_budget_ok = self._venue_rate_ok(venue)
-                            details["rate_budget_ok"] = bool(rate_budget_ok)
-                            if not rate_budget_ok:
-                                ok, reason = False, "venue_rate_budget"
-
-                        if guard_call == 2 and first_guard_completed is not None:
-                            pre_submit_wait_ms = max(
-                                0.0, (guard_started - first_guard_completed) * 1000.0)
-                        elapsed_ms = max(
-                            0.0, (time.perf_counter() - started_monotonic) * 1000.0)
-                        trace_item = {
-                            "timestamp": details.get("timestamp"),
-                            "elapsed_from_leg_start_ms": elapsed_ms,
-                            "stage": stage,
-                            "ok": bool(ok),
-                            "reason": reason,
-                            "signal_age_ms": details.get("signal_age_ms"),
-                            "current_minute": details.get("current_minute"),
-                            "reserved_minute": details.get("reserved_minute"),
-                            "reserved_qty": details.get("reserved_qty"),
-                            "fresh_planned_qty": details.get("fresh_planned_qty"),
-                            "buy_best_ask": details.get("buy_best_ask"),
-                            "sell_best_bid": details.get("sell_best_bid"),
-                            "reserved_buy_bound": details.get("reserved_buy_bound"),
-                            "reserved_sell_bound": details.get("reserved_sell_bound"),
-                            "fresh_buy_bound": details.get("fresh_buy_bound"),
-                            "fresh_sell_bound": details.get("fresh_sell_bound"),
-                            "venue_ready": details.get("venue_ready", {}).get(venue.key),
-                            "venue_limited": details.get("venue_limited", {}).get(venue.key),
-                            "venue_checks": {
-                                "ready": details.get("venue_ready", {}).copy(),
-                                "limited": details.get("venue_limited", {}).copy(),
-                            },
-                            "venue_guard_ts": None,
-                            "transport_attempted": None,
-                            "nonce_wait_ms": None,
-                            "signing_ms": None,
-                            "rate_budget_ok": rate_budget_ok,
-                        }
-                        guard_trace.append(trace_item)
-                        submit_guard.last_result = {
-                            "ok": bool(ok), "reason": reason,
-                            "timestamp": details.get("timestamp"),
-                            "trace": trace_item,
-                        }
-                        if guard_call == 1:
-                            first_guard_completed = time.perf_counter()
-                        if not ok:
-                            return False
-                        if not counted:
-                            self._record_send(venue)
-                            counted = True
-                        return True
-
-                    submit_guard.last_result = {
-                        "ok": None, "reason": "unknown", "timestamp": None,
-                        "trace": None,
-                    }
-                    if not submit_guard():
-                        guard_result = submit_guard.last_result
-                        return ({"status": "pre-submit-blocked", "filled_base": 0.0,
-                                 "avg_px": None, "err": None, "unresolved": False,
-                                 "reason": f"range_guard:{guard_result['reason']}",
-                                 "transport_attempted": False,
-                                 "not_submitted": True,
-                                 "guard_trace": guard_trace,
-                                 "pre_submit_wait_ms": pre_submit_wait_ms},
-                                started_ts, time.time())
-                    kwargs["submit_guard"] = submit_guard
+                if range_commit is not None:
+                    if (range_commit["prepared_nonce"] is not None
+                            and venue is range_commit["nonce_venue"]):
+                        kwargs["prepared_nonce"] = range_commit["prepared_nonce"]
                 info = await venue.send_taker(**kwargs)
                 info = dict(info)
-                if range_submission is not None:
-                    info["guard_trace"] = guard_trace
-                    info["pre_submit_wait_ms"] = pre_submit_wait_ms
-                    if guard_trace:
-                        last_guard = guard_trace[-1]
+                if range_commit is not None:
+                    verdict = range_commit["final_verdict"]
+                    info["guard_trace"] = [
+                        self._range_guard_trace(
+                            verdict, venue, stage="engine_preflight",
+                            transport_attempted=False),
+                        self._range_guard_trace(
+                            verdict, venue, stage="venue_pre_submit",
+                            transport_attempted=info.get("transport_attempted")),
+                    ]
+                    if info["guard_trace"]:
+                        last_guard = info["guard_trace"][-1]
                         for field in ("venue_guard_ts", "transport_attempted",
                                       "nonce_wait_ms", "signing_ms"):
-                            if field in info:
+                            if field in info and info[field] is not None:
                                 last_guard[field] = info[field]
-                    if info.get("status") == "pre-submit-blocked":
-                        guard_result = submit_guard.last_result
-                        info["transport_attempted"] = False
-                        info["not_submitted"] = True
-                        if not info.get("reason"):
-                            info["reason"] = f"range_guard:{guard_result['reason']}"
+                    info["pre_submit_wait_ms"] = None
+                    if range_commit["prepared_nonce"] is not None:
+                        prepared = range_commit["prepared_nonce"]
+                        info.setdefault("nonce_wait_ms", prepared.nonce_wait_ms)
+                        info.setdefault("nonce_prepared_ts",
+                                         prepared.nonce_prepared_ts)
+                        info.setdefault("nonce_prepare_ms",
+                                         prepared.nonce_prepare_ms)
             except Exception as exc:
                 info = {"status": "send-failed", "filled_base": 0.0,
                         "avg_px": None, "err": repr(exc),
                         "reason": repr(exc), "unresolved": False,
                         "transport_attempted": None}
-                if range_submission is not None:
+                if range_commit is not None:
                     info["guard_trace"] = locals().get("guard_trace", [])
-                    info["pre_submit_wait_ms"] = locals().get(
-                        "pre_submit_wait_ms")
+                    info["pre_submit_wait_ms"] = None
             return info, started_ts, time.time()
 
         res = await asyncio.gather(
@@ -2031,12 +2191,11 @@ class Engine:
         (binfo, buy_started_ts, buy_done_ts), (sinfo, sell_started_ts,
                                                sell_done_ts) = (
             unpack_send_result(result) for result in res)
-        if (range_submission is not None and binfo.get("not_submitted")
-                and sinfo.get("not_submitted") and not binfo["filled_base"]
-                and not sinfo["filled_base"]):
-            self._range.abandon_unsent()  # neither transport submitted an order
-            self._range_unsent = True
-            return None
+        if range_commit is not None:
+            prepared = range_commit["prepared_nonce"]
+            nonce_venue = range_commit["nonce_venue"]
+            if (prepared is not None and getattr(prepared, "lock_held", False)):
+                nonce_venue.release_prepared_nonce(prepared)
         buy_settle_ms = (
             max(0.0, buy_done_ts - buy_started_ts) * 1000.0
             if buy_started_ts is not None and buy_done_ts is not None else None)
@@ -2149,6 +2308,7 @@ class Engine:
             "inv_bps": inv_bps,
             "unresolved": bool(unresolved),
             "ok": sent_ok,
+            "range_commit": range_commit,
         }
 
     def _record_trade(self, direction: str, plan: ArbPlan, fill_edge,
@@ -2551,6 +2711,11 @@ class Engine:
                 binfo = execution["buy_info"]
                 sinfo = execution["sell_info"]
                 rolling = execution.get("rolling_signal_meta") or {}
+                pair_commit = execution.get("range_commit") or {}
+                transport_by_venue = {
+                    buy.key: binfo.get("transport_attempted"),
+                    sell.key: sinfo.get("transport_attempted"),
+                }
                 result = self._rolling_result_meta if (
                     self.cfg.strategy_mode == "rolling") else {}
                 w.writerow([
@@ -2628,6 +2793,14 @@ class Engine:
                     _csv_num(sinfo.get("pre_submit_wait_ms"), 6),
                     _csv_num(binfo.get("nonce_wait_ms"), 6),
                     _csv_num(sinfo.get("nonce_wait_ms"), 6),
+                    pair_commit.get("nonce_prepared_ts", ""),
+                    _csv_num(pair_commit.get("nonce_prepare_ms"), 6),
+                    pair_commit.get("final_pair_preflight_ts", ""),
+                    pair_commit.get("final_pair_preflight_reason", ""),
+                    pair_commit.get("pair_committed_ts", ""),
+                    _csv_bool(pair_commit.get("pair_committed")),
+                    _csv_bool(transport_by_venue.get("entropy")),
+                    _csv_bool(transport_by_venue.get("hedge")),
                 ])
         except Exception:
             log.exception("csv write failed")

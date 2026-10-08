@@ -459,54 +459,264 @@ def test_both_guard_stages_are_recorded_without_changing_submit_outcome(
             "engine_preflight", "venue_pre_submit"]
         assert all(item["ok"] is True for item in trace)
         assert trace[0]["rate_budget_ok"] is True
-        assert trace[1]["rate_budget_ok"] is None
+        assert trace[1]["rate_budget_ok"] is True
         assert trace[1]["venue_guard_ts"] == "test-venue-guard"
         assert trace[1]["transport_attempted"] is True
         assert "ready" in trace[1]["venue_checks"]
         assert "limited" in trace[1]["venue_checks"]
         assert row_out[f"{leg}_transport_attempted"] == "1"
-        assert float(row_out[f"{leg}_pre_submit_wait_ms"]) >= 0.0
+        assert row_out[f"{leg}_pre_submit_wait_ms"] == ""
+    assert row_out["pair_committed"] == "1"
+    assert row_out["final_pair_preflight_reason"] == "ok"
     assert eng._range.signed_qty == pytest.approx(.528)
     assert not eng.halted
 
 
+def test_range_pair_commit_validates_once_then_attempts_both_transports(
+        tmp_path, monkeypatch):
+    eng, calls, _ = make_range(tmp_path, monkeypatch)
+    eng._on_minute(row(50, -20))
+    verdict_calls = []
+    original = eng._range_submission_verdict
+
+    def observe(*args, **kwargs):
+        verdict = original(*args, **kwargs)
+        verdict_calls.append(verdict)
+        return verdict
+
+    monkeypatch.setattr(eng, "_range_submission_verdict", observe)
+    asyncio.run(eng._evaluate())
+
+    assert len(calls) == 2
+    assert len(verdict_calls) == 1
+    assert all("submit_guard" not in kwargs for _, kwargs in calls)
+    assert eng._range.signed_qty == pytest.approx(.528)
+    assert eng._range.state["pending_intent"] is None
+
+    with open(eng.cfg.trades_csv, newline="") as fh:
+        row_out = next(csv.DictReader(fh))
+    assert row_out["pair_committed"] == "1"
+    assert row_out["entropy_transport_attempted"] == "1"
+    assert row_out["rh_transport_attempted"] == "1"
+    assert row_out["final_pair_preflight_reason"] == "ok"
+
+
+def test_range_pair_preflight_abort_releases_nonce_before_any_transport(
+        tmp_path, monkeypatch):
+    eng, calls, clock = make_range(tmp_path, monkeypatch)
+    eng._on_minute(row(50, -20))
+    selected = eng._scan(clock["now"])
+    assert selected is not None
+    buy, sell, planned = selected
+    original_plan = eng._range_plan_now
+    plan_calls = {"reserved": 0}
+
+    def shrink_on_final(now, *, reserved=False):
+        if reserved:
+            plan_calls["reserved"] += 1
+            return None, "below_min_base"
+        return original_plan(now, reserved=reserved)
+
+    monkeypatch.setattr(eng, "_range_plan_now", shrink_on_final)
+    events = []
+
+    async def prepare_nonce():
+        events.append("nonce_prepared")
+        return SimpleNamespace(nonce=700, consumed=False, aborted=False,
+                               lock_held=True)
+
+    def release_nonce(token):
+        token.aborted = True
+        events.append("nonce_released")
+
+    eng.hedge.prepare_nonce = prepare_nonce
+    eng.hedge.release_prepared_nonce = release_nonce
+    original_verdict = eng._range_submission_verdict
+
+    def observe_verdict(*args, **kwargs):
+        events.append("pair_verdict")
+        return original_verdict(*args, **kwargs)
+
+    monkeypatch.setattr(eng, "_range_submission_verdict", observe_verdict)
+    result = asyncio.run(eng._execute(buy, sell, planned))
+
+    assert result is not None
+    assert result["precommit_aborted"] is True
+    assert result["range_commit"]["pair_committed"] is False
+    assert result["buy_info"]["transport_attempted"] is False
+    assert result["sell_info"]["transport_attempted"] is False
+    assert events == ["nonce_prepared", "pair_verdict", "nonce_released"]
+    assert plan_calls["reserved"] == 1
+    assert calls == []
+    assert eng._range.state["pending_intent"] is None
+    assert eng._range_unsent is True
+
+
+def test_range_commit_passes_prepared_nonce_to_rh_and_records_pair_timing(
+        tmp_path, monkeypatch):
+    eng, calls, _ = make_range(tmp_path, monkeypatch)
+    eng._on_minute(row(50, -20))
+    events = []
+    prepared = SimpleNamespace(
+        nonce=701, consumed=False, aborted=False, lock_held=True,
+        nonce_prepared_ts="2026-10-08T00:00:00.100Z",
+        nonce_prepare_ms=1.25, nonce_wait_ms=1.0,
+        nonce_wait_started_ts="2026-10-08T00:00:00.000Z",
+        nonce_wait_completed_ts="2026-10-08T00:00:00.100Z",
+    )
+
+    async def prepare_nonce():
+        events.append("prepared")
+        return prepared
+
+    def release_nonce(token):
+        assert token is prepared
+        token.lock_held = False
+        token.aborted = True
+        events.append("released")
+
+    eng.hedge.prepare_nonce = prepare_nonce
+    eng.hedge.release_prepared_nonce = release_nonce
+    asyncio.run(eng._evaluate())
+
+    assert len(calls) == 2
+    rh_kwargs = next(kwargs for key, kwargs in calls if key == "hedge")
+    assert rh_kwargs["prepared_nonce"] is prepared
+    assert events == ["prepared", "released"]
+    with open(eng.cfg.trades_csv, newline="") as fh:
+        row_out = next(csv.DictReader(fh))
+    assert row_out["nonce_prepared_ts"] == prepared.nonce_prepared_ts
+    assert float(row_out["nonce_prepare_ms"]) == pytest.approx(1.25)
+
+
+def test_range_nonce_preparation_failure_aborts_pair_without_transport(
+        tmp_path, monkeypatch):
+    eng, calls, clock = make_range(tmp_path, monkeypatch)
+    eng._on_minute(row(50, -20))
+    selected = eng._scan(clock["now"])
+    assert selected is not None
+    buy, sell, planned = selected
+
+    async def fail_prepare():
+        raise RuntimeError("nonce unavailable")
+
+    eng.hedge.prepare_nonce = fail_prepare
+    result = asyncio.run(eng._execute(buy, sell, planned))
+
+    assert result is None
+    assert calls == []
+    assert eng._range.state["pending_intent"] is None
+    assert eng._range_unsent is True
+
+
+@pytest.mark.parametrize("change", ["buy_adverse", "sell_adverse", "qty_shrinks"])
+def test_pair_preflight_adverse_or_shrunk_plan_is_zero_zero(
+        tmp_path, monkeypatch, change):
+    eng, calls, clock = make_range(tmp_path, monkeypatch)
+    eng._on_minute(row(50, -20))
+    selected = eng._scan(clock["now"])
+    assert selected is not None
+    buy, sell, planned = selected
+    reserved = eng._prepare_range_submit(buy, sell)
+    assert reserved is not None
+    monkeypatch.setattr(eng, "_prepare_range_submit",
+                        lambda *_args, **_kwargs: reserved)
+    if change == "buy_adverse":
+        buy.set_book(buy.book.best_ask() + 0.2,
+                     buy.book.best_ask() + 0.3, sz=100)
+    elif change == "sell_adverse":
+        bid = sell.book.best_bid() - 0.2
+        sell.set_book(bid, bid + 0.1, sz=100)
+    else:
+        original = eng._range_plan_now
+
+        def shrink(now, *, reserved=False):
+            current, reason = original(now, reserved=reserved)
+            if reserved and current is not None:
+                current = replace(
+                    current, plan=replace(current.plan,
+                                          qty=current.plan.qty - 0.001))
+            return current, reason
+
+        monkeypatch.setattr(eng, "_range_plan_now", shrink)
+
+    result = asyncio.run(eng._execute(buy, sell, planned))
+
+    assert result is not None
+    assert result["precommit_aborted"] is True
+    assert result["range_commit"]["pair_committed"] is False
+    assert result["buy_info"]["transport_attempted"] is False
+    assert result["sell_info"]["transport_attempted"] is False
+    assert calls == []
+    assert eng._range.signed_qty == 0
+    assert eng._range.state["pending_intent"] is None
+
+
 @pytest.mark.parametrize("block_reason", ["stale_signal", "venue_rate_budget"])
-def test_engine_preflight_block_is_persisted_without_transport(
+def test_pair_preflight_block_aborts_without_transport(
         tmp_path, monkeypatch, block_reason):
     eng, _, clock = make_range(tmp_path, monkeypatch)
     reserved, buy, sell = prepared_range(eng, clock)
     plan = reserved.plan
     monkeypatch.setattr(eng, "_prepare_range_submit",
                         lambda *_args, **_kwargs: reserved)
-    original_verdict = eng._range_submission_verdict
-    verdict_calls = {"count": 0}
-
-    def selected_block(*args, **kwargs):
-        verdict_calls["count"] += 1
-        if verdict_calls["count"] == 1:
-            return {"ok": False, "reason": "stale_signal",
-                    "details": {"timestamp": "test", "venue_ready": {},
-                                "venue_limited": {}}}
-        return original_verdict(*args, **kwargs)
-
     if block_reason == "stale_signal":
-        monkeypatch.setattr(eng, "_range_submission_verdict", selected_block)
+        monkeypatch.setattr(
+            eng, "_range_submission_verdict",
+            lambda *_args, **_kwargs: {
+                "ok": False, "reason": "stale_signal",
+                "details": {"timestamp": "test", "venue_ready": {},
+                            "venue_limited": {}, "rate_budget_ok": {}}})
     else:
-        # The reservation is already safely prepared; the first rate check is
-        # now blocked, matching the existing post-preflight budget boundary.
+        # The reserved intent is safe, but the final pair-level rate check
+        # must still abort both legs before commit.
         buy.orders_per_min = 0
 
     execution = asyncio.run(eng._execute(buy, sell, plan))
     assert execution is not None
-    info = execution["buy_info"]
-    assert info["status"] == "pre-submit-blocked"
-    assert info["reason"] == f"range_guard:{block_reason}"
-    assert info["transport_attempted"] is False
-    assert info["not_submitted"] is True
-    assert info["guard_trace"][0]["stage"] == "engine_preflight"
-    assert info["guard_trace"][0]["reason"] == block_reason
-    if block_reason == "venue_rate_budget":
-        assert info["guard_trace"][0]["rate_budget_ok"] is False
+    assert execution["precommit_aborted"] is True
+    assert execution["range_commit"]["pair_committed"] is False
+    assert execution["buy_info"]["transport_attempted"] is False
+    assert execution["sell_info"]["transport_attempted"] is False
+    assert eng._range.state["pending_intent"] is None
+    assert eng._range.signed_qty == 0
+    assert eng._range_unsent is True
+    assert eng._range_venues_ready(clock["now"], check_locks=False,
+                                   check_rate=False)
+
+
+def test_pair_precommit_abort_persists_zero_transport_diagnostics(
+        tmp_path, monkeypatch):
+    eng, calls, _ = make_range(tmp_path, monkeypatch)
+    eng._on_minute(row(50, -20))
+    monkeypatch.setattr(
+        eng, "_range_submission_verdict",
+        lambda *_args, **_kwargs: {
+            "ok": False,
+            "reason": "current_qty_below_reserved",
+            "details": {"timestamp": "2026-10-08T00:00:00.000Z",
+                        "venue_ready": {"entropy": True, "hedge": True},
+                        "venue_limited": {"entropy": False, "hedge": False},
+                        "rate_budget_ok": {"entropy": True, "hedge": True}},
+        })
+
+    asyncio.run(eng._evaluate())
+
+    assert calls == []
+    with open(eng.cfg.trades_csv, newline="") as fh:
+        row_out = next(csv.DictReader(fh))
+    assert row_out["pair_committed"] == "0"
+    assert row_out["entropy_transport_attempted"] == "0"
+    assert row_out["rh_transport_attempted"] == "0"
+    assert row_out["final_pair_preflight_reason"] == "current_qty_below_reserved"
+    assert row_out["buy_status"] == "pre-submit-blocked"
+    assert row_out["sell_status"] == "pre-submit-blocked"
+    for leg in ("buy", "sell"):
+        trace = json.loads(row_out[f"{leg}_guard_trace"])
+        assert len(trace) == 1
+        assert trace[0]["stage"] == "pair_preflight"
+        assert trace[0]["pair_level"] is True
+        assert trace[0]["transport_attempted"] is False
 
 
 def test_mismatch_persists_halt_and_never_guesses_ledger_repair(tmp_path, monkeypatch):
@@ -661,7 +871,8 @@ def test_range_live_requires_recorder(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("change", ["stale_signal", "halt", "stop", "depth", "stale_bbo", "cap"])
-def test_scheduler_gap_cannot_bypass_submission_guards(tmp_path, monkeypatch, change):
+def test_post_commit_scheduler_changes_do_not_create_one_leg_veto(
+        tmp_path, monkeypatch, change):
     eng, calls, clock = make_range(tmp_path, monkeypatch)
     eng._on_minute(row(50, -20))
     original_gather = asyncio.gather
@@ -681,9 +892,9 @@ def test_scheduler_gap_cannot_bypass_submission_guards(tmp_path, monkeypatch, ch
         return await original_gather(*coros, **kwargs)
     monkeypatch.setattr("entropy_arb.engine.asyncio.gather", delayed)
     asyncio.run(eng._evaluate())
-    assert calls == []
-    assert eng._range.state["pending_intent"] is None  # proven zero submissions
-    assert eng._range.signed_qty == 0
+    assert len(calls) == 2
+    assert eng._range.state["pending_intent"] is None
+    assert eng._range.signed_qty == pytest.approx(.528)
 
 
 def test_persistence_delay_rechecks_books_before_send(tmp_path, monkeypatch):
@@ -699,7 +910,8 @@ def test_persistence_delay_rechecks_books_before_send(tmp_path, monkeypatch):
     assert eng._range.state["pending_intent"] is None
 
 
-def test_delayed_transport_keeps_guard_and_repairs_actual_one_leg_fill(tmp_path, monkeypatch):
+def test_post_commit_transport_error_keeps_existing_fallback_path(
+        tmp_path, monkeypatch):
     eng, _, clock = make_range(tmp_path, monkeypatch)
     eng._on_minute(row(50, -20))
     signed = []
@@ -708,35 +920,28 @@ def test_delayed_transport_keeps_guard_and_repairs_actual_one_leg_fill(tmp_path,
         return {"status": "filled", "filled_base": kw["qty"], "avg_px": 100,
                 "err": None, "unresolved": False}
     async def rh_send(**kw):
-        await asyncio.sleep(0)  # models await nonce after the other primary submitted
-        clock["now"] += 4
-        assert "submit_guard" in kw, "guard must reach the actual transport"
-        assert not kw["submit_guard"]()
-        for venue in eng.venues.values():
-            venue.set_book(99.9, 100.1, sz=100)  # fresh feed for existing safety hedge
-        return {"status": "pre-submit-blocked", "filled_base": 0,
-                "avg_px": None, "err": None, "unresolved": False,
-                "reason": "range_guard:stale_or_pretrade_book",
-                "transport_attempted": False,
-                "venue_guard_ts": "test-venue-guard", "not_submitted": True}
+        await asyncio.sleep(0)
+        return {"status": "send-failed", "filled_base": 0,
+                "avg_px": None, "err": "transport failure",
+                "unresolved": False, "reason": "transport failure",
+                "transport_attempted": True}
     eng.entropy.send_taker, eng.hedge.send_taker = entropy_send, rh_send
     asyncio.run(eng._evaluate())
     assert signed == ["entropy-primary", "entropy-residual"]
     assert eng._range.signed_qty == 0
-    assert eng._range.state["pending_intent"] is None
-    assert not eng.halted
+    assert eng._range.state["pending_intent"] is not None
+    assert eng.halted
     with open(eng.cfg.trades_csv, newline="") as fh:
         row_out = next(csv.DictReader(fh))
-    assert row_out["sell_status"] == "pre-submit-blocked"
-    assert row_out["sell_reason"] == "range_guard:stale_or_pretrade_book"
+    assert row_out["sell_status"] == "send-failed"
+    assert row_out["sell_reason"] == "transport failure"
     sell_trace = json.loads(row_out["sell_guard_trace"])
     assert [item["stage"] for item in sell_trace] == [
-        "engine_preflight", "venue_pre_submit"]
-    assert sell_trace[-1]["ok"] is False
-    assert sell_trace[-1]["reason"] == "stale_or_pretrade_book"
-    assert sell_trace[-1]["venue_guard_ts"] == "test-venue-guard"
-    assert sell_trace[-1]["transport_attempted"] is False
-    assert row_out["sell_transport_attempted"] == "0"
+            "engine_preflight", "venue_pre_submit"]
+    assert sell_trace[-1]["ok"] is True
+    assert sell_trace[-1]["reason"] == "ok"
+    assert sell_trace[-1]["transport_attempted"] is True
+    assert row_out["sell_transport_attempted"] == "1"
 
 
 def test_new_minute_cannot_bypass_existing_persist_arming(tmp_path, monkeypatch):

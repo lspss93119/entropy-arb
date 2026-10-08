@@ -18,6 +18,7 @@ import logging
 import math
 import time
 from collections import OrderedDict
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
@@ -37,6 +38,28 @@ log = logging.getLogger("lighter")
 OPEN_STATUSES = {"in-progress", "pending", "open"}
 AUTH_REFRESH_SEC = 8 * 60
 REST_TIMEOUT = 10.0
+
+
+@dataclass
+class PreparedNonce:
+    """An SDK nonce reserved for one pair commit.
+
+    The application lock stays held while this object is live.  A token is
+    either consumed by the RH transport or explicitly aborted; it cannot be
+    returned to the nonce pool or used by a later order.
+    """
+
+    venue: "LighterVenue"
+    api_key_index: int
+    nonce: int
+    nonce_wait_started_ts: str
+    nonce_wait_completed_ts: str
+    nonce_wait_ms: float
+    nonce_prepared_ts: str
+    nonce_prepare_ms: float
+    consumed: bool = False
+    aborted: bool = False
+    lock_held: bool = True
 
 
 class AccountOrdersFeed:
@@ -274,9 +297,61 @@ class LighterVenue:
         self._coi += 1
         return self._coi
 
+    @staticmethod
+    def _utc_timestamp() -> str:
+        return datetime.now(timezone.utc).isoformat(
+            timespec="milliseconds").replace("+00:00", "Z")
+
+    async def prepare_nonce(self) -> PreparedNonce:
+        """Reserve one authoritative SDK nonce before a pair-level commit."""
+        assert self.signer is not None
+        creds = self.conf.lighter_creds
+        assert creds is not None and creds.api_key_index is not None
+        await self._nonce_lock.acquire()
+        prepare_started = time.perf_counter()
+        nonce_wait_started_ts = self._utc_timestamp()
+        nonce_started = time.perf_counter()
+        try:
+            try:
+                api_key_index, nonce = (
+                    await self.signer.nonce_manager.async_next_nonce(
+                        creds.api_key_index))
+            finally:
+                nonce_wait_ms = max(
+                    0.0, (time.perf_counter() - nonce_started) * 1000.0)
+                nonce_wait_completed_ts = self._utc_timestamp()
+            nonce_prepared_ts = self._utc_timestamp()
+            return PreparedNonce(
+                venue=self,
+                api_key_index=api_key_index,
+                nonce=nonce,
+                nonce_wait_started_ts=nonce_wait_started_ts,
+                nonce_wait_completed_ts=nonce_wait_completed_ts,
+                nonce_wait_ms=nonce_wait_ms,
+                nonce_prepared_ts=nonce_prepared_ts,
+                nonce_prepare_ms=max(
+                    0.0, (time.perf_counter() - prepare_started) * 1000.0),
+            )
+        except BaseException:
+            self._nonce_lock.release()
+            raise
+
+    def release_prepared_nonce(self, prepared: PreparedNonce) -> None:
+        """Abort a prepared nonce; it is never returned for reuse."""
+        if not isinstance(prepared, PreparedNonce) or prepared.venue is not self:
+            raise RuntimeError("prepared nonce belongs to another venue")
+        if prepared.consumed:
+            raise RuntimeError("prepared nonce already consumed")
+        if prepared.aborted or not prepared.lock_held:
+            raise RuntimeError("prepared nonce already released")
+        prepared.aborted = True
+        prepared.lock_held = False
+        self._nonce_lock.release()
+
     async def send_taker(self, *, is_buy: bool, qty: float, limit_px: float,
                          reduce_only: bool = False,
-                         submit_guard: Optional[Callable[[], bool]] = None) -> dict:
+                         submit_guard: Optional[Callable[[], bool]] = None,
+                         prepared_nonce: Optional[PreparedNonce] = None) -> dict:
         """Market order with avg-price protection; settle via account ws."""
         assert self.signer is not None
         from lighter import SignerClient
@@ -285,6 +360,10 @@ class LighterVenue:
         nonce_wait_ms = None
         venue_guard_ts = None
         transport_attempted = False
+        nonce_prepared_ts = (prepared_nonce.nonce_prepared_ts
+                             if prepared_nonce is not None else None)
+        nonce_prepare_ms = (prepared_nonce.nonce_prepare_ms
+                            if prepared_nonce is not None else None)
 
         def with_diagnostics(result):
             result = dict(result)
@@ -292,6 +371,8 @@ class LighterVenue:
                 "nonce_wait_started_ts": nonce_wait_started_ts,
                 "nonce_wait_completed_ts": nonce_wait_completed_ts,
                 "nonce_wait_ms": nonce_wait_ms,
+                "nonce_prepared_ts": nonce_prepared_ts,
+                "nonce_prepare_ms": nonce_prepare_ms,
                 "venue_guard_ts": venue_guard_ts,
                 "transport_attempted": transport_attempted,
             })
@@ -304,58 +385,114 @@ class LighterVenue:
         try:
             creds = self.conf.lighter_creds
             assert creds is not None and creds.api_key_index is not None
-            # Refresh from the server and hold one application-level lock
-            # through submission.  This is deliberately not a retry: an
-            # invalid nonce remains a failed execution and keeps the engine's
-            # existing fail-closed behavior.
-            async with self._nonce_lock:
-                nonce_wait_started_ts = datetime.now(timezone.utc).isoformat(
-                    timespec="milliseconds").replace("+00:00", "Z")
-                nonce_started = time.perf_counter()
+            prepared_lock_held = False
+            if prepared_nonce is not None:
+                if (not isinstance(prepared_nonce, PreparedNonce)
+                        or prepared_nonce.venue is not self
+                        or prepared_nonce.consumed
+                        or prepared_nonce.aborted
+                        or not prepared_nonce.lock_held):
+                    raise RuntimeError("invalid or already released prepared nonce")
+                api_key_index, nonce = (prepared_nonce.api_key_index,
+                                        prepared_nonce.nonce)
+                nonce_wait_started_ts = prepared_nonce.nonce_wait_started_ts
+                nonce_wait_completed_ts = prepared_nonce.nonce_wait_completed_ts
+                nonce_wait_ms = prepared_nonce.nonce_wait_ms
+                prepared_lock_held = True
+            else:
+                # Refresh from the server and hold one application-level lock
+                # through submission.  This is deliberately not a retry: an
+                # invalid nonce remains a failed execution and keeps the
+                # existing fail-closed behavior.
+                await self._nonce_lock.acquire()
                 try:
-                    api_key_index, nonce = (
-                        await self.signer.nonce_manager.async_next_nonce(
-                            creds.api_key_index))
+                    nonce_wait_started_ts = self._utc_timestamp()
+                    nonce_started = time.perf_counter()
+                    try:
+                        api_key_index, nonce = (
+                            await self.signer.nonce_manager.async_next_nonce(
+                                creds.api_key_index))
+                    finally:
+                        nonce_wait_ms = max(
+                            0.0, (time.perf_counter() - nonce_started) * 1000.0)
+                        nonce_wait_completed_ts = self._utc_timestamp()
+                    if submit_guard is not None:
+                        venue_guard_ts = self._utc_timestamp()
+                        allowed = submit_guard()
+                        guard_result = getattr(submit_guard, "last_result", {}) or {}
+                    else:
+                        allowed = True
+                        guard_result = {}
+                    if not allowed:
+                        if fut is not None:
+                            self.orders_feed.unwatch(coi)
+                        reason = (guard_result.get("reason") or "unknown")
+                        return with_diagnostics({
+                            "status": "pre-submit-blocked", "filled_base": 0.0,
+                            "avg_px": None, "err": None, "unresolved": False,
+                            "reason": f"range_guard:{reason}",
+                            "not_submitted": True,
+                        })
+                    log.debug("[%s] submit coi=%d api_key=%d nonce=%d "
+                              "reduce_only=%s", self.name, coi, api_key_index,
+                              nonce, reduce_only)
+                    transport_attempted = True
+                    _tx, resp, err = await self.signer.create_order(
+                        market_index=self.market_id,
+                        client_order_index=coi,
+                        base_amount=base_amount,
+                        price=price,
+                        is_ask=not is_buy,
+                        order_type=SignerClient.ORDER_TYPE_MARKET,
+                        time_in_force=SignerClient.ORDER_TIME_IN_FORCE_IMMEDIATE_OR_CANCEL,
+                        reduce_only=reduce_only,
+                        order_expiry=SignerClient.DEFAULT_IOC_EXPIRY,
+                        nonce=nonce,
+                        api_key_index=api_key_index,
+                    )
                 finally:
-                    nonce_wait_ms = max(
-                        0.0, (time.perf_counter() - nonce_started) * 1000.0)
-                    nonce_wait_completed_ts = datetime.now(timezone.utc).isoformat(
-                        timespec="milliseconds").replace("+00:00", "Z")
-                if submit_guard is not None:
-                    venue_guard_ts = datetime.now(timezone.utc).isoformat(
-                        timespec="milliseconds").replace("+00:00", "Z")
-                    allowed = submit_guard()
-                    guard_result = getattr(submit_guard, "last_result", {}) or {}
-                else:
-                    allowed = True
-                    guard_result = {}
-                if not allowed:
-                    if fut is not None:
-                        self.orders_feed.unwatch(coi)
-                    reason = (guard_result.get("reason") or "unknown")
-                    return with_diagnostics({
-                        "status": "pre-submit-blocked", "filled_base": 0.0,
-                        "avg_px": None, "err": None, "unresolved": False,
-                        "reason": f"range_guard:{reason}",
-                        "not_submitted": True,
-                    })
-                log.debug("[%s] submit coi=%d api_key=%d nonce=%d "
-                          "reduce_only=%s", self.name, coi, api_key_index,
-                          nonce, reduce_only)
-                transport_attempted = True
-                _tx, resp, err = await self.signer.create_order(
-                    market_index=self.market_id,
-                    client_order_index=coi,
-                    base_amount=base_amount,
-                    price=price,
-                    is_ask=not is_buy,
-                    order_type=SignerClient.ORDER_TYPE_MARKET,
-                    time_in_force=SignerClient.ORDER_TIME_IN_FORCE_IMMEDIATE_OR_CANCEL,
-                    reduce_only=reduce_only,
-                    order_expiry=SignerClient.DEFAULT_IOC_EXPIRY,
-                    nonce=nonce,
-                    api_key_index=api_key_index,
-                )
+                    self._nonce_lock.release()
+            if prepared_lock_held:
+                try:
+                    if submit_guard is not None:
+                        venue_guard_ts = self._utc_timestamp()
+                        allowed = submit_guard()
+                        guard_result = getattr(submit_guard, "last_result", {}) or {}
+                    else:
+                        allowed = True
+                        guard_result = {}
+                    if not allowed:
+                        if fut is not None:
+                            self.orders_feed.unwatch(coi)
+                        prepared_nonce.aborted = True
+                        reason = (guard_result.get("reason") or "unknown")
+                        return with_diagnostics({
+                            "status": "pre-submit-blocked", "filled_base": 0.0,
+                            "avg_px": None, "err": None, "unresolved": False,
+                            "reason": f"range_guard:{reason}",
+                            "not_submitted": True,
+                        })
+                    log.debug("[%s] submit coi=%d api_key=%d nonce=%d "
+                              "reduce_only=%s", self.name, coi, api_key_index,
+                              nonce, reduce_only)
+                    transport_attempted = True
+                    _tx, resp, err = await self.signer.create_order(
+                        market_index=self.market_id,
+                        client_order_index=coi,
+                        base_amount=base_amount,
+                        price=price,
+                        is_ask=not is_buy,
+                        order_type=SignerClient.ORDER_TYPE_MARKET,
+                        time_in_force=SignerClient.ORDER_TIME_IN_FORCE_IMMEDIATE_OR_CANCEL,
+                        reduce_only=reduce_only,
+                        order_expiry=SignerClient.DEFAULT_IOC_EXPIRY,
+                        nonce=nonce,
+                        api_key_index=api_key_index,
+                    )
+                finally:
+                    prepared_nonce.consumed = not prepared_nonce.aborted
+                    prepared_nonce.lock_held = False
+                    self._nonce_lock.release()
         except Exception as e:
             if fut is not None:
                 self.orders_feed.unwatch(coi)

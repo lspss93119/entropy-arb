@@ -212,5 +212,67 @@ def test_optional_submit_guard_rechecks_after_authoritative_nonce_await():
     assert result["reason"] == "range_guard:unknown"
 
 
+def test_prepared_nonce_is_released_on_abort_and_not_reused():
+    venue = _venue()
+    manager = _ServerNonceManager(first_nonce=500)
+    venue.signer = _RecordingSigner(manager)
+
+    async def prepare_twice():
+        first = await venue.prepare_nonce()
+        venue.release_prepared_nonce(first)
+        second = await venue.prepare_nonce()
+        venue.release_prepared_nonce(second)
+        return first, second
+
+    first, second = asyncio.run(prepare_twice())
+
+    assert manager.calls == [8, 8]
+    assert first.nonce == 500
+    assert second.nonce == 501
+    assert first.aborted is True
+    assert second.aborted is True
+
+
+def test_prepared_nonce_is_consumed_by_transport_while_lock_is_held():
+    venue = _venue()
+    manager = _ServerNonceManager(first_nonce=600)
+    signer = _RecordingSigner(manager)
+    venue.signer = signer
+
+    async def run():
+        prepared = await venue.prepare_nonce()
+        result = await venue.send_taker(
+            is_buy=False, qty=0.007, limit_px=2_000.0,
+            prepared_nonce=prepared)
+        return prepared, result
+
+    prepared, result = asyncio.run(run())
+
+    assert manager.calls == [8]
+    assert signer.calls[0]["nonce"] == 600
+    assert result["status"] == "sent-unconfirmed"
+    assert prepared.consumed is True
+    assert venue._nonce_lock.locked() is False
+
+
+def test_nonce_preparation_failure_does_not_attempt_transport():
+    venue = _venue()
+
+    class FailingNonceManager:
+        async def async_next_nonce(self, _api_key_index):
+            raise RuntimeError("nonce unavailable")
+
+    signer = _RecordingSigner(FailingNonceManager())
+    venue.signer = signer
+
+    async def run():
+        with pytest.raises(RuntimeError, match="nonce unavailable"):
+            await venue.prepare_nonce()
+
+    asyncio.run(run())
+    assert signer.calls == []
+    assert venue._nonce_lock.locked() is False
+
+
 if __name__ == "__main__":
     pytest.main([__file__])
