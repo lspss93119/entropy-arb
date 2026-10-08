@@ -124,6 +124,111 @@ def legacy_range_submission_valid(eng, reserved, buy, sell, buy_bound, sell_boun
                for venue, bound in ((buy, buy_bound), (sell, sell_bound)))
 
 
+def _patch_current_range_plan(monkeypatch, eng, reserved, *, qty=None,
+                              buy_limit=None, sell_limit=None):
+    current_plan = SimpleNamespace(
+        qty=reserved.plan.qty if qty is None else qty,
+        reduce_only=reserved.plan.reduce_only,
+        buy_limit=reserved.plan.buy_limit if buy_limit is None else buy_limit,
+        sell_limit=reserved.plan.sell_limit if sell_limit is None else sell_limit,
+    )
+    current = SimpleNamespace(
+        signal=reserved.signal,
+        direction=reserved.direction,
+        plan=current_plan,
+    )
+    monkeypatch.setattr(
+        eng, "_range_plan_now",
+        lambda _now, reserved=False: (current, "ok"),
+    )
+    return current
+
+
+def test_persisted_event_000008_favorable_sell_revalidation_passes(
+        tmp_path, monkeypatch):
+    """Event 1791444610170-000008 must pass after the monotonicity fix."""
+    eng, _, clock = make_range(tmp_path, monkeypatch)
+    reserved, buy, sell = prepared_range(eng, clock)
+
+    # Persisted diagnostics for 1791444610170-000008:
+    # reserved sell bound=2149.3, fresh sell bound=2149.4,
+    # RH best bid=2151.5; the old oracle rejected this as sell_price_bound.
+    buy_bound, sell_bound = 2112.8, 2149.3
+    buy.set_book(2110.6, 2110.7, sz=100)
+    sell.set_book(2151.5, 2151.6, sz=100)
+    _patch_current_range_plan(
+        monkeypatch,
+        eng,
+        reserved,
+        buy_limit=buy_bound / (1 + eng.cfg.leg_slippage_bps / 1e4),
+        sell_limit=2149.4 / (1 - eng.cfg.leg_slippage_bps / 1e4),
+    )
+
+    old = legacy_range_submission_valid(
+        eng, reserved, buy, sell, buy_bound, sell_bound)
+    verdict = eng._range_submission_verdict(
+        reserved, buy, sell, buy_bound, sell_bound)
+
+    assert old is False
+    assert verdict["ok"] is True
+    assert verdict["reason"] == "ok"
+    assert verdict["details"]["fresh_sell_bound"] == pytest.approx(2149.4)
+    assert verdict["details"]["reserved_sell_bound"] == pytest.approx(2149.3)
+
+
+@pytest.mark.parametrize(("case", "buy_fresh", "sell_fresh", "buy_ask",
+                          "sell_bid", "expected"), [
+    ("buy_favorable", "below", "same", "reserved", "reserved", True),
+    ("sell_adverse_inside", "same", "below", "reserved", "reserved", True),
+    ("buy_adverse_inside", "above", "same", "reserved", "reserved", True),
+    ("sell_below_reserved", "same", "same", "reserved", "below", False),
+    ("buy_above_reserved", "same", "same", "above", "reserved", False),
+])
+def test_price_bound_revalidation_uses_reserved_bounds_only(
+        tmp_path, monkeypatch, case, buy_fresh, sell_fresh, buy_ask,
+        sell_bid, expected):
+    eng, _, clock = make_range(tmp_path, monkeypatch)
+    reserved, buy, sell = prepared_range(eng, clock)
+    buy_bound, sell_bound = reserved.plan.buy_limit, reserved.plan.sell_limit
+    slip = eng.cfg.leg_slippage_bps / 1e4
+
+    buy_current_fresh = {
+        "below": buy_bound - 0.1,
+        "same": buy_bound,
+        "above": buy_bound + 0.1,
+    }[buy_fresh]
+    sell_current_fresh = {
+        "below": sell_bound - 0.1,
+        "same": sell_bound,
+        "above": sell_bound + 0.1,
+    }[sell_fresh]
+    _patch_current_range_plan(
+        monkeypatch,
+        eng,
+        reserved,
+        buy_limit=buy_current_fresh / (1 + slip),
+        sell_limit=sell_current_fresh / (1 - slip),
+    )
+
+    current_ask = {
+        "reserved": buy_bound,
+        "above": buy_bound + 0.1,
+    }[buy_ask]
+    current_bid = {
+        "reserved": sell_bound,
+        "below": sell_bound - 0.1,
+    }[sell_bid]
+    buy.set_book(current_ask - 0.1, current_ask, sz=100)
+    sell.set_book(current_bid, current_bid + 0.1, sz=100)
+
+    verdict = eng._range_submission_verdict(
+        reserved, buy, sell, buy_bound, sell_bound)
+
+    assert verdict["ok"] is expected, case
+    if not expected:
+        assert verdict["reason"] in {"buy_price_bound", "sell_price_bound"}
+
+
 @pytest.mark.parametrize("case", ["valid", "stale", "missing_intent", "buy_bound"])
 def test_submission_verdict_boolean_matches_preinstrumentation_guard(
         tmp_path, monkeypatch, case):

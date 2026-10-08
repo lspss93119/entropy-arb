@@ -1356,11 +1356,11 @@ class Engine:
         details["fresh_sell_bound"] = fresh_sell_bound
         buy_best_ask = buy.book.best_ask()
         details["buy_best_ask"] = buy_best_ask
-        if not (buy_best_ask <= buy_bound <= fresh_buy_bound + 1e-9):
+        if not (buy_best_ask <= buy_bound + 1e-9):
             return result(False, "buy_price_bound")
         sell_best_bid = sell.book.best_bid()
         details["sell_best_bid"] = sell_best_bid
-        if not (fresh_sell_bound - 1e-9 <= sell_bound <= sell_best_bid):
+        if not (sell_bound - 1e-9 <= sell_best_bid):
             return result(False, "sell_price_bound")
         for venue, bound in ((buy, buy_bound), (sell, sell_bound)):
             if not reserved.plan.qty + 1e-9 >= venue.min_base:
