@@ -444,7 +444,7 @@ def test_submission_verdict_reports_specific_reason_and_valid_remains_boolean(
         reserved.plan.sell_limit), bool)
 
 
-def test_both_guard_stages_are_recorded_without_changing_submit_outcome(
+def test_committed_range_records_one_pair_guard_without_changing_submit_outcome(
         tmp_path, monkeypatch):
     eng, calls, _ = make_range(tmp_path, monkeypatch)
     eng._on_minute(row(50, -20))
@@ -455,15 +455,18 @@ def test_both_guard_stages_are_recorded_without_changing_submit_outcome(
         row_out = next(csv.DictReader(fh))
     for leg in ("buy", "sell"):
         trace = json.loads(row_out[f"{leg}_guard_trace"])
-        assert [item["stage"] for item in trace] == [
-            "engine_preflight", "venue_pre_submit"]
-        assert all(item["ok"] is True for item in trace)
+        assert len(trace) == 1
+        assert trace[0]["stage"] == "pair_preflight"
+        assert trace[0]["pair_level"] is True
+        assert trace[0]["ok"] is True
+        assert trace[0]["reason"] == "ok"
         assert trace[0]["rate_budget_ok"] is True
-        assert trace[1]["rate_budget_ok"] is True
-        assert trace[1]["venue_guard_ts"] == "test-venue-guard"
-        assert trace[1]["transport_attempted"] is True
-        assert "ready" in trace[1]["venue_checks"]
-        assert "limited" in trace[1]["venue_checks"]
+        assert trace[0]["venue_guard_ts"] is None
+        assert trace[0]["transport_attempted"] is True
+        assert trace[0]["final_pair_preflight_ts"] == trace[0]["timestamp"]
+        assert "venue_pre_submit" not in trace[0]["stage"]
+        assert "ready" in trace[0]["venue_checks"]
+        assert "limited" in trace[0]["venue_checks"]
         assert row_out[f"{leg}_transport_attempted"] == "1"
         assert row_out[f"{leg}_pre_submit_wait_ms"] == ""
     assert row_out["pair_committed"] == "1"
@@ -716,7 +719,10 @@ def test_pair_precommit_abort_persists_zero_transport_diagnostics(
         assert len(trace) == 1
         assert trace[0]["stage"] == "pair_preflight"
         assert trace[0]["pair_level"] is True
+        assert "venue_pre_submit" not in trace[0]["stage"]
+        assert trace[0]["venue_guard_ts"] is None
         assert trace[0]["transport_attempted"] is False
+        assert row_out[f"{leg}_pre_submit_wait_ms"] == ""
 
 
 def test_mismatch_persists_halt_and_never_guesses_ledger_repair(tmp_path, monkeypatch):
@@ -936,11 +942,14 @@ def test_post_commit_transport_error_keeps_existing_fallback_path(
     assert row_out["sell_status"] == "send-failed"
     assert row_out["sell_reason"] == "transport failure"
     sell_trace = json.loads(row_out["sell_guard_trace"])
-    assert [item["stage"] for item in sell_trace] == [
-            "engine_preflight", "venue_pre_submit"]
-    assert sell_trace[-1]["ok"] is True
-    assert sell_trace[-1]["reason"] == "ok"
-    assert sell_trace[-1]["transport_attempted"] is True
+    assert len(sell_trace) == 1
+    assert sell_trace[0]["stage"] == "pair_preflight"
+    assert sell_trace[0]["pair_level"] is True
+    assert "venue_pre_submit" not in sell_trace[0]["stage"]
+    assert sell_trace[0]["ok"] is True
+    assert sell_trace[0]["reason"] == "ok"
+    assert sell_trace[0]["venue_guard_ts"] is None
+    assert sell_trace[0]["transport_attempted"] is True
     assert row_out["sell_transport_attempted"] == "1"
 
 

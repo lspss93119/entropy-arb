@@ -1856,6 +1856,7 @@ class Engine:
             rate_budget_ok = rate_budget_ok.get(venue.key)
         return {
             "timestamp": details.get("timestamp"),
+            "final_pair_preflight_ts": details.get("timestamp"),
             "stage": stage,
             "pair_level": True,
             "ok": bool(verdict.get("ok")),
@@ -1879,7 +1880,7 @@ class Engine:
                 "rate_budget_ok": dict(details.get("rate_budget_ok", {}))
                 if isinstance(details.get("rate_budget_ok"), dict) else {},
             },
-            "venue_guard_ts": details.get("timestamp"),
+            "venue_guard_ts": None,
             "transport_attempted": transport_attempted,
             "nonce_wait_ms": None,
             "signing_ms": None,
@@ -2000,6 +2001,7 @@ class Engine:
                 "reason": f"range_guard:{verdict['reason']}",
                 "transport_attempted": False,
                 "not_submitted": True,
+                "venue_guard_ts": None,
                 "guard_trace": [self._range_guard_trace(
                     verdict, venue, stage="pair_preflight",
                     transport_attempted=False)],
@@ -2138,20 +2140,17 @@ class Engine:
                 info = dict(info)
                 if range_commit is not None:
                     verdict = range_commit["final_verdict"]
+                    info["venue_guard_ts"] = None
                     info["guard_trace"] = [
                         self._range_guard_trace(
-                            verdict, venue, stage="engine_preflight",
-                            transport_attempted=False),
-                        self._range_guard_trace(
-                            verdict, venue, stage="venue_pre_submit",
+                            verdict, venue, stage="pair_preflight",
                             transport_attempted=info.get("transport_attempted")),
                     ]
-                    if info["guard_trace"]:
-                        last_guard = info["guard_trace"][-1]
-                        for field in ("venue_guard_ts", "transport_attempted",
-                                      "nonce_wait_ms", "signing_ms"):
-                            if field in info and info[field] is not None:
-                                last_guard[field] = info[field]
+                    last_guard = info["guard_trace"][0]
+                    for field in ("transport_attempted", "nonce_wait_ms",
+                                  "signing_ms"):
+                        if field in info and info[field] is not None:
+                            last_guard[field] = info[field]
                     info["pre_submit_wait_ms"] = None
                     if range_commit["prepared_nonce"] is not None:
                         prepared = range_commit["prepared_nonce"]
@@ -2166,6 +2165,7 @@ class Engine:
                         "reason": repr(exc), "unresolved": False,
                         "transport_attempted": None}
                 if range_commit is not None:
+                    info["venue_guard_ts"] = None
                     info["guard_trace"] = locals().get("guard_trace", [])
                     info["pre_submit_wait_ms"] = None
             return info, started_ts, time.time()
