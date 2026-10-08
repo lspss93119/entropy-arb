@@ -1,6 +1,6 @@
 # Range Inventory performance report design
 
-Status: draft for user review; implementation authorized in principle, but not yet started. No deployment or live-process action is in scope.
+Status: approved for implementation on `feature/range-inventory-live`; implementation is in scope, but deployment and live-process actions are not.
 
 ## Boundaries
 
@@ -21,14 +21,20 @@ into that checkout. `--config` and `--env-file` identify existing read-only
 runtime inputs in default mode; the tool reads only public market identity,
 freshness settings, and `HL_ACCOUNT_ADDRESS`, never `HL_PRIVATE_KEY`. Path
 overrides and an explicit maximum quote age support deterministic fixtures.
-Offline mode does not open the env file or config.
+An explicit `--recorder` path takes precedence over runtime resolution. Without
+that override, resolve the recorder path using the same production config and
+runtime path-namespacing rules as `main.py`; never assume a hardcoded
+`logs/record/minutes-<symbol>-<hedge>.csv` path. If the effective recorder path
+cannot be resolved uniquely, fail closed. Offline mode does not open the env
+file or config.
 
 Default artifact paths are pair-scoped and follow the production naming rules:
 
 - `logs/state/range-ANTH-lighter-rh.json`
 - `logs/state/halt-ANTH-lighter-rh.json`
 - `logs/trades/trades-ANTH-lighter-rh.csv`
-- `logs/record/minutes-ANTH-lighter-rh.csv`
+- recorder path resolved from the effective production config/runtime, unless
+  explicitly overridden by `--recorder`
 - the matching engine run/settlement logs when present
 
 Allow explicit root/path overrides for reproducible tests and archived fixtures. Report outputs are:
@@ -38,6 +44,31 @@ Allow explicit root/path overrides for reproducible tests and archived fixtures.
 - `logs/performance/range-cycles-ANTH-lighter-rh.csv`
 
 Writes should be staged via temporary files and replaced atomically. A source-data parse error must fail clearly rather than emit a plausible but partial financial report.
+
+### Consistent snapshot protocol
+
+Each report attempt follows one bounded consistent-snapshot protocol:
+
+1. Read and validate Range state A.
+2. Capture identity and EOF/size boundaries for each append-only execution,
+   settlement/trade, and recorder artifact. Read each artifact only through
+   its captured boundary; detect replacement, truncation, or in-place changes
+   while reading.
+3. Obtain the fresh public BBO snapshot used for current executable valuation.
+4. Read and validate Range state B, then recheck the append-only source
+   identities and boundaries.
+5. Accept the snapshot only if state A and B agree on inventory, pending
+   intent, and consumed minute, and the captured source boundaries remained
+   compatible throughout the attempt. Otherwise retry the whole attempt up to
+   a small fixed bound. Never merge state from one attempt with artifacts or
+   BBO from another.
+
+If bounded retries cannot obtain a consistent snapshot, preserve any
+independently computable historical gross diagnostics, but mark all
+current-position-dependent valuation N/A with reason code
+`inconsistent_snapshot`. Do not publish current unrealized PnL or a total PnL
+from an unstable mixture of state, fills, recorder rows, or quotes. Report the
+attempt count and sanitized inconsistency reason.
 
 ## Read-only data and mode semantics
 
@@ -53,11 +84,11 @@ In `--offline` mode, perform no network access and do not load credentials. Comp
 
 Use only public/read-only market data plus the public HL account address required to query the configured production account. Do not read or display a private key. Never include the HL account address, API credential, authorization header, token, or unredacted request/response in generated reports or errors.
 
-1. Query the official Hyperliquid Info API `userFillsByTime` for the configured production account and the report’s required time range, using the configured Entropy HIP-3 DEX/coin identity. Raw fills must retain `fee`, `feeToken`, `time`, `coin`, `side`, `sz`, `px`, `oid`, `hash`, and `tid`; do not use configured fee rates or aggregate away identity. The official `fee` value is the fee authority and already includes any builder fee, so it is counted once. Only fee tokens that are directly denominated in the report’s USD accounting currency are usable without a separate authoritative conversion source.
+1. Query the official Hyperliquid Info API `userFillsByTime` for the configured production account and the report’s required time range, using the configured Entropy HIP-3 DEX/coin identity. Raw fills must retain `fee`, `feeToken`, `time`, `coin`, `side`, `sz`, `px`, `oid`, `hash`, and `tid`; do not use configured fee rates or aggregate away identity. The official fill `fee` is the authority for that fill and is counted once; do not add configured or separately inferred builder fees. Do not claim that the official `fee` includes a builder fee unless the official field definition or documentation explicitly supports that claim. Only fee tokens that are directly denominated in the report’s USD accounting currency are usable without a separate authoritative conversion source.
 2. Respect the official per-response and historical-availability limits. Partition dense ranges deterministically and deduplicate by venue fill identity. If any requested interval cannot be proven completely covered (including a still-capped minimum interval or history-limit ambiguity), fee status is incomplete.
 3. Match each local Entropy actual-fill leg independently. Local primary `buy_fill`/`sell_fill` and any actual fallback fill form separate expected legs, identified by venue, side, size, actual average price, and the local signal-to-settlement time window. Match against raw official fills using coin, side, size, price, and timestamp, with exchange order/transaction identity when available. Group partial official fills only by their common order identity; never combine unrelated fills to force a match. Use deterministic precision tolerances derived from the local CSV’s documented numeric formatting and a fixed, documented clock-skew bound.
 4. Require one global, one-to-one unique assignment between every expected Entropy fill and official fill group. Missing candidates, multiple valid assignments, identity collisions, conflicting duplicate venue fills, unsupported fee currency, malformed fee, or incomplete venue coverage make the whole fee result incomplete. Incomplete results carry explicit reason codes and do not publish a partial `fees_usd` or fee-net PnL.
-5. Lighter-RH fees may be recorded as zero only when a current authoritative source specifically supports zero for the relevant market/account context; the local configured `taker_fee_bps` alone is not actual-fee evidence. Otherwise fee completeness is incomplete. Funding remains excluded in all modes.
+5. Lighter-RH fees may be recorded as zero only when current official RH market metadata explicitly states `taker_fee = 0` and the fee mechanism is inactive for the relevant market/account context. The local configured `taker_fee_bps` alone is not actual-fee evidence. Otherwise RH fee coverage is incomplete, `fees_usd` and fee-net PnL are null/N/A, and the report must explain why. Funding remains excluded in all modes.
 
 For current marks, open public WebSocket book feeds for the configured Hyperliquid Entropy coin and configured RH market. Resolve the current market identifiers from current venue metadata; do not hardcode a previously observed market id or mainnet identity for RH. Record source, local snapshot UTC time, quote age, and exchange timestamp/age when provided. If a source does not provide an exchange timestamp, explicitly label quote age as local receipt age; do not imply it is exchange timestamp age. Both books must have valid bid and ask and meet a freshness bound sourced from an explicit CLI override or the existing execution staleness setting (with its exact value reported). If either leg is missing, stale, crossed/invalid, or cannot be resolved, current executable unrealized PnL and total PnL are N/A; never fall back to a mid, a last trade, or a stale recorder row.
 
@@ -78,7 +109,24 @@ Gross PnL is reconstructed as actual execution cashflows plus executable liquida
 
 The HTML exposes Gross Trading PnL separately from fee-net Trading PnL before funding. `Realized` and `Unrealized` must distinguish gross from fee-net values so an unavailable fee cannot be mistaken for zero. `Trading PnL before funding` is fee-net realized plus executable fee-net unrealized, only when all required actual fees and a fresh executable mark are available. If fee coverage is incomplete, this headline is N/A even if gross values are available. If the mark is stale, unrealized and total are N/A even if realized fee data is complete.
 
-Actual fees include all recovered Entropy fee fills and any separately authoritative RH fee amount. Do not apply strategy-config fee rates. Fee-net realized and unrealized are calculated by allocating each actual fill’s fee to its closed-lot or remaining-lot quantity; the sum reconciles to gross total less all actual fees. Fallback hedge impact is derived from its actual settled cashflows, including the actual residual primary fill being repaired; do not treat the hedge leg in isolation as PnL. The `fees_usd`/fee-net fields are null when any relevant actual fee is unknown. Funding is always excluded and explicitly labeled.
+Actual fees include all uniquely recovered Entropy fee fills and any separately authoritative RH fee amount. Do not apply strategy-config fee rates. Fee-net realized and unrealized are calculated by allocating each actual fill’s fee to its closed-lot or remaining-lot quantity; the sum reconciles to gross total less all actual fees. Fallback hedge impact is derived from its actual settled cashflows, including the actual residual primary fill being repaired; do not treat the hedge leg in isolation as PnL. `fallback_hedge_pnl_usd` is a diagnostic attribution subtotal already included in realized/total PnL and must never be added a second time. The `fees_usd`/fee-net fields are null when any relevant actual fee is unknown. Funding is always excluded and explicitly labeled.
+
+### Canonical fill ledger and inventory cost basis
+
+Build one canonical actual-fill ledger from settled execution artifacts before
+computing lots, cycles, turnover, fees, or PnL. Each actual primary or fallback
+venue fill must appear exactly once; deduplicate only when stable execution
+identity proves two records describe the same fill. If identity or quantities
+are ambiguous, mark dependent metrics incomplete rather than double-counting
+or dropping a fill.
+
+Reconstruct inventory with the same weighted-average-cost and
+`mean_cost_per_base` semantics used by `RangeInventoryLive`: each settled
+paired quantity updates the signed base inventory and mean cost; reductions
+realize PnL against that carried mean cost; only an actual transition to flat
+clears the open cost basis. Do not substitute FIFO lots or a different
+spread-capture formula. Any fee allocation and cycle realized PnL must be
+derived from this canonical ledger and this strategy-compatible cost basis.
 
 ### Current inventory and open cycle
 
