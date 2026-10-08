@@ -18,6 +18,7 @@ import json
 import logging
 import math
 import time
+from datetime import datetime, timezone
 from typing import Callable, Optional
 
 import aiohttp
@@ -184,6 +185,20 @@ class HLVenue:
                          submit_guard: Optional[Callable[[], bool]] = None) -> dict:
         assert self.account is not None and self.asset_id >= 0
         s = self._signing
+        signing_started = None
+        signing_ms = None
+        venue_guard_ts = None
+        transport_attempted = False
+
+        def with_diagnostics(result):
+            result = dict(result)
+            result.update({
+                "signing_ms": signing_ms,
+                "venue_guard_ts": venue_guard_ts,
+                "transport_attempted": transport_attempted,
+            })
+            return result
+
         cloid = self._next_cloid()
         order_req = {"coin": self.coin, "is_buy": is_buy, "sz": round(qty, 8),
                      "limit_px": limit_px,
@@ -193,29 +208,46 @@ class HLVenue:
             wire = s.order_request_to_order_wire(order_req, self.asset_id)
             action = s.order_wires_to_order_action([wire])
             nonce = self.account.nonces.next()
+            signing_started = time.perf_counter()
             sig = s.sign_l1_action(self.account.wallet, action, None, nonce,
                                    None, self.account.is_mainnet)
             payload = {"action": action, "nonce": nonce, "signature": sig,
                        "vaultAddress": None, "expiresAfter": None}
+            signing_ms = max(0.0, (time.perf_counter() - signing_started) * 1000.0)
         except Exception as e:
+            if signing_started is not None:
+                signing_ms = max(
+                    0.0, (time.perf_counter() - signing_started) * 1000.0)
             reason = f"signing failed: {e!r}"
-            return {"status": "send-failed", "filled_base": 0.0,
+            return with_diagnostics({"status": "send-failed", "filled_base": 0.0,
                     "avg_px": None, "err": reason, "reason": reason,
-                    "unresolved": False}
+                    "unresolved": False})
 
-        if submit_guard is not None and not submit_guard():
-            return {"status": "pre-submit-blocked", "filled_base": 0.0,
-                    "avg_px": None, "err": None, "unresolved": False,
-                    "not_submitted": True}
+        if submit_guard is not None:
+            venue_guard_ts = datetime.now(timezone.utc).isoformat(
+                timespec="milliseconds").replace("+00:00", "Z")
+            allowed = submit_guard()
+            guard_result = getattr(submit_guard, "last_result", {}) or {}
+        else:
+            allowed = True
+            guard_result = {}
+        if not allowed:
+            reason = (guard_result.get("reason") or "unknown")
+            return with_diagnostics({
+                "status": "pre-submit-blocked", "filled_base": 0.0,
+                "avg_px": None, "err": None, "unresolved": False,
+                "reason": f"range_guard:{reason}", "not_submitted": True,
+            })
+        transport_attempted = True
         body, err, unresolved = await self._post_exchange(payload)
         if err is not None:
-            return {"status": "send-failed", "filled_base": 0.0,
+            return with_diagnostics({"status": "send-failed", "filled_base": 0.0,
                     "avg_px": None, "err": err, "reason": err,
-                    "unresolved": False}
+                    "unresolved": False})
         if not unresolved:
             res = self._parse(body)
             if not res.get("unresolved"):
-                return res
+                return with_diagnostics(res)
         # unknown outcome: poll orderStatus by cloid until the deadline
         deadline = time.time() + self.settle_timeout
         while time.time() < deadline:
@@ -235,13 +267,14 @@ class HLVenue:
                 except (TypeError, ValueError):
                     filled = 0.0
                 if status != "open":
-                    return {"status": status, "filled_base": filled,
+                    return with_diagnostics({"status": status, "filled_base": filled,
                             "avg_px": None, "err": None,
                             "reason": "" if status == "filled" else status,
-                            "unresolved": False}
+                            "unresolved": False})
             await asyncio.sleep(0.5)
-        return {"status": "timeout", "filled_base": 0.0, "avg_px": None,
+        return with_diagnostics({"status": "timeout", "filled_base": 0.0, "avg_px": None,
                 "err": None, "reason": "settle_timeout", "unresolved": True}
+                )
 
     async def _post_exchange(self, payload: dict):
         try:

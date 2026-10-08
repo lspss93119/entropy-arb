@@ -64,6 +64,10 @@ CSV_HEADER = [
     "hedge_status", "hedge_venue",
     "hedge_side", "hedge_fill", "hedge_avg_px", "hedge_notional",
     "hedge_duration_ms", "remaining_net_qty", "fill_edge_usd",
+    "buy_guard_trace", "sell_guard_trace",
+    "buy_transport_attempted", "sell_transport_attempted",
+    "buy_pre_submit_wait_ms", "sell_pre_submit_wait_ms",
+    "buy_nonce_wait_ms", "sell_nonce_wait_ms",
 ]
 RUN_CONFIG_HEADER = [
     "run_id", "start_ts", "mode", "symbol", "hedge",
@@ -86,6 +90,12 @@ def _csv_num(value, digits: int = 8) -> str:
     if value is None:
         return ""
     return f"{float(value):.{digits}g}"
+
+
+def _csv_bool(value) -> str:
+    if value is None:
+        return ""
+    return "1" if bool(value) else "0"
 
 
 def _csv_error(*items) -> str:
@@ -1139,16 +1149,50 @@ class Engine:
             staleness_sec=self.cfg.staleness_sec,
             leg_slippage_bps=self.cfg.leg_slippage_bps, reserved=reserved)
 
-    def _range_venues_ready(self, now: float, *, check_locks=True, check_rate=True) -> bool:
+    def _range_venues_verdict(self, now: float, *, check_locks=True,
+                              check_rate=True):
+        details = {"venue_ready": {}, "venue_limited": {},
+                   "rate_budget_ok": {}, "book_fresh": {},
+                   "venue_lock_free": {}}
+
+        def result(ok, reason):
+            return {"ok": bool(ok), "reason": reason, "details": details}
+
         if self.halted or self.stop.is_set() or self._venue_down:
-            return False
+            if self.halted:
+                return result(False, "halted")
+            if self.stop.is_set():
+                return result(False, "stop_requested")
+            return result(False, "venue_down")
         for v in self.venues.values():
-            if (not v.ready_to_trade() or self._venue_limited(v)
-                    or (check_rate and not self._venue_rate_ok(v))
-                    or v.book.last_update_ts <= v.last_traded_ts
-                    or (check_locks and self._vlock(v.key).locked())):
-                return False
-        return True
+            ready = v.ready_to_trade()
+            details["venue_ready"][v.key] = bool(ready)
+            if not ready:
+                return result(False, "venue_not_ready")
+            limited = self._venue_limited(v)
+            details["venue_limited"][v.key] = bool(limited)
+            if limited:
+                return result(False, "venue_limited")
+            if check_rate:
+                rate_ok = self._venue_rate_ok(v)
+                details["rate_budget_ok"][v.key] = bool(rate_ok)
+                if not rate_ok:
+                    return result(False, "venue_rate_budget")
+            book_fresh = v.book.last_update_ts > v.last_traded_ts
+            details["book_fresh"][v.key] = bool(book_fresh)
+            if not book_fresh:
+                return result(False, "stale_or_pretrade_book")
+            if check_locks:
+                lock_free = not self._vlock(v.key).locked()
+                details["venue_lock_free"][v.key] = bool(lock_free)
+                if not lock_free:
+                    return result(False, "inflight")
+        return result(True, "ok")
+
+    def _range_venues_ready(self, now: float, *, check_locks=True,
+                            check_rate=True) -> bool:
+        return self._range_venues_verdict(
+            now, check_locks=check_locks, check_rate=check_rate)["ok"]
 
     def _scan_range(self, now: float):
         if not self._range_venues_ready(now):
@@ -1204,35 +1248,134 @@ class Engine:
                  (now - result.signal.completed_ts) * 1000)
         return result
 
-    def _range_submission_valid(self, reserved, buy, sell, buy_bound, sell_bound):
-        """Check after fsync / scheduler / nonce awaits, without repricing intent."""
+    @staticmethod
+    def _range_submission_plan_reason(reason):
+        if not isinstance(reason, str):
+            return "no_current_plan"
+        if reason in {"stale_signal", "coverage", "range_gate", "inflight",
+                      "minute_consumed", "below_min_base", "below_min_notional"}:
+            return reason
+        if reason in {"stale_book", "empty_book", "crossed_book", "empty_depth"}:
+            return "stale_or_pretrade_book"
+        return "no_current_plan"
+
+    def _range_submission_verdict(self, reserved, buy, sell, buy_bound, sell_bound):
+        """Return the existing submit decision plus observational diagnostics."""
         self._load_persisted_halt()
         now = time.time()
-        if not self._range_venues_ready(now, check_locks=False, check_rate=False):
-            return False
+        try:
+            timestamp = datetime.fromtimestamp(now, timezone.utc).isoformat(
+                timespec="milliseconds").replace("+00:00", "Z")
+        except (OverflowError, OSError, ValueError):
+            timestamp = None
+        try:
+            signal_age_ms = (now - reserved.signal.completed_ts) * 1000.0
+        except (AttributeError, TypeError, ValueError):
+            signal_age_ms = None
+        try:
+            current_minute = self._range.state.get("latest_completed_minute_ts")
+        except (AttributeError, TypeError):
+            current_minute = None
+        try:
+            reserved_minute = reserved.signal.minute_ts
+            reserved_qty = reserved.plan.qty
+        except AttributeError:
+            reserved_minute = None
+            reserved_qty = None
+
+        def diagnostic_value(read):
+            try:
+                return read()
+            except Exception:
+                return None
+
+        details = {
+            "timestamp": timestamp,
+            "signal_age_ms": signal_age_ms,
+            "current_minute": current_minute,
+            "reserved_minute": reserved_minute,
+            "reserved_qty": reserved_qty,
+            "fresh_planned_qty": None,
+            "buy_best_ask": diagnostic_value(buy.book.best_ask),
+            "sell_best_bid": diagnostic_value(sell.book.best_bid),
+            "reserved_buy_bound": buy_bound,
+            "reserved_sell_bound": sell_bound,
+            "fresh_buy_bound": None,
+            "fresh_sell_bound": None,
+            "venue_ready": {},
+            "venue_limited": {},
+            "rate_budget_ok": None,
+        }
+
+        def result(ok, reason):
+            return {"ok": bool(ok), "reason": reason, "details": details}
+
+        readiness = self._range_venues_verdict(
+            now, check_locks=False, check_rate=False)
+        readiness_details = readiness["details"]
+        details["venue_ready"] = readiness_details["venue_ready"]
+        details["venue_limited"] = readiness_details["venue_limited"]
+        if not readiness["ok"]:
+            return result(False, readiness["reason"])
         try:
             current, reason = self._range_plan_now(now, reserved=True)
         except RangeStateError as exc:
             self._halt_rolling(f"range pre-submit state mismatch: {exc}")
-            return False
+            details["state_error"] = str(exc)
+            return result(False, "unknown")
+        if current is None:
+            log.info("range pre-submit blocked reason=%s", reason)
+            return result(False, self._range_submission_plan_reason(reason))
+        details["fresh_planned_qty"] = current.plan.qty
+        if current.signal != reserved.signal:
+            log.info("range pre-submit blocked reason=changed_plan")
+            return result(False, "signal_changed")
         intent = self._range.state["pending_intent"]
-        if (current is None or current.signal != reserved.signal or intent is None
-                or intent["minute_ts"] != reserved.signal.minute_ts
-                or intent["qty"] != reserved.plan.qty
-                or current.direction != reserved.direction
-                or current.plan.reduce_only != reserved.plan.reduce_only
-                or current.plan.qty + 1e-9 < reserved.plan.qty):
-            log.info("range pre-submit blocked reason=%s", reason if current is None else "changed_plan")
-            return False
+        if intent is None:
+            log.info("range pre-submit blocked reason=changed_plan")
+            return result(False, "missing_pending_intent")
+        if intent["minute_ts"] != reserved.signal.minute_ts:
+            log.info("range pre-submit blocked reason=changed_plan")
+            return result(False, "minute_mismatch")
+        if intent["qty"] != reserved.plan.qty:
+            log.info("range pre-submit blocked reason=changed_plan")
+            return result(False, "qty_mismatch")
+        if current.direction != reserved.direction:
+            log.info("range pre-submit blocked reason=changed_plan")
+            return result(False, "direction_changed")
+        if current.plan.reduce_only != reserved.plan.reduce_only:
+            log.info("range pre-submit blocked reason=changed_plan")
+            return result(False, "reduce_only_changed")
+        if current.plan.qty + 1e-9 < reserved.plan.qty:
+            log.info("range pre-submit blocked reason=changed_plan")
+            return result(False, "current_qty_below_reserved")
         slip = self.cfg.leg_slippage_bps / 1e4
         fresh_buy_bound = buy.px_round(current.plan.buy_limit * (1 + slip), round_up=False)
         fresh_sell_bound = sell.px_round(current.plan.sell_limit * (1 - slip), round_up=True)
-        if not (buy.book.best_ask() <= buy_bound <= fresh_buy_bound + 1e-9
-                and fresh_sell_bound - 1e-9 <= sell_bound <= sell.book.best_bid()):
-            return False
-        return all(reserved.plan.qty + 1e-9 >= v.min_base and bound > 0
-                   and reserved.plan.qty * bound + 1e-9 >= max(self._min_notional, v.min_quote)
-                   for v, bound in ((buy, buy_bound), (sell, sell_bound)))
+        details["fresh_buy_bound"] = fresh_buy_bound
+        details["fresh_sell_bound"] = fresh_sell_bound
+        buy_best_ask = buy.book.best_ask()
+        details["buy_best_ask"] = buy_best_ask
+        if not (buy_best_ask <= buy_bound <= fresh_buy_bound + 1e-9):
+            return result(False, "buy_price_bound")
+        sell_best_bid = sell.book.best_bid()
+        details["sell_best_bid"] = sell_best_bid
+        if not (fresh_sell_bound - 1e-9 <= sell_bound <= sell_best_bid):
+            return result(False, "sell_price_bound")
+        for venue, bound in ((buy, buy_bound), (sell, sell_bound)):
+            if not reserved.plan.qty + 1e-9 >= venue.min_base:
+                return result(False, "below_min_base")
+            if not bound > 0:
+                return result(False, "below_min_notional")
+            if not (reserved.plan.qty * bound + 1e-9
+                    >= max(self._min_notional, venue.min_quote)):
+                return result(False, "below_min_notional")
+        return result(True, "ok")
+
+    def _range_submission_valid(self, reserved, buy, sell, buy_bound, sell_bound):
+        """Boolean-compatible wrapper; decision semantics stay in the verdict."""
+        return self._range_submission_verdict(
+            reserved, buy, sell, buy_bound, sell_bound)["ok"]
 
     def _settle_range(self, execution: dict, hedge: dict) -> None:
         if self._range is None:
@@ -1745,31 +1888,126 @@ class Engine:
         async def send_with_completion_ts(venue, *, is_buy, qty, limit_px,
                                           reduce_only):
             started_ts = time.time()
+            started_monotonic = time.perf_counter()
             try:
                 kwargs = dict(is_buy=is_buy, qty=qty, limit_px=limit_px,
                               reduce_only=reduce_only)
                 if range_submission is not None:
                     counted = False
+                    guard_call = 0
+                    guard_trace = []
+                    first_guard_completed = None
+                    pre_submit_wait_ms = None
+
                     def submit_guard():
-                        nonlocal counted
-                        if (not self._range_submission_valid(range_submission, buy, sell,
-                                                             buy_bound, sell_bound)
-                                or (not counted and not self._venue_rate_ok(venue))):
+                        nonlocal counted, guard_call, first_guard_completed
+                        nonlocal pre_submit_wait_ms
+                        guard_call += 1
+                        guard_started = time.perf_counter()
+                        stage = ("engine_preflight" if guard_call == 1
+                                 else "venue_pre_submit")
+                        verdict = self._range_submission_verdict(
+                            range_submission, buy, sell, buy_bound, sell_bound)
+                        ok = verdict["ok"]
+                        reason = verdict["reason"]
+                        details = verdict["details"]
+                        rate_budget_ok = None
+                        if ok and not counted:
+                            rate_budget_ok = self._venue_rate_ok(venue)
+                            details["rate_budget_ok"] = bool(rate_budget_ok)
+                            if not rate_budget_ok:
+                                ok, reason = False, "venue_rate_budget"
+
+                        if guard_call == 2 and first_guard_completed is not None:
+                            pre_submit_wait_ms = max(
+                                0.0, (guard_started - first_guard_completed) * 1000.0)
+                        elapsed_ms = max(
+                            0.0, (time.perf_counter() - started_monotonic) * 1000.0)
+                        trace_item = {
+                            "timestamp": details.get("timestamp"),
+                            "elapsed_from_leg_start_ms": elapsed_ms,
+                            "stage": stage,
+                            "ok": bool(ok),
+                            "reason": reason,
+                            "signal_age_ms": details.get("signal_age_ms"),
+                            "current_minute": details.get("current_minute"),
+                            "reserved_minute": details.get("reserved_minute"),
+                            "reserved_qty": details.get("reserved_qty"),
+                            "fresh_planned_qty": details.get("fresh_planned_qty"),
+                            "buy_best_ask": details.get("buy_best_ask"),
+                            "sell_best_bid": details.get("sell_best_bid"),
+                            "reserved_buy_bound": details.get("reserved_buy_bound"),
+                            "reserved_sell_bound": details.get("reserved_sell_bound"),
+                            "fresh_buy_bound": details.get("fresh_buy_bound"),
+                            "fresh_sell_bound": details.get("fresh_sell_bound"),
+                            "venue_ready": details.get("venue_ready", {}).get(venue.key),
+                            "venue_limited": details.get("venue_limited", {}).get(venue.key),
+                            "venue_checks": {
+                                "ready": details.get("venue_ready", {}).copy(),
+                                "limited": details.get("venue_limited", {}).copy(),
+                            },
+                            "venue_guard_ts": None,
+                            "transport_attempted": None,
+                            "nonce_wait_ms": None,
+                            "signing_ms": None,
+                            "rate_budget_ok": rate_budget_ok,
+                        }
+                        guard_trace.append(trace_item)
+                        submit_guard.last_result = {
+                            "ok": bool(ok), "reason": reason,
+                            "timestamp": details.get("timestamp"),
+                            "trace": trace_item,
+                        }
+                        if guard_call == 1:
+                            first_guard_completed = time.perf_counter()
+                        if not ok:
                             return False
                         if not counted:
                             self._record_send(venue)
                             counted = True
                         return True
+
+                    submit_guard.last_result = {
+                        "ok": None, "reason": "unknown", "timestamp": None,
+                        "trace": None,
+                    }
                     if not submit_guard():
+                        guard_result = submit_guard.last_result
                         return ({"status": "pre-submit-blocked", "filled_base": 0.0,
                                  "avg_px": None, "err": None, "unresolved": False,
-                                 "not_submitted": True}, started_ts, time.time())
+                                 "reason": f"range_guard:{guard_result['reason']}",
+                                 "transport_attempted": False,
+                                 "not_submitted": True,
+                                 "guard_trace": guard_trace,
+                                 "pre_submit_wait_ms": pre_submit_wait_ms},
+                                started_ts, time.time())
                     kwargs["submit_guard"] = submit_guard
                 info = await venue.send_taker(**kwargs)
+                info = dict(info)
+                if range_submission is not None:
+                    info["guard_trace"] = guard_trace
+                    info["pre_submit_wait_ms"] = pre_submit_wait_ms
+                    if guard_trace:
+                        last_guard = guard_trace[-1]
+                        for field in ("venue_guard_ts", "transport_attempted",
+                                      "nonce_wait_ms", "signing_ms"):
+                            if field in info:
+                                last_guard[field] = info[field]
+                    if info.get("status") == "pre-submit-blocked":
+                        guard_result = submit_guard.last_result
+                        info["transport_attempted"] = False
+                        info["not_submitted"] = True
+                        if not info.get("reason"):
+                            info["reason"] = f"range_guard:{guard_result['reason']}"
             except Exception as exc:
                 info = {"status": "send-failed", "filled_base": 0.0,
                         "avg_px": None, "err": repr(exc),
-                        "reason": repr(exc), "unresolved": False}
+                        "reason": repr(exc), "unresolved": False,
+                        "transport_attempted": None}
+                if range_submission is not None:
+                    info["guard_trace"] = locals().get("guard_trace", [])
+                    info["pre_submit_wait_ms"] = locals().get(
+                        "pre_submit_wait_ms")
             return info, started_ts, time.time()
 
         res = await asyncio.gather(
@@ -2378,6 +2616,18 @@ class Engine:
                     _csv_num(hedge.get("duration_ms"), 6),
                     _csv_num(hedge.get("remaining_net_qty")),
                     f"{execution['fill_edge']:.4f}",
+                    (json.dumps(binfo.get("guard_trace"), separators=(",", ":"),
+                                sort_keys=True)
+                     if binfo.get("guard_trace") is not None else ""),
+                    (json.dumps(sinfo.get("guard_trace"), separators=(",", ":"),
+                                sort_keys=True)
+                     if sinfo.get("guard_trace") is not None else ""),
+                    _csv_bool(binfo.get("transport_attempted")),
+                    _csv_bool(sinfo.get("transport_attempted")),
+                    _csv_num(binfo.get("pre_submit_wait_ms"), 6),
+                    _csv_num(sinfo.get("pre_submit_wait_ms"), 6),
+                    _csv_num(binfo.get("nonce_wait_ms"), 6),
+                    _csv_num(sinfo.get("nonce_wait_ms"), 6),
                 ])
         except Exception:
             log.exception("csv write failed")

@@ -203,6 +203,13 @@ def test_optional_submit_guard_rechecks_after_authoritative_nonce_await():
     assert result["not_submitted"] is True
     assert result["filled_base"] == 0
     assert not result["unresolved"]
+    assert result["transport_attempted"] is False
+    assert isinstance(result["nonce_wait_ms"], float)
+    assert result["nonce_wait_ms"] >= 0.0
+    assert result["nonce_wait_started_ts"]
+    assert result["nonce_wait_completed_ts"]
+    assert result["venue_guard_ts"]
+    assert result["reason"] == "range_guard:unknown"
 
 
 if __name__ == "__main__":

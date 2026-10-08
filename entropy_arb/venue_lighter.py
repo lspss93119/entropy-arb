@@ -18,6 +18,7 @@ import logging
 import math
 import time
 from collections import OrderedDict
+from datetime import datetime, timezone
 from typing import Callable, Optional
 
 import aiohttp
@@ -279,6 +280,23 @@ class LighterVenue:
         """Market order with avg-price protection; settle via account ws."""
         assert self.signer is not None
         from lighter import SignerClient
+        nonce_wait_started_ts = None
+        nonce_wait_completed_ts = None
+        nonce_wait_ms = None
+        venue_guard_ts = None
+        transport_attempted = False
+
+        def with_diagnostics(result):
+            result = dict(result)
+            result.update({
+                "nonce_wait_started_ts": nonce_wait_started_ts,
+                "nonce_wait_completed_ts": nonce_wait_completed_ts,
+                "nonce_wait_ms": nonce_wait_ms,
+                "venue_guard_ts": venue_guard_ts,
+                "transport_attempted": transport_attempted,
+            })
+            return result
+
         coi = self._next_coi()
         fut = self.orders_feed.watch(coi) if self.orders_feed else None
         base_amount = int(round(qty * 10 ** self.size_decimals))
@@ -291,18 +309,40 @@ class LighterVenue:
             # invalid nonce remains a failed execution and keeps the engine's
             # existing fail-closed behavior.
             async with self._nonce_lock:
-                api_key_index, nonce = (
-                    await self.signer.nonce_manager.async_next_nonce(
-                        creds.api_key_index))
-                if submit_guard is not None and not submit_guard():
+                nonce_wait_started_ts = datetime.now(timezone.utc).isoformat(
+                    timespec="milliseconds").replace("+00:00", "Z")
+                nonce_started = time.perf_counter()
+                try:
+                    api_key_index, nonce = (
+                        await self.signer.nonce_manager.async_next_nonce(
+                            creds.api_key_index))
+                finally:
+                    nonce_wait_ms = max(
+                        0.0, (time.perf_counter() - nonce_started) * 1000.0)
+                    nonce_wait_completed_ts = datetime.now(timezone.utc).isoformat(
+                        timespec="milliseconds").replace("+00:00", "Z")
+                if submit_guard is not None:
+                    venue_guard_ts = datetime.now(timezone.utc).isoformat(
+                        timespec="milliseconds").replace("+00:00", "Z")
+                    allowed = submit_guard()
+                    guard_result = getattr(submit_guard, "last_result", {}) or {}
+                else:
+                    allowed = True
+                    guard_result = {}
+                if not allowed:
                     if fut is not None:
                         self.orders_feed.unwatch(coi)
-                    return {"status": "pre-submit-blocked", "filled_base": 0.0,
-                            "avg_px": None, "err": None, "unresolved": False,
-                            "not_submitted": True}
+                    reason = (guard_result.get("reason") or "unknown")
+                    return with_diagnostics({
+                        "status": "pre-submit-blocked", "filled_base": 0.0,
+                        "avg_px": None, "err": None, "unresolved": False,
+                        "reason": f"range_guard:{reason}",
+                        "not_submitted": True,
+                    })
                 log.debug("[%s] submit coi=%d api_key=%d nonce=%d "
                           "reduce_only=%s", self.name, coi, api_key_index,
                           nonce, reduce_only)
+                transport_attempted = True
                 _tx, resp, err = await self.signer.create_order(
                     market_index=self.market_id,
                     client_order_index=coi,
@@ -322,9 +362,9 @@ class LighterVenue:
             msg = f"{type(e).__name__}: {e}"
             if getattr(e, "status", None) == 429 or "(429)" in str(e):
                 msg = "RATE_LIMITED: " + msg
-            return {"status": "send-failed", "filled_base": 0.0,
+            return with_diagnostics({"status": "send-failed", "filled_base": 0.0,
                     "avg_px": None, "err": msg, "reason": msg,
-                    "unresolved": False}
+                    "unresolved": False})
         if err is not None or (getattr(resp, "code", 200) or 200) != 200:
             if fut is not None:
                 self.orders_feed.unwatch(coi)
@@ -332,28 +372,28 @@ class LighterVenue:
                 f"tx rejected code={resp.code} msg={getattr(resp, 'message', None)}"
             if "rate limit" in msg.lower():
                 msg = "RATE_LIMITED: " + msg
-            return {"status": "send-failed", "filled_base": 0.0,
+            return with_diagnostics({"status": "send-failed", "filled_base": 0.0,
                     "avg_px": None, "err": msg, "reason": msg,
-                    "unresolved": False}
+                    "unresolved": False})
         if fut is None:
-            return {"status": "sent-unconfirmed", "filled_base": 0.0,
+            return with_diagnostics({"status": "sent-unconfirmed", "filled_base": 0.0,
                     "avg_px": None, "err": None,
-                    "reason": "no_account_orders_feed", "unresolved": True}
+                    "reason": "no_account_orders_feed", "unresolved": True})
         try:
             info = await asyncio.wait_for(fut, timeout=self.settle_timeout)
-            return {"status": info["status"], "filled_base": info["filled_base"],
+            return with_diagnostics({"status": info["status"], "filled_base": info["filled_base"],
                     "avg_px": info.get("avg_px"), "err": None,
                     "reason": info.get("reason") or (
                         "" if info["status"].lower() == "filled"
                         else info["status"]),
-                    "unresolved": False}
+                    "unresolved": False})
         except asyncio.TimeoutError:
             self.orders_feed.unwatch(coi)
             log.warning("[%s] no settle confirmation for coi %d in %.1fs",
                         self.name, coi, self.settle_timeout)
-            return {"status": "timeout", "filled_base": 0.0,
+            return with_diagnostics({"status": "timeout", "filled_base": 0.0,
                     "avg_px": None, "err": None,
-                    "reason": "settle_timeout", "unresolved": True}
+                    "reason": "settle_timeout", "unresolved": True})
 
     # -------------------------------------------------------------- accounts
 
