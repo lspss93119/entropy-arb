@@ -56,3 +56,39 @@ def test_recent_trade_grace_skips_both_position_lookups():
         assert calls == []
         assert elapsed >= 1.0
     asyncio.run(scenario())
+
+
+def test_unknown_entry_gate_remains_closed_after_position_only_reconcile():
+    async def scenario():
+        eng = make_engine()
+        eng._unresolved_execution = True
+        calls = []
+        async def read(v):
+            calls.append(v.key)
+            return v.position
+        for v in eng.venues.values():
+            v.last_traded_ts = 0
+            v.fetch_position = lambda v=v: read(v)
+        async def no_hedge():
+            raise AssertionError("must not hedge before terminal confirmation")
+        eng._maybe_hedge = no_hedge
+        result = await eng._reconcile_positions(hedge=True)
+        assert result is True
+        assert sorted(calls) == ["entropy", "hedge"]
+        assert eng._unresolved_execution is True
+    asyncio.run(scenario())
+
+
+def test_unknown_entry_gate_does_not_count_grace_skip_as_reconcile():
+    async def scenario():
+        eng = make_engine()
+        eng._unresolved_execution = True
+        for v in eng.venues.values():
+            v.last_traded_ts = time.time()
+            async def unexpected():
+                raise AssertionError("grace period should skip query")
+            v.fetch_position = unexpected
+        result = await eng._reconcile_positions(hedge=False)
+        assert result is False
+        assert eng._unresolved_execution is True
+    asyncio.run(scenario())
