@@ -19,6 +19,7 @@ import csv
 import logging
 import os
 import time
+import uuid
 from collections import deque
 from typing import Dict, List, Optional
 
@@ -36,7 +37,8 @@ CSV_HEADER = ["ts", "direction", "buy_venue", "sell_venue", "qty",
               "buy_limit", "sell_limit", "buy_notional", "sell_notional",
               "exp_edge_usd", "gross_edge_usd", "marginal_premium_bps",
               "midline_bps", "inv_add_bps", "ok", "buy_fill", "sell_fill",
-              "buy_status", "sell_status", "fill_edge_usd"]
+              "buy_status", "sell_status", "fill_edge_usd",
+              "execution_id", "send_ts", "settled_ts", "buy_avg_px", "sell_avg_px"]
 BALANCE_POLL_SEC = 30.0
 
 
@@ -85,6 +87,7 @@ class Engine:
         self._venue_fetch_fails: Dict[str, int] = {}
         # per-execution records for the dashboard (newest last)
         self.recent_trades: deque = deque(maxlen=50)
+        self._last_execution_id: Optional[str] = None
 
     # ------------------------------------------------------------- utilities
 
@@ -418,6 +421,8 @@ class Engine:
         inv_bps = self._inv_add_bps(buy, sell)
         direction = "sell_entropy" if sell.key == "entropy" else "buy_entropy"
         self.last_trade_ts = time.time()
+        execution_id = uuid.uuid4().hex
+        self._last_execution_id = execution_id
         log.info("[ARB] %s: BUY %s %.6g @<=%.6g | SELL %s @>=%.6g | "
                  "take $%.0f of $%.0f | prem %.2fbps | exp $%.4f",
                  direction, buy.name, plan.qty, plan.buy_limit, sell.name,
@@ -428,10 +433,12 @@ class Engine:
         sell_bound = sell.px_round(plan.sell_limit * (1 - slip), round_up=True)
         self._record_send(buy)
         self._record_send(sell)
+        send_ts = time.time()
         res = await asyncio.gather(
             buy.send_taker(is_buy=True, qty=plan.qty, limit_px=buy_bound),
             sell.send_taker(is_buy=False, qty=plan.qty, limit_px=sell_bound),
             return_exceptions=True)
+        settled_ts = time.time()
         binfo, sinfo = (r if isinstance(r, dict) else
                         {"status": "send-failed", "filled_base": 0.0,
                          "avg_px": None, "err": repr(r), "unresolved": False}
@@ -493,7 +500,10 @@ class Engine:
                            None if unresolved else fill_edge,
                            f"{binfo['status']}/{sinfo['status']}", sent_ok)
         self._log_csv(direction, buy, sell, plan, sent_ok, bfill, sfill,
-                      binfo["status"], sinfo["status"], fill_edge, inv_bps)
+                      binfo["status"], sinfo["status"], fill_edge, inv_bps,
+                      execution_id=execution_id, send_ts=send_ts,
+                      settled_ts=settled_ts, buy_avg_px=binfo.get("avg_px"),
+                      sell_avg_px=sinfo.get("avg_px"))
         self.last_trade_ts = time.time()
         return bool(unresolved)
 
@@ -750,7 +760,9 @@ class Engine:
                      " *** HALTED ***" if self.halted else "")
 
     def _log_csv(self, direction, buy, sell, plan: ArbPlan, ok: bool, bfill,
-                 sfill, bstatus, sstatus, fill_edge, inv_bps) -> None:
+                 sfill, bstatus, sstatus, fill_edge, inv_bps, *,
+                 execution_id='', send_ts=None, settled_ts=None,
+                 buy_avg_px=None, sell_avg_px=None) -> None:
         try:
             path = self.cfg.trades_csv
             d = os.path.dirname(path)
@@ -759,7 +771,8 @@ class Engine:
             if os.path.exists(path):
                 with open(path) as fh0:
                     if fh0.readline().strip() != ",".join(CSV_HEADER):
-                        os.replace(path, path + ".old")
+                        # Never replace the fixed .old backup on schema changes.
+                        path = path + ".p004.csv"
             new = not os.path.exists(path)
             with open(path, "a", newline="") as fh:
                 w = csv.writer(fh)
@@ -773,6 +786,8 @@ class Engine:
                             f"{plan.marginal_premium_bps:.3f}",
                             f"{self.cfg.midline_bps:.3f}",
                             f"{inv_bps:.3f}", int(ok), f"{bfill:.8g}",
-                            f"{sfill:.8g}", bstatus, sstatus, f"{fill_edge:.4f}"])
+                            f"{sfill:.8g}", bstatus, sstatus, f"{fill_edge:.4f}",
+                            execution_id, send_ts, settled_ts,
+                            buy_avg_px, sell_avg_px])
         except Exception:
             log.exception("csv write failed")
