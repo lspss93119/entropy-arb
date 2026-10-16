@@ -1,4 +1,4 @@
-# entropy-arb 開發計畫與決策基準（ROADMAP v1.1）
+# entropy-arb 開發計畫與決策基準（ROADMAP v1.2）
 
 > 更新日期：2026-10-16（Asia/Taipei）  
 > **這份檔案是專案方向與核准範圍的主要依據；GitHub Issues 保存工作細節與尚未採納的想法，Git Commit / CI 是實際完成證據。**  
@@ -28,16 +28,16 @@
 
 | ID / Phase | 範圍 | 目前狀態 | 追蹤 |
 |---|---|---|---|
-| P0-01 | 雙腿預估名義金額限制 | 已實作、審查與 CI PASS；尚待合併決策 | [#1](https://github.com/lspss93119/entropy-arb/issues/1) |
-| P0-02 | 訂單簿時間戳、連線存活與行情有效性 | **40 tests PASS；HL/Core/RH 唯讀格式已驗證**；Draft PR #4 待合併核可，非零延遲門檻與部署均未批准 | [#2](https://github.com/lspss93119/entropy-arb/issues/2) · [PR #4](https://github.com/lspss93119/entropy-arb/pull/4) |
-| P0-03 | 不確定成交、部分成交與雙腿恢復 | 尚未研究 | 待安排 |
-| P0-04 | 訊號、下單與實際成交滑點／延遲歸因 | 尚未研究 | 待安排 |
+| P0-01 | 雙腿預估名義金額限制 | 已實作、審查與 CI PASS；完整 P0 後統一合併審查 | [#1](https://github.com/lspss93119/entropy-arb/issues/1) |
+| P0-02 | 訂單簿時間戳、連線存活與行情有效性 | **40 tests PASS；HL/Core/RH 唯讀格式已驗證**；Draft PR #4；休市驗證 Deferred，非零門檻維持 OFF；完整 P0 後統一審查 | [#2](https://github.com/lspss93119/entropy-arb/issues/2) · [PR #4](https://github.com/lspss93119/entropy-arb/pull/4) |
+| P0-03 | 不確定成交、部分成交與雙腿恢復 | 離線研究與故障重現完成；Draft PR #6 40 tests PASS，但人工復核流程尚待收尾，NEEDS WORK；不做完整自動 Recovery | [#5](https://github.com/lspss93119/entropy-arb/issues/5) · [PR #6](https://github.com/lspss93119/entropy-arb/pull/6) |
+| P0-04 | 訊號、下單與實際成交滑點／延遲歸因 | Research：優先調查零／部分成交與預期 edge 轉負，不改策略 | [#7](https://github.com/lspss93119/entropy-arb/issues/7) |
 | Phase 1 | 動態進出場門檻（以原版交易語義為基準） | 尚未研究／實作 | 待安排 |
 | Phase 2 | 動態滑點管理 | 尚未研究／實作 | 待安排 |
 | Phase 3 | 程式與網路延遲改善 | 尚未研究／實作 | 待安排 |
 | Phase 4 | 多交易所套利擴展 | 尚未研究／實作 | 待安排 |
 
-只有當前已選定的工作才進入實作；Phase 1–4 不預先搭建框架。高風險修改先針對性驗證，必要時在離線、唯讀或模擬環境測試。
+P0-03 採最小 fail-closed：未知成交暫停新開倉、權威對帳、必要時人工復核；不因罕見故障增加完整自動訂單狀態機或持久化 Ledger。P0-04 先做成交／滑點歸因研究，未獲核准不改下單策略。\n\n只有當前已選定的工作才進入實作；Phase 1–4 不預先搭建框架。高風險修改先針對性驗證，必要時在離線、唯讀或模擬環境測試。
 
 ## 4. 每項修改採用四步輕量流程
 
@@ -46,7 +46,7 @@
 3. **測試與審查**：原有測試、針對性回歸測試、完整 Diff 審查；行情或執行邏輯影響重大時追加必要整合與異常情境驗證。禁止僅調整測試答案來掩蓋意外行為。
 4. **完成報告**：說明改動、理由、Commit、CI、相容性與殘餘風險，給出 PASS／NEEDS WORK／FAIL，決定是否可以提交合併審查。
 
-**合併與部署分開核准。** 完成適用測試及審查後可提合併；涉及下單、倉位或成交恢復的版本，部署前須另做對應的整合驗證及必要的最小規模 Canary。部署有明確授權才執行。
+**P0-01 至 P0-04 全部完成後才統一進行整合／合併審查，不逐項合併；合併與部署分開明確核准。** 完成適用測試及審查後可提合併；涉及下單、倉位或成交恢復的版本，部署前須另做對應的整合驗證及必要的最小規模 Canary。部署有明確授權才執行。
 
 ## 5. 額外想法怎麼記錄
 
