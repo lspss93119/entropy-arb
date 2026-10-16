@@ -154,6 +154,10 @@ class Engine:
 
     async def _run_inner(self) -> None:
         cfg = self.cfg
+        if not self.record_only and os.path.exists(self._recovery_marker):
+            raise RuntimeError(
+                'Unresolved execution requires manual review before LIVE restart: '
+                + self._recovery_marker)
         self.entropy = self._make_venue(cfg.entropy)
         self.hedge = self._make_venue(cfg.hedge)
         self.venues = {"entropy": self.entropy, "hedge": self.hedge}
@@ -161,10 +165,6 @@ class Engine:
         self.markets_ready = True
 
         live = not self.record_only
-        if live and os.path.exists(self._recovery_marker):
-            raise RuntimeError(
-                'Unresolved execution requires manual review before LIVE restart: '
-                + self._recovery_marker)
         if live:
             if not cfg.creds_complete:
                 raise RuntimeError(
