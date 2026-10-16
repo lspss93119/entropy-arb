@@ -57,7 +57,10 @@ def test_take_fraction_and_cap():
     plan, reason = plan_arb(buy, sell, **common(take_fraction=0.5))
     assert reason == "ok" and abs(plan.qty - 50.0) < 1e-9
     plan, reason = plan_arb(buy, sell, **common(cap_notional=1000.0))
-    assert reason == "ok" and abs(plan.qty - 10.0) < 1e-6  # $1000 / $100
+    # Cap is per planned leg: sell at $100.5 is the binding side.
+    assert reason == "ok" and abs(plan.qty - 9.9502) < 1e-6
+    assert plan.buy_notional <= 1000.0 + 1e-8
+    assert plan.sell_notional <= 1000.0 + 1e-8
 
 
 def test_min_notional():
