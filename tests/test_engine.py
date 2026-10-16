@@ -134,6 +134,28 @@ def test_scan_fires_buy_entropy_below_band():
     assert buy.key == "entropy" and sell.key == "hedge"
 
 
+def test_scan_rejects_old_source_quote_after_heartbeat():
+    import time
+    eng = make_engine(midline=5.0, upper=4.0, lower=3.0)
+    eng.cfg.max_quote_age_sec = 10.0
+    eng.entropy.set_book(100.14, 100.16)
+    eng.hedge.set_book(99.99, 100.01)
+    eng.entropy.book.source_ts = time.time()
+    eng.hedge.book.source_ts = time.time() - 80.0
+    eng.hedge.book.touch()
+    assert run_scan(eng) is None
+    eng.hedge.book.source_ts = time.time()
+    assert run_scan(eng) is not None
+
+
+def test_scan_legacy_mode_preserves_original_trade_signal():
+    eng = make_engine(midline=5.0, upper=4.0, lower=3.0)
+    assert eng.cfg.max_quote_age_sec == 0.0
+    eng.entropy.set_book(100.14, 100.16)
+    eng.hedge.set_book(99.99, 100.01)
+    assert run_scan(eng) is not None
+
+
 def test_scan_respects_position_caps():
     eng = make_engine(midline=0.0, upper=1.0, lower=1.0)
     eng.entropy.set_book(100.14, 100.16)
