@@ -2,8 +2,8 @@
 
 One book class serves both feed protocols: zkLighter sends a snapshot plus
 diffs (dict maintenance), Hyperliquid's l2Book sends full snapshots.
-Freshness is connection-based (any inbound ws frame touches alive_ts): a quiet
-market is not stale, only a dead feed is.
+Connection liveness and order-book event age are tracked separately. The
+optional source-time gate is active only when explicitly configured.
 """
 from __future__ import annotations
 
@@ -22,6 +22,7 @@ class OrderBook:
         self.ready = False
         self.last_update_ts = 0.0
         self.alive_ts = 0.0
+        self.source_ts: Optional[float] = None  # venue event time (seconds)
 
     def touch(self) -> None:
         self.alive_ts = time.time()
@@ -30,9 +31,12 @@ class OrderBook:
         self.bids.clear()
         self.asks.clear()
         self.ready = False
+        self.last_update_ts = 0.0
+        self.source_ts = None
 
     # ---- zkLighter snapshot + diff ----
-    def apply_lighter(self, ob: dict, snapshot: bool) -> None:
+    def apply_lighter(self, ob: dict, snapshot: bool,
+                      source_ts: Optional[float] = None) -> None:
         if snapshot:
             self.bids.clear()
             self.asks.clear()
@@ -45,16 +49,19 @@ class OrderBook:
                     side[px] = sz
         self.ready = True
         self.last_update_ts = time.time()
+        self.source_ts = source_ts
         self.touch()
 
     # ---- Hyperliquid full snapshot ----
-    def apply_hl(self, levels: list) -> None:
+    def apply_hl(self, levels: list,
+                 source_ts: Optional[float] = None) -> None:
         self.bids = {float(l["px"]): float(l["sz"])
                      for l in levels[0] if float(l["sz"]) > 0}
         self.asks = {float(l["px"]): float(l["sz"])
                      for l in levels[1] if float(l["sz"]) > 0}
         self.ready = True
         self.last_update_ts = time.time()
+        self.source_ts = source_ts
         self.touch()
 
     def sorted_bids(self) -> List[Level]:
@@ -74,9 +81,18 @@ class OrderBook:
             return None
         return (max(self.bids) + min(self.asks)) / 2.0
 
-    def is_fresh(self, max_age_sec: float) -> bool:
-        return self.ready and bool(self.bids) and bool(self.asks) and (
-            time.time() - self.alive_ts <= max_age_sec)
+    def is_fresh(self, max_age_sec: float, max_quote_age_sec: float = 0.0) -> bool:
+        now = time.time()
+        if not (self.ready and self.bids and self.asks
+                and 0 <= now - self.alive_ts <= max_age_sec):
+            return False
+        if max_quote_age_sec <= 0:  # preserve upstream's transport-only gate
+            return True
+        if self.source_ts is None or not math.isfinite(self.source_ts):
+            return False  # missing/invalid exchange timestamp: fail closed
+        quote_age = now - self.source_ts
+        return (0 <= now - self.last_update_ts <= max_quote_age_sec
+                and -2.0 <= quote_age <= max_quote_age_sec)
 
 
 def floor_step(x: float, step: float) -> float:

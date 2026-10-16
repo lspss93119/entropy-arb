@@ -1,0 +1,29 @@
+name: P0-02 quote freshness checks
+on:
+  push:
+    branches:
+      - feature/p0-02-quote-freshness
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pytest
+      - name: Compile
+        run: python -m compileall -q entropy_arb main.py tools tests
+      - name: Full test suite
+        run: python -m pytest -q tests/
+      - name: Observe public WebSocket timestamp schemas (read-only)
+        run: python -m tools.probe_feed_timestamps
