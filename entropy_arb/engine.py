@@ -58,6 +58,11 @@ class Engine:
         self._venue_locks: Dict[str, asyncio.Lock] = {}
         self._exec_tasks: set = set()
         self.halted = False
+        # New-entry gate stays closed until authoritative positions are read.
+        self._unresolved_execution = False
+        # Durable manual-review latch, isolated by market and hedge venue.
+        self._recovery_marker = os.path.abspath(
+            self.cfg.trades_csv + f'.{self.cfg.symbol}.{self.cfg.hedge_venue}.unresolved')
         self.consec_errors = 0
         self.last_trade_ts = 0.0
         self.trades = 0
@@ -113,6 +118,17 @@ class Engine:
     def _record_send(self, v) -> None:
         self._sends.setdefault(v.key, deque()).append(time.time())
 
+    def _persist_unknown(self, reason: str) -> None:
+        directory = os.path.dirname(self._recovery_marker)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        # Never remove or overwrite an existing incident marker.
+        with open(self._recovery_marker, 'a', encoding='utf-8') as fh:
+            fh.write(f'{time.time():.3f} {reason}\n')
+            fh.flush()
+            os.fsync(fh.fileno())
+        self._unresolved_execution = True
+
     def request_stop(self) -> None:
         self.stop.set()
         self._update_evt.set()
@@ -138,6 +154,10 @@ class Engine:
 
     async def _run_inner(self) -> None:
         cfg = self.cfg
+        if not self.record_only and os.path.exists(self._recovery_marker):
+            raise RuntimeError(
+                'Unresolved execution requires manual review before LIVE restart: '
+                + self._recovery_marker)
         self.entropy = self._make_venue(cfg.entropy)
         self.hedge = self._make_venue(cfg.hedge)
         self.venues = {"entropy": self.entropy, "hedge": self.hedge}
@@ -310,7 +330,7 @@ class Engine:
 
     async def _evaluate(self) -> None:
         cfg = self.cfg
-        if self.halted:
+        if self.halted or self._unresolved_execution:
             return
         now = time.time()
         if now - self.last_trade_ts < cfg.cooldown_sec:
@@ -342,11 +362,18 @@ class Engine:
         except asyncio.CancelledError:
             raise
         except Exception:
-            log.exception("execute failed")
+            log.exception("execute failed; reconciliation required")
+            unresolved = True
         finally:
             self._vlock(buy.key).release()
             self._vlock(sell.key).release()
         if unresolved:
+            try:
+                self._persist_unknown('uncertain execution outcome')
+            except Exception:
+                self.halted = True
+                log.critical('Unable to persist unknown outcome; HALTED', exc_info=True)
+            self._unresolved_execution = True
             self._reconcile_evt.set()
         else:
             await self._maybe_hedge()
@@ -356,6 +383,8 @@ class Engine:
         """Evaluate both directions; returns the best executable
         (buy, sell, plan), or None."""
         cfg = self.cfg
+        if self._unresolved_execution:
+            return None
         best = None
         for buy, sell, dkey in ((self.hedge, self.entropy, "sell_entropy"),
                                 (self.entropy, self.hedge, "buy_entropy")):
@@ -412,7 +441,7 @@ class Engine:
         """Send both legs and settle the fills. Both venue locks are held by
         the caller. Returns True when an outcome is unresolved and the caller
         must escalate to reconcile."""
-        if self.halted:
+        if self.halted or self._unresolved_execution:
             return False
         cfg = self.cfg
         inv_bps = self._inv_add_bps(buy, sell)
@@ -433,8 +462,8 @@ class Engine:
             sell.send_taker(is_buy=False, qty=plan.qty, limit_px=sell_bound),
             return_exceptions=True)
         binfo, sinfo = (r if isinstance(r, dict) else
-                        {"status": "send-failed", "filled_base": 0.0,
-                         "avg_px": None, "err": repr(r), "unresolved": False}
+                        {"status": "unknown-exception", "filled_base": 0.0,
+                         "avg_px": None, "err": repr(r), "unresolved": True}
                         for r in res)
         for v, info, side in ((buy, binfo, "buy"), (sell, sinfo, "sell")):
             if info.get("err"):
@@ -589,21 +618,33 @@ class Engine:
                 continue  # down venue: probe only every venue_probe_sec
             vs.append(v)
         if not vs:
-            return
+            return False
+        # An unresolved execution needs *both* authoritative venue reads.
+        if self._unresolved_execution and len(vs) != len(self.venues):
+            return False
         got = await asyncio.gather(
             *(self._reconcile_venue(v, strict) for v in vs),
             return_exceptions=True)
         for r in got:
             if isinstance(r, BaseException):
                 raise r  # strict startup: fail loudly
-        if hedge:
+        confirmed = len(vs) == len(self.venues) and all(r is True for r in got)
+        if self._unresolved_execution:
+            if not confirmed:
+                return False
+            # Position equality does not prove a late fill is impossible.
+            # Keep new entries blocked until pending order terminal state is
+            # confirmed; order-terminal recovery is implemented separately.
+            log.warning("both positions reconciled, pending order terminal verification")
+        if hedge and not self._unresolved_execution:
             await self._maybe_hedge()
+        return confirmed
 
     async def _reconcile_venue(self, v, strict: bool) -> None:
         async with self._vlock(v.key):
             now = time.time()
             if now - v.last_traded_ts <= self.RECONCILE_GRACE_SEC:
-                return  # traded while waiting for the lock
+                return False  # traded while waiting for the lock
             try:
                 r = await v.fetch_position()
             except asyncio.CancelledError:
@@ -626,7 +667,7 @@ class Engine:
                 elif v.key not in self._venue_down:
                     log.warning("[%s] position fetch failed (%d): %r",
                                 v.name, n, e)
-                return
+                return False
             if v.key in self._venue_down:
                 log.warning("[%s] API recovered after %.0fs outage — "
                             "trading RESUMED", v.name,
@@ -642,6 +683,7 @@ class Engine:
                 if mid is not None:
                     v.cash -= delta * mid
                 v.position = r
+            return True
 
     async def _reconcile_loop(self) -> None:
         while not self.stop.is_set():
@@ -655,7 +697,9 @@ class Engine:
             if self.stop.is_set():
                 break
             try:
-                await self._reconcile_positions(hedge=True)
+                confirmed = await self._reconcile_positions(hedge=True)
+                if self._unresolved_execution and not confirmed:
+                    self._reconcile_evt.set()
             except asyncio.CancelledError:
                 raise
             except Exception:

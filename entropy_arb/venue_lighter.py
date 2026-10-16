@@ -295,8 +295,10 @@ class LighterVenue:
             msg = f"{type(e).__name__}: {e}"
             if getattr(e, "status", None) == 429 or "(429)" in str(e):
                 msg = "RATE_LIMITED: " + msg
-            return {"status": "send-failed", "filled_base": 0.0, "avg_px": None,
-                    "err": msg, "unresolved": False}
+            # A transport/SDK exception may occur after the server accepted
+            # the order. Never treat an unknown send as a proven zero fill.
+            return {"status": "send-unknown", "filled_base": 0.0, "avg_px": None,
+                    "err": msg, "unresolved": True}
         if err is not None or (getattr(resp, "code", 200) or 200) != 200:
             if fut is not None:
                 self.orders_feed.unwatch(coi)
