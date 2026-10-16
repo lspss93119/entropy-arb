@@ -609,11 +609,11 @@ class Engine:
         if self._unresolved_execution:
             if not confirmed:
                 return False
-            # Positions are authoritative here, but order-terminal verification
-            # remains a separate requirement for uncertain accepted orders.
-            self._unresolved_execution = False
-            self._update_evt.set()
-        if hedge:
+            # Position equality does not prove a late fill is impossible.
+            # Keep new entries blocked until pending order terminal state is
+            # confirmed; order-terminal recovery is implemented separately.
+            log.warning("both positions reconciled, pending order terminal verification")
+        if hedge and not self._unresolved_execution:
             await self._maybe_hedge()
         return confirmed
 
