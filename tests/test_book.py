@@ -91,6 +91,31 @@ def test_lighter_diff_maintenance():
     assert b.best_bid() == 98.9 and b.best_ask() == 100.2
 
 
+def test_multilevel_asks_cannot_exceed_planned_leg_caps():
+    # The old top-ask estimate bought 5 units ($540 across the asks) for a
+    # $500 cap; it also overlooked the $650 sell-side notional.
+    buy = make_book(bids=[(99.0, 20)], asks=[(100.0, 1), (110.0, 10)])
+    sell = make_book(bids=[(130.0, 20)], asks=[(131.0, 20)])
+    plan, reason = plan_arb(buy, sell, **common(cap_notional=500.0,
+                                                size_step=0.01))
+    assert reason == "ok"
+    assert abs(plan.qty - 3.84) < 1e-9
+    assert plan.buy_notional <= 500.0 + 1e-8
+    assert plan.sell_notional <= 500.0 + 1e-8
+
+
+def test_multilevel_sell_depth_respects_planned_leg_cap():
+    buy = make_book(bids=[(99.0, 20)], asks=[(100.0, 20)])
+    sell = make_book(bids=[(130.0, 1), (120.0, 20)],
+                     asks=[(131.0, 20)])
+    plan, reason = plan_arb(buy, sell, **common(cap_notional=500.0,
+                                                size_step=0.01))
+    assert reason == "ok"
+    assert abs(plan.qty - 4.08) < 1e-9
+    assert plan.buy_notional <= 500.0 + 1e-8
+    assert plan.sell_notional <= 500.0 + 1e-8
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):

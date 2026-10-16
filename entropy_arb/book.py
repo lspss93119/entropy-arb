@@ -151,6 +151,19 @@ class ArbPlan:
                 - self.buy_notional * (1.0 + self.buy_fee))
 
 
+def _base_within_notional_cap(levels: List[Level], cap_notional: float) -> float:
+    """Maximum base available within the notional budget of one book side."""
+    remaining_usd = max(cap_notional, 0.0)
+    base = 0.0
+    for px, sz in levels:
+        if remaining_usd <= 0.0:
+            break
+        take = min(sz, remaining_usd / px)
+        base += take
+        remaining_usd -= take * px
+    return base
+
+
 def plan_arb(buy_book: OrderBook, sell_book: OrderBook, *, threshold_bps: float,
              buy_fee_bps: float, sell_fee_bps: float, take_fraction: float,
              cap_notional: float, min_base: float, min_notional: float,
@@ -174,7 +187,11 @@ def plan_arb(buy_book: OrderBook, sell_book: OrderBook, *, threshold_bps: float,
     q_max, q_max_notional = crossable_base(asks, bids, threshold, buy_fee, sell_fee)
     if q_max <= 0:
         return None, "no_edge"
-    target = min(q_max * take_fraction, cap_notional / asks[0][0])
+    # The top ask is not the depth-weighted execution price. Apply the
+    # notional cap to BOTH planned legs using their actual available depth.
+    target = min(q_max * take_fraction,
+                 _base_within_notional_cap(asks, cap_notional),
+                 _base_within_notional_cap(bids, cap_notional))
     target = floor_step(target, size_step)
     if target < min_base:
         return None, "below_min_base"
