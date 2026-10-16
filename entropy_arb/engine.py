@@ -780,6 +780,10 @@ class Engine:
                 with open(path) as old:
                     if old.readline().strip() != ",".join(header):
                         path += ".p004.csv"
+            if os.path.exists(path):
+                with open(path) as existing:
+                    if existing.readline().strip() != ",".join(header):
+                        raise ValueError("hedge CSV schema conflict: " + path)
             new = not os.path.exists(path)
             with open(path, "a", newline="") as fh:
                 writer = csv.writer(fh)
@@ -807,6 +811,10 @@ class Engine:
                     if fh0.readline().strip() != ",".join(CSV_HEADER):
                         # Never replace the fixed .old backup on schema changes.
                         path = path + ".p004.csv"
+            if os.path.exists(path):
+                with open(path) as existing:
+                    if existing.readline().strip() != ",".join(CSV_HEADER):
+                        raise ValueError("trade CSV schema conflict: " + path)
             new = not os.path.exists(path)
             with open(path, "a", newline="") as fh:
                 w = csv.writer(fh)
