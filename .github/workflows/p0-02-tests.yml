@@ -26,4 +26,4 @@ jobs:
       - name: Full test suite
         run: python -m pytest -q tests/
       - name: Observe public WebSocket timestamp schemas (read-only)
-        run: python tools/probe_feed_timestamps.py
+        run: python -m tools.probe_feed_timestamps
