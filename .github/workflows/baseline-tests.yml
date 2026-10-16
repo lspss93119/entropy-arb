@@ -1,0 +1,30 @@
+name: Upstream baseline checks
+
+on:
+  push:
+    branches:
+      - audit/phase0-baseline
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  original-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout clean upstream-based branch
+        uses: actions/checkout@v4
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install read-only and test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pytest
+      - name: Check Python syntax
+        run: python -m compileall -q entropy_arb main.py tools tests
+      - name: Run original upstream tests
+        run: python -m pytest -q tests/
