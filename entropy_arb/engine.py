@@ -60,6 +60,9 @@ class Engine:
         self.halted = False
         # New-entry gate stays closed until authoritative positions are read.
         self._unresolved_execution = False
+        # Durable manual-review latch, isolated by market and hedge venue.
+        self._recovery_marker = os.path.abspath(
+            self.cfg.trades_csv + f'.{self.cfg.symbol}.{self.cfg.hedge_venue}.unresolved')
         self.consec_errors = 0
         self.last_trade_ts = 0.0
         self.trades = 0
@@ -115,6 +118,17 @@ class Engine:
     def _record_send(self, v) -> None:
         self._sends.setdefault(v.key, deque()).append(time.time())
 
+    def _persist_unknown(self, reason: str) -> None:
+        directory = os.path.dirname(self._recovery_marker)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        # Never remove or overwrite an existing incident marker.
+        with open(self._recovery_marker, 'a', encoding='utf-8') as fh:
+            fh.write(f'{time.time():.3f} {reason}\n')
+            fh.flush()
+            os.fsync(fh.fileno())
+        self._unresolved_execution = True
+
     def request_stop(self) -> None:
         self.stop.set()
         self._update_evt.set()
@@ -147,6 +161,10 @@ class Engine:
         self.markets_ready = True
 
         live = not self.record_only
+        if live and os.path.exists(self._recovery_marker):
+            raise RuntimeError(
+                'Unresolved execution requires manual review before LIVE restart: '
+                + self._recovery_marker)
         if live:
             if not cfg.creds_complete:
                 raise RuntimeError(
@@ -350,6 +368,11 @@ class Engine:
             self._vlock(buy.key).release()
             self._vlock(sell.key).release()
         if unresolved:
+            try:
+                self._persist_unknown('uncertain execution outcome')
+            except Exception:
+                self.halted = True
+                log.critical('Unable to persist unknown outcome; HALTED', exc_info=True)
             self._unresolved_execution = True
             self._reconcile_evt.set()
         else:
