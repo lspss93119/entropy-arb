@@ -23,7 +23,7 @@ def test_partial_terminal_fill_account_orders_is_preserved():
     asyncio.run(check())
 
 
-def test_lighter_post_send_exception_is_incorrectly_marked_certain_zero(monkeypatch):
+def test_lighter_post_send_exception_is_marked_unresolved(monkeypatch):
     async def check():
         cfg=load_config("/dev/null","/dev/null",symbol="SNDK",hedge_venue="lighter-rh") if False else make_engine().cfg
         venue=LighterVenue(cfg.hedge,None,0.01)
@@ -37,8 +37,8 @@ def test_lighter_post_send_exception_is_incorrectly_marked_certain_zero(monkeypa
         monkeypatch.setitem(sys.modules,"lighter",SimpleNamespace(SignerClient=SimpleNamespace(
             ORDER_TYPE_MARKET=1,ORDER_TIME_IN_FORCE_IMMEDIATE_OR_CANCEL=0,DEFAULT_IOC_EXPIRY=0)))
         res=await venue.send_taker(is_buy=True,qty=1,limit_px=100)
-        assert res["status"]=="send-failed"
-        assert res["unresolved"] is False
+        assert res["status"]=="send-unknown"
+        assert res["unresolved"] is True
         assert res["filled_base"]==0
     asyncio.run(check())
 
