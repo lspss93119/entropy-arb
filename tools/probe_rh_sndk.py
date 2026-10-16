@@ -1,3 +1,56 @@
+"""P0-02 RH SNDK public feed validation. No credentials or order actions."""
+import asyncio
+import json
+import math
+import statistics
+import time
+import urllib.request
+from websockets.asyncio.client import connect
+
+REST = "https://api.rh.lighter.xyz/api/v1"
+WS = "wss://api.rh.lighter.xyz/stream?readonly=true"
+
+def resolve_market():
+    # Never assume that Core and RH have the same market IDs.
+    for endpoint in ("orderBooks", "orderBookDetails"):
+        try:
+            with urllib.request.urlopen(f"{REST}/{endpoint}", timeout=12) as response:
+                data = json.load(response)
+            if data.get("code") not in (None, 200):
+                raise ValueError("API code not successful")
+            entries = next((data[k] for k in ("order_books", "order_book_details", "orderBooks") if isinstance(data.get(k), list)), None)
+            if entries is None:
+                raise ValueError(f"unrecognized metadata schema keys={list(data)}")
+            matches = [x for x in entries if str(x.get("symbol", "")).upper() == "SNDK"]
+            if len(matches) != 1:
+                raise ValueError(f"SNDK exact matches={len(matches)}")
+            entry = matches[0]
+            if entry.get("status") in ("inactive", "delisted"):
+                raise ValueError("SNDK is inactive")
+            return int(entry["market_id"]), endpoint
+        except Exception as exc:
+            last_error = f"{endpoint}: {type(exc).__name__}: {exc}"
+    raise RuntimeError(last_error)
+
+async def observe(market_id, seconds=75):
+    event_ages, last_event_ages, gaps = [], [], []
+    messages, missing, invalid, updates = 0, 0, 0, 0
+    last_update = None
+    latest_source_ts = None
+    sampled_quote_ages = []
+    no_book_samples = 0
+    begin = time.monotonic()
+    async def sample_every_second():
+        nonlocal no_book_samples
+        while time.monotonic() - begin < seconds:
+            await asyncio.sleep(1.0)
+            if latest_source_ts is None:
+                no_book_samples += 1
+            else:
+                sampled_quote_ages.append(time.time() - latest_source_ts)
+    sampler = asyncio.create_task(sample_every_second())
+    try:
+        async with connect(WS, open_timeout=12, close_timeout=4, ping_interval=15) as ws:
             await ws.send(json.dumps({"type":"subscribe","channel":f"order_book/{market_id}"}))
             while time.monotonic() - begin < seconds:
                 try:
@@ -41,7 +94,7 @@
                 if last_update is not None:
                     gaps.append(time.time() - last_update)
                 last_update = time.time()
-                latest_source_ts = event_time
+            latest_source_ts = event_time
     finally:
         sampler.cancel()
         await asyncio.gather(sampler, return_exceptions=True)
