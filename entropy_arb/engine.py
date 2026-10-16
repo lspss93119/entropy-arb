@@ -340,6 +340,7 @@ class Engine:
         outcomes escalate to reconcile, everything else gets a net-delta
         check."""
         unresolved = False
+        self._last_execution_id = None
         try:
             unresolved = await self._execute(buy, sell, plan)
         except asyncio.CancelledError:
@@ -352,7 +353,7 @@ class Engine:
         if unresolved:
             self._reconcile_evt.set()
         else:
-            await self._maybe_hedge()
+            await self._maybe_hedge(execution_id=self._last_execution_id)
         self._update_evt.set()  # freed venues may have a queued opportunity
 
     def _scan(self, now: float):
@@ -516,12 +517,12 @@ class Engine:
             "exp": plan.exp_edge_usd, "fill": fill_edge, "status": status,
             "ok": ok})
 
-    async def _maybe_hedge(self) -> None:
+    async def _maybe_hedge(self, execution_id=None) -> None:
         net = sum(v.position for v in self.venues.values())
         if abs(net) > self.cfg.net_tolerance_base:
-            await self._hedge(net)
+            await self._hedge(net, execution_id=execution_id)
 
-    async def _hedge(self, net: float) -> None:
+    async def _hedge(self, net: float, execution_id=None) -> None:
         """Reduce the venue that carries the imbalance back toward net zero
         (reduce-only taker with hedge_slippage_bps price protection)."""
         cfg = self.cfg
@@ -554,8 +555,13 @@ class Engine:
                             net, "SELL" if is_sell else "BUY", qty, v.name, limit)
                 self.hedges += 1
                 self._record_send(v)  # counts toward the budget, never blocked
+                hedge_send_ts = time.time()
                 info = await v.send_taker(is_buy=not is_sell, qty=qty,
                                           limit_px=limit, reduce_only=True)
+                hedge_settled_ts = time.time()
+                self._log_hedge_csv(execution_id, v, 'sell' if is_sell else 'buy',
+                                    qty, limit, info, hedge_send_ts,
+                                    hedge_settled_ts)
                 if info.get("err") or info.get("unresolved"):
                     log.error("[HEDGE] %s: %s", v.name,
                               info.get("err") or "unresolved")
@@ -758,6 +764,34 @@ class Engine:
                      f"${pnl:+.4f}" if pnl is not None else "—",
                      self.total_exp_edge, self.total_fill_edge, rec,
                      " *** HALTED ***" if self.halted else "")
+
+    def _log_hedge_csv(self, execution_id, venue, side, qty, limit, info,
+                       send_ts, settled_ts) -> None:
+        """Independent hedge events, with unknown parent left blank."""
+        try:
+            path = self.cfg.trades_csv + ".hedges.csv"
+            d = os.path.dirname(path)
+            if d:
+                os.makedirs(d, exist_ok=True)
+            header = ["execution_id", "send_ts", "settled_ts", "venue", "side",
+                      "requested_qty", "limit_px", "filled_qty", "avg_px",
+                      "fee_bps", "status", "unresolved", "error"]
+            if os.path.exists(path):
+                with open(path) as old:
+                    if old.readline().strip() != ",".join(header):
+                        path += ".p004.csv"
+            new = not os.path.exists(path)
+            with open(path, "a", newline="") as fh:
+                writer = csv.writer(fh)
+                if new:
+                    writer.writerow(header)
+                writer.writerow([execution_id or "", send_ts, settled_ts,
+                                 venue.name, side, qty, limit,
+                                 info.get("filled_base"), info.get("avg_px"),
+                                 venue.fee_bps, info.get("status"),
+                                 info.get("unresolved"), info.get("err")])
+        except Exception:
+            log.exception("hedge csv write failed")
 
     def _log_csv(self, direction, buy, sell, plan: ArbPlan, ok: bool, bfill,
                  sfill, bstatus, sstatus, fill_edge, inv_bps, *,
