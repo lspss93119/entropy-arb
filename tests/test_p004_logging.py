@@ -64,3 +64,21 @@ def test_hedge_event_records_fill_and_nullable_parent(tmp_path):
     assert rows[0]["avg_px"]=="100.5"
     assert rows[1]["execution_id"]==""
     assert rows[1]["avg_px"]=="" and rows[1]["unresolved"]=="True"
+
+
+def test_secondary_schema_conflict_is_not_appended(tmp_path, caplog):
+    eng = make_engine()
+    primary = tmp_path/"trades.csv"
+    secondary = tmp_path/"trades.csv.p004.csv"
+    primary.write_text("old,header\n1,2\n")
+    secondary.write_text("other,header\n3,4\n")
+    eng.cfg.trades_csv = str(primary)
+    plan = SimpleNamespace(qty=1, buy_limit=100, sell_limit=101,
+                           buy_notional=100, sell_notional=101,
+                           exp_edge_usd=1, gross_edge_usd=1,
+                           marginal_premium_bps=100)
+    eng._log_csv("sell_entropy", eng.hedge, eng.entropy, plan, True, 1, 1,
+                 "filled", "filled", 1, 0)
+    assert primary.read_text() == "old,header\n1,2\n"
+    assert secondary.read_text() == "other,header\n3,4\n"
+    assert "trade CSV schema conflict" in caplog.text
