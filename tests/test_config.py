@@ -87,6 +87,13 @@ def test_markets_no_longer_config_keys():
                  "unknown config key 'hedge_venue'")
 
 
+def test_source_age_gate_opt_in_and_validation():
+    assert load(MINIMAL).max_quote_age_sec == 0.0
+    assert load(MINIMAL + "\nexecution:\n  max_quote_age_sec: 30\n").max_quote_age_sec == 30.0
+    expect_error(MINIMAL + "\nexecution:\n  max_quote_age_sec: -1\n", "max_quote_age_sec")
+    expect_error(MINIMAL + "\nexecution:\n  max_quote_age_sec: .nan\n", "max_quote_age_sec")
+
+
 def test_bad_cli_markets():
     expect_error(MINIMAL, "--hedge", hedge="binance")
     expect_error(MINIMAL, "--symbol", symbol="")
