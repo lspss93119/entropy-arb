@@ -25,3 +25,5 @@ jobs:
         run: python -m compileall -q entropy_arb main.py tools tests
       - name: Full test suite
         run: python -m pytest -q tests/
+      - name: Observe public WebSocket timestamp schemas (read-only)
+        run: python tools/probe_feed_timestamps.py
