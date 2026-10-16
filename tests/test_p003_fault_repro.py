@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from test_engine import make_engine
 
 
-def test_unknown_leg_unlocks_venues_without_new_entry_gate():
+def test_unknown_leg_blocks_new_entries_until_verified():
     async def scenario():
         eng = make_engine()
         buy, sell = eng.hedge, eng.entropy
@@ -31,17 +31,18 @@ def test_unknown_leg_unlocks_venues_without_new_entry_gate():
         assert not eng._vlock(buy.key).locked()
         assert not eng._vlock(sell.key).locked()
         assert not eng.halted
+        assert eng._unresolved_execution is True
         assert calls == []
         # New book updates can permit a fresh signal before reconciliation.
         sell.set_book(100.14, 100.16)
         buy.set_book(99.99, 100.01)
         eng._scan(__import__("time").time())
         new_entry = eng._scan(__import__("time").time())
-        assert new_entry is not None
+        assert new_entry is None
     asyncio.run(scenario())
 
 
-def test_execution_exception_still_triggers_hedge_path():
+def test_execution_exception_requires_reconcile_without_hedging():
     async def scenario():
         eng = make_engine()
         buy, sell = eng.hedge, eng.entropy
@@ -55,7 +56,8 @@ def test_execution_exception_still_triggers_hedge_path():
         await eng._vlock(buy.key).acquire()
         await eng._vlock(sell.key).acquire()
         await eng._execute_locked(buy, sell, object())
-        assert calls == ["hedge"]
-        assert not eng._reconcile_evt.is_set()
+        assert calls == []
+        assert eng._reconcile_evt.is_set()
+        assert eng._unresolved_execution is True
         assert not eng.halted
     asyncio.run(scenario())
