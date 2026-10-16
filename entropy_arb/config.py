@@ -21,6 +21,7 @@ Threshold model (fixed numbers the user derives from recorded minute data):
 """
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
@@ -121,6 +122,7 @@ class Config:
     max_consecutive_errors: int
     rate_limit_pause_sec: float
     staleness_sec: float
+    max_quote_age_sec: float  # 0 keeps upstream connection-only logic
     reconcile_sec: float
     venue_probe_sec: float
     http_keepalive_sec: float
@@ -187,6 +189,7 @@ _SCHEMA: Dict[str, Any] = {
         "max_consecutive_errors": int,
         "rate_limit_pause_sec": float,
         "staleness_sec": float,
+        "max_quote_age_sec": float,
         "reconcile_sec": float,
         "venue_probe_sec": float,
         "http_keepalive_sec": float,
@@ -291,6 +294,10 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
                           "more than the profitable depth loses money on the "
                           "tail / 必须在 (0, 1] 之间")
 
+    max_quote_age_sec = float(_get(raw, "execution", "max_quote_age_sec", 0.0))
+    if not math.isfinite(max_quote_age_sec) or max_quote_age_sec < 0:
+        raise ConfigError("execution.max_quote_age_sec must be finite and >= 0")
+
     entropy_dex = _get(raw, "entropy", "dex", "io")
     if hedge_venue == "tradexyz" and entropy_dex == "xyz":
         raise ConfigError("entropy.dex 'xyz' with hedge_venue 'tradexyz' is "
@@ -356,6 +363,7 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         max_consecutive_errors=int(_get(raw, "execution", "max_consecutive_errors", 3)),
         rate_limit_pause_sec=float(_get(raw, "execution", "rate_limit_pause_sec", 10.0)),
         staleness_sec=float(_get(raw, "execution", "staleness_sec", 10.0)),
+        max_quote_age_sec=max_quote_age_sec,
         reconcile_sec=float(_get(raw, "execution", "reconcile_sec", 15.0)),
         venue_probe_sec=float(_get(raw, "execution", "venue_probe_sec", 30.0)),
         http_keepalive_sec=float(_get(raw, "execution", "http_keepalive_sec", 10.0)),
