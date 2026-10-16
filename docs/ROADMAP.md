@@ -29,7 +29,7 @@
 | ID / Phase | 範圍 | 目前狀態 | 追蹤 |
 |---|---|---|---|
 | P0-01 | 雙腿預估名義金額限制 | 已實作、審查與 CI PASS；尚待合併決策 | [#1](https://github.com/lspss93119/entropy-arb/issues/1) |
-| P0-02 | 訂單簿時間戳、連線存活與行情有效性 | 研究與事前計畫完成；**尚未核准實作** | [#2](https://github.com/lspss93119/entropy-arb/issues/2) |
+| P0-02 | 訂單簿時間戳、連線存活與行情有效性 | 獨立分支已實作，40 tests PASS；**Draft PR #4 待 RH 唯讀驗證，未合併部署** | [#2](https://github.com/lspss93119/entropy-arb/issues/2) · [PR #4](https://github.com/lspss93119/entropy-arb/pull/4) |
 | P0-03 | 不確定成交、部分成交與雙腿恢復 | 尚未研究 | 待安排 |
 | P0-04 | 訊號、下單與實際成交滑點／延遲歸因 | 尚未研究 | 待安排 |
 | Phase 1 | 動態進出場門檻（以原版交易語義為基準） | 尚未研究／實作 | 待安排 |
