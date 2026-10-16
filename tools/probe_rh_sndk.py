@@ -94,7 +94,7 @@ async def observe(market_id, seconds=75):
                 if last_update is not None:
                     gaps.append(time.time() - last_update)
                 last_update = time.time()
-            latest_source_ts = event_time
+                latest_source_ts = event_time
     finally:
         sampler.cancel()
         await asyncio.gather(sampler, return_exceptions=True)
