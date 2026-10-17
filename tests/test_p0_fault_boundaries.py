@@ -39,8 +39,8 @@ def test_csv_write_failure_does_not_change_execution_decision(tmp_path, monkeypa
     asyncio.run(scenario())
 
 
-def test_marker_is_only_created_after_execution_returns_unknown(tmp_path):
-    """Characterization: this version still has a crash window before marker."""
+def test_marker_is_created_before_execution_settles(tmp_path):
+    """Pre-send durability: marker exists while order awaits its response."""
     async def scenario():
         eng=make_engine()
         eng._recovery_marker=str(tmp_path/"incident.unresolved")
@@ -56,7 +56,7 @@ def test_marker_is_only_created_after_execution_returns_unknown(tmp_path):
             await eng._vlock(venue.key).acquire()
         task=asyncio.create_task(eng._execute_locked(buy,sell,object()))
         await entered.wait()
-        assert not (tmp_path/"incident.unresolved").exists()
+        assert (tmp_path/"incident.unresolved").exists()
         release.set()
         await task
         assert (tmp_path/"incident.unresolved").exists()
