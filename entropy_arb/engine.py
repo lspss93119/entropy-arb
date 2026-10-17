@@ -722,7 +722,7 @@ class Engine:
             # Keep new entries blocked until pending order terminal state is
             # confirmed; order-terminal recovery is implemented separately.
             log.warning("both positions reconciled, pending order terminal verification")
-        if hedge and not self._unresolved_execution:
+        if hedge and not self._unresolved_execution and not self._settlement_pending:
             await self._maybe_hedge()
         return confirmed
 
