@@ -62,6 +62,7 @@ class Engine:
         self.halted = False
         # New-entry gate stays closed until authoritative positions are read.
         self._unresolved_execution = False
+        self._settlement_pending = False  # includes hedge and marker cleanup
         # Durable manual-review latch, isolated by market and hedge venue.
         self._recovery_marker = os.path.abspath(
             self.cfg.trades_csv + f'.{self.cfg.symbol}.{self.cfg.hedge_venue}.unresolved')
@@ -349,7 +350,7 @@ class Engine:
 
     async def _evaluate(self) -> None:
         cfg = self.cfg
-        if self.halted or self._unresolved_execution:
+        if self.halted or self._unresolved_execution or self._settlement_pending:
             return
         now = time.time()
         if now - self.last_trade_ts < cfg.cooldown_sec:
@@ -377,6 +378,7 @@ class Engine:
         check."""
         unresolved = False
         prepared = False
+        self._settlement_pending = True
         self._last_execution_id = None
         # Durable write happens before either leg can reach a venue.
         try:
@@ -426,13 +428,14 @@ class Engine:
                     log.exception('hedge/marker settlement uncertain; manual review required')
                     self._unresolved_execution = True
                     self._reconcile_evt.set()
+        self._settlement_pending = False
         self._update_evt.set()  # freed venues may have a queued opportunity
 
     def _scan(self, now: float):
         """Evaluate both directions; returns the best executable
         (buy, sell, plan), or None."""
         cfg = self.cfg
-        if self._unresolved_execution:
+        if self._unresolved_execution or self._settlement_pending:
             return None
         best = None
         for buy, sell, dkey in ((self.hedge, self.entropy, "sell_entropy"),
