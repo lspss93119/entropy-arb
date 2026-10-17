@@ -1,4 +1,5 @@
 """P0-02 RH SNDK public feed validation. No credentials or order actions."""
+import argparse
 import asyncio
 import json
 import math
@@ -32,9 +33,12 @@ def resolve_market():
             last_error = f"{endpoint}: {type(exc).__name__}: {exc}"
     raise RuntimeError(last_error)
 
-async def observe(market_id, seconds=75):
+async def observe(market_id, seconds=600):
     event_ages, last_event_ages, gaps = [], [], []
     messages, missing, invalid, updates = 0, 0, 0, 0
+    sample_connection_ages = []
+    sample_gates = {str(t): {"eligible": 0, "blocked": 0} for t in (0, 0.5, 1, 2, 5, 10, 30, 60)}
+    first_valid_book = False
     last_update = None
     latest_source_ts = None
     sampled_quote_ages = []
@@ -47,7 +51,13 @@ async def observe(market_id, seconds=75):
             if latest_source_ts is None:
                 no_book_samples += 1
             else:
-                sampled_quote_ages.append(time.time() - latest_source_ts)
+                age = time.time() - latest_source_ts
+                sampled_quote_ages.append(age)
+                for threshold, counts in sample_gates.items():
+                    counts["eligible"] += 1
+                    # Source freshness is an OPTIONAL extra check: compare thresholds.
+                    if float(threshold) > 0 and (age < 0 or age > float(threshold)):
+                        counts["blocked"] += 1
     sampler = asyncio.create_task(sample_every_second())
     try:
         async with connect(WS, open_timeout=12, close_timeout=4, ping_interval=15) as ws:
@@ -111,13 +121,14 @@ async def observe(market_id, seconds=75):
             "observed_quote_age_sec":stats(last_event_ages),
             "sampled_quote_age_sec":stats(sampled_quote_ages),
             "no_book_samples":no_book_samples,
+            "sampled_threshold_gate":{k: {"eligible":v["eligible"],"blocked":v["blocked"],"blocked_fraction":round(v["blocked"]/v["eligible"],4) if v["eligible"] else None} for k,v in sample_gates.items()},
             "hypothetical_reject_fraction":{str(t):round(sum(a>t or a < -2 for a in sampled_quote_ages)/len(sampled_quote_ages),4) if sampled_quote_ages else None for t in (2,5,10,30,60)}}
 
-async def main():
+async def main(seconds=600):
     try:
         market, endpoint = await asyncio.to_thread(resolve_market)
         print("P0-02 RH MARKET",json.dumps({"symbol":"SNDK","market_id":market,"metadata_endpoint":endpoint}))
-        result = await observe(market)
+        result = await observe(market, seconds)
         result.update({"symbol":"SNDK","market_id":market})
         print("P0-02 RH RESULT",json.dumps(result,sort_keys=True))
         if result["messages"] == 0 or not result["event_age_sec"]:
@@ -127,4 +138,9 @@ async def main():
         raise
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    parser = argparse.ArgumentParser(description="RH SNDK public read-only feed probe")
+    parser.add_argument("--seconds",type=int,default=600)
+    args = parser.parse_args()
+    if not 30 <= args.seconds <= 3600:
+        parser.error("--seconds must be 30..3600")
+    asyncio.run(main(args.seconds))
