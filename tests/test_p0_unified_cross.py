@@ -9,20 +9,22 @@ from entropy_arb.engine import Engine
 
 
 def test_p001_cap_is_respected_with_p002_freshness():
-    eng=make_engine(midline=0,upper=1,lower=1)
-    eng.cfg.max_order_notional=100.0
-    eng.entropy.set_book(100.14,100.16)
-    eng.hedge.set_book(99.99,100.01)
-    first=eng._scan(time.time())
-    best=eng._scan(time.time())
-    assert best is not None
-    buy,sell,plan=best
-    assert plan.buy_notional <= 100.000001
-    assert plan.sell_notional <= 100.000001
-    # A stale/expired market should veto the whole operation, irrespective of cap.
-    eng.entropy.book.alive_ts=0
-    assert eng._scan(time.time()) is None
+    async def check():
+        eng=make_engine(midline=0,upper=1,lower=1)
+        eng.cfg.max_order_notional=100.0
+        eng.entropy.set_book(100.14,100.16)
+        eng.hedge.set_book(99.99,100.01)
+        first=eng._scan(time.time())
+        best=eng._scan(time.time())
+        assert best is not None
+        buy,sell,plan=best
+        assert plan.buy_notional <= 100.000001
+        assert plan.sell_notional <= 100.000001
+        # A stale/expired market should veto the whole operation, irrespective of cap.
+        eng.entropy.book.alive_ts=0
+        assert eng._scan(time.time()) is None
 
+    asyncio.run(check())
 
 def test_p003_unknown_gate_with_p002_live_book_and_p004_logging(tmp_path):
     async def scenario():
