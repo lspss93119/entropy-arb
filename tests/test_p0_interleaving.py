@@ -25,9 +25,8 @@ def test_hedge_pending_must_block_new_signal(tmp_path):
         await asyncio.wait_for(entered.wait(),2)
         assert Path(eng._recovery_marker).exists()
         # No new signal or entry is permitted while previous hedge is pending.
-        assert eng._unresolved_execution or eng.halted or (
-            eng._vlock(buy.key).locked() and eng._vlock(sell.key).locked()
-        )
+        assert eng._settlement_pending
+        assert eng._scan(__import__("time").time()) is None
         release.set()
         await task
     asyncio.run(scenario())
@@ -56,9 +55,8 @@ def test_reconcile_interleave_cannot_clear_pending_marker(tmp_path):
         eng._reconcile_positions=fake_reconcile
         await eng._reconcile_positions(hedge=True)
         assert Path(eng._recovery_marker).exists()
-        assert eng._unresolved_execution or (
-            eng._vlock(buy.key).locked() and eng._vlock(sell.key).locked()
-        )
+        assert eng._settlement_pending
+        assert eng._scan(__import__("time").time()) is None
         release.set()
         await task
     asyncio.run(scenario())
