@@ -407,6 +407,7 @@ class Engine:
                     await self._maybe_hedge(execution_id=self._last_execution_id)
                     net = sum(v.position for v in self.venues.values())
                     if self._unresolved_execution or abs(net) > self.cfg.net_tolerance_base:
+                        self._unresolved_execution = True
                         self._reconcile_evt.set()
                     else:
                         self._clear_review_marker()
