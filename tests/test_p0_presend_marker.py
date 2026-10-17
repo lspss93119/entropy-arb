@@ -75,5 +75,5 @@ def test_unbalanced_or_failed_hedge_preserves_marker(tmp_path):
         for v in (buy,sell): await eng._vlock(v.key).acquire()
         await eng._execute_locked(buy,sell,object())
         assert Path(eng._recovery_marker).exists()
-        assert eng._unresolved_execution is False
+        assert eng._unresolved_execution is True
     asyncio.run(run())
