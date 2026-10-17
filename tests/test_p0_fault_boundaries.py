@@ -15,6 +15,7 @@ def test_csv_write_failure_does_not_change_execution_decision(tmp_path, monkeypa
         buy,sell=eng.hedge,eng.entropy
         for venue in (buy,sell):
             venue.px_round=lambda p,round_up=False:p
+            venue.volume_usd=0.0
         async def filled_buy(**kwargs):
             return {"status":"filled","filled_base":1.0,"avg_px":100.01,
                     "err":None,"unresolved":False}
