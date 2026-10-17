@@ -19,6 +19,7 @@ import csv
 import logging
 import os
 import time
+import uuid
 from collections import deque
 from typing import Dict, List, Optional
 
@@ -36,7 +37,8 @@ CSV_HEADER = ["ts", "direction", "buy_venue", "sell_venue", "qty",
               "buy_limit", "sell_limit", "buy_notional", "sell_notional",
               "exp_edge_usd", "gross_edge_usd", "marginal_premium_bps",
               "midline_bps", "inv_add_bps", "ok", "buy_fill", "sell_fill",
-              "buy_status", "sell_status", "fill_edge_usd"]
+              "buy_status", "sell_status", "fill_edge_usd",
+              "execution_id", "send_ts", "settled_ts", "buy_avg_px", "sell_avg_px"]
 BALANCE_POLL_SEC = 30.0
 
 
@@ -90,6 +92,7 @@ class Engine:
         self._venue_fetch_fails: Dict[str, int] = {}
         # per-execution records for the dashboard (newest last)
         self.recent_trades: deque = deque(maxlen=50)
+        self._last_execution_id: Optional[str] = None
 
     # ------------------------------------------------------------- utilities
 
@@ -357,6 +360,7 @@ class Engine:
         outcomes escalate to reconcile, everything else gets a net-delta
         check."""
         unresolved = False
+        self._last_execution_id = None
         try:
             unresolved = await self._execute(buy, sell, plan)
         except asyncio.CancelledError:
@@ -376,7 +380,7 @@ class Engine:
             self._unresolved_execution = True
             self._reconcile_evt.set()
         else:
-            await self._maybe_hedge()
+            await self._maybe_hedge(execution_id=self._last_execution_id)
         self._update_evt.set()  # freed venues may have a queued opportunity
 
     def _scan(self, now: float):
@@ -388,8 +392,8 @@ class Engine:
         best = None
         for buy, sell, dkey in ((self.hedge, self.entropy, "sell_entropy"),
                                 (self.entropy, self.hedge, "buy_entropy")):
-            if not (buy.book.is_fresh(cfg.staleness_sec)
-                    and sell.book.is_fresh(cfg.staleness_sec)):
+            if not (buy.book.is_fresh(cfg.staleness_sec, cfg.max_quote_age_sec)
+                    and sell.book.is_fresh(cfg.staleness_sec, cfg.max_quote_age_sec)):
                 continue
             if not (buy.ready_to_trade() and sell.ready_to_trade()):
                 continue
@@ -447,6 +451,8 @@ class Engine:
         inv_bps = self._inv_add_bps(buy, sell)
         direction = "sell_entropy" if sell.key == "entropy" else "buy_entropy"
         self.last_trade_ts = time.time()
+        execution_id = uuid.uuid4().hex
+        self._last_execution_id = execution_id
         log.info("[ARB] %s: BUY %s %.6g @<=%.6g | SELL %s @>=%.6g | "
                  "take $%.0f of $%.0f | prem %.2fbps | exp $%.4f",
                  direction, buy.name, plan.qty, plan.buy_limit, sell.name,
@@ -457,10 +463,12 @@ class Engine:
         sell_bound = sell.px_round(plan.sell_limit * (1 - slip), round_up=True)
         self._record_send(buy)
         self._record_send(sell)
+        send_ts = time.time()
         res = await asyncio.gather(
             buy.send_taker(is_buy=True, qty=plan.qty, limit_px=buy_bound),
             sell.send_taker(is_buy=False, qty=plan.qty, limit_px=sell_bound),
             return_exceptions=True)
+        settled_ts = time.time()
         binfo, sinfo = (r if isinstance(r, dict) else
                         {"status": "unknown-exception", "filled_base": 0.0,
                          "avg_px": None, "err": repr(r), "unresolved": True}
@@ -522,7 +530,10 @@ class Engine:
                            None if unresolved else fill_edge,
                            f"{binfo['status']}/{sinfo['status']}", sent_ok)
         self._log_csv(direction, buy, sell, plan, sent_ok, bfill, sfill,
-                      binfo["status"], sinfo["status"], fill_edge, inv_bps)
+                      binfo["status"], sinfo["status"], fill_edge, inv_bps,
+                      execution_id=execution_id, send_ts=send_ts,
+                      settled_ts=settled_ts, buy_avg_px=binfo.get("avg_px"),
+                      sell_avg_px=sinfo.get("avg_px"))
         self.last_trade_ts = time.time()
         return bool(unresolved)
 
@@ -535,12 +546,12 @@ class Engine:
             "exp": plan.exp_edge_usd, "fill": fill_edge, "status": status,
             "ok": ok})
 
-    async def _maybe_hedge(self) -> None:
+    async def _maybe_hedge(self, execution_id=None) -> None:
         net = sum(v.position for v in self.venues.values())
         if abs(net) > self.cfg.net_tolerance_base:
-            await self._hedge(net)
+            await self._hedge(net, execution_id=execution_id)
 
-    async def _hedge(self, net: float) -> None:
+    async def _hedge(self, net: float, execution_id=None) -> None:
         """Reduce the venue that carries the imbalance back toward net zero
         (reduce-only taker with hedge_slippage_bps price protection)."""
         cfg = self.cfg
@@ -552,7 +563,7 @@ class Engine:
             if v.position * sgn <= 0:
                 continue
             if v.key in self._venue_down \
-                    or not v.book.is_fresh(cfg.staleness_sec):
+                    or not v.book.is_fresh(cfg.staleness_sec, cfg.max_quote_age_sec):
                 continue  # unreachable or blind: cannot hedge here
             lk = self._vlock(v.key)
             if lk.locked():
@@ -573,8 +584,13 @@ class Engine:
                             net, "SELL" if is_sell else "BUY", qty, v.name, limit)
                 self.hedges += 1
                 self._record_send(v)  # counts toward the budget, never blocked
+                hedge_send_ts = time.time()
                 info = await v.send_taker(is_buy=not is_sell, qty=qty,
                                           limit_px=limit, reduce_only=True)
+                hedge_settled_ts = time.time()
+                self._log_hedge_csv(execution_id, v, 'sell' if is_sell else 'buy',
+                                    qty, limit, info, hedge_send_ts,
+                                    hedge_settled_ts)
                 if info.get("err") or info.get("unresolved"):
                     log.error("[HEDGE] %s: %s", v.name,
                               info.get("err") or "unresolved")
@@ -793,8 +809,42 @@ class Engine:
                      self.total_exp_edge, self.total_fill_edge, rec,
                      " *** HALTED ***" if self.halted else "")
 
+    def _log_hedge_csv(self, execution_id, venue, side, qty, limit, info,
+                       send_ts, settled_ts) -> None:
+        """Independent hedge events; unknown parent remains empty."""
+        try:
+            path = self.cfg.trades_csv + ".hedges.csv"
+            d = os.path.dirname(path)
+            if d:
+                os.makedirs(d, exist_ok=True)
+            header = ["execution_id", "send_ts", "settled_ts", "venue", "side",
+                      "requested_qty", "limit_px", "filled_qty", "avg_px",
+                      "fee_bps", "status", "unresolved", "error"]
+            if os.path.exists(path):
+                with open(path) as old:
+                    if old.readline().strip() != ",".join(header):
+                        path += ".p004.csv"
+            if os.path.exists(path):
+                with open(path) as existing:
+                    if existing.readline().strip() != ",".join(header):
+                        raise ValueError("hedge CSV schema conflict: " + path)
+            new = not os.path.exists(path)
+            with open(path, "a", newline="") as fh:
+                writer = csv.writer(fh)
+                if new:
+                    writer.writerow(header)
+                writer.writerow([execution_id or "", send_ts, settled_ts,
+                                 venue.name, side, qty, limit,
+                                 info.get("filled_base"), info.get("avg_px"),
+                                 venue.fee_bps, info.get("status"),
+                                 info.get("unresolved"), info.get("err")])
+        except Exception:
+            log.exception("hedge csv write failed")
+
     def _log_csv(self, direction, buy, sell, plan: ArbPlan, ok: bool, bfill,
-                 sfill, bstatus, sstatus, fill_edge, inv_bps) -> None:
+                 sfill, bstatus, sstatus, fill_edge, inv_bps, *,
+                 execution_id='', send_ts=None, settled_ts=None,
+                 buy_avg_px=None, sell_avg_px=None) -> None:
         try:
             path = self.cfg.trades_csv
             d = os.path.dirname(path)
@@ -803,7 +853,11 @@ class Engine:
             if os.path.exists(path):
                 with open(path) as fh0:
                     if fh0.readline().strip() != ",".join(CSV_HEADER):
-                        os.replace(path, path + ".old")
+                        path = path + ".p004.csv"
+            if os.path.exists(path):
+                with open(path) as existing:
+                    if existing.readline().strip() != ",".join(CSV_HEADER):
+                        raise ValueError("trade CSV schema conflict: " + path)
             new = not os.path.exists(path)
             with open(path, "a", newline="") as fh:
                 w = csv.writer(fh)
@@ -817,6 +871,8 @@ class Engine:
                             f"{plan.marginal_premium_bps:.3f}",
                             f"{self.cfg.midline_bps:.3f}",
                             f"{inv_bps:.3f}", int(ok), f"{bfill:.8g}",
-                            f"{sfill:.8g}", bstatus, sstatus, f"{fill_edge:.4f}"])
+                            f"{sfill:.8g}", bstatus, sstatus, f"{fill_edge:.4f}",
+                            execution_id, send_ts, settled_ts,
+                            buy_avg_px, sell_avg_px])
         except Exception:
             log.exception("csv write failed")
