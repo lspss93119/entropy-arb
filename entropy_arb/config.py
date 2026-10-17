@@ -56,6 +56,14 @@ LIGHTER_PROFILES: Dict[str, LighterProfile] = {
 }
 
 
+MARKET_SYMBOLS = {
+    "OAI": {"lighter": "OPENAI", "lighter-rh": "OPENAI"},
+    "ANTH": {"lighter": "ANTHROPIC", "lighter-rh": "ANTHROPIC"},
+    "SNDK": {"lighter": "SNDK", "lighter-rh": "SNDK"},
+    "NBIS": {"lighter": "NBIS", "lighter-rh": "NBIS"},
+}
+
+
 @dataclass
 class LighterCreds:
     account_index: Optional[int]
@@ -253,6 +261,24 @@ def _env_i(name: str) -> Optional[int]:
     return int(v) if v not in (None, "") else None
 
 
+def _canonical_symbol(value: str) -> str:
+    candidate = value.strip().upper()
+    matches = []
+    for canonical, venue_symbols in MARKET_SYMBOLS.items():
+        names = {canonical, *venue_symbols.values()}
+        if candidate in {name.upper() for name in names}:
+            matches.append(canonical)
+    if len(matches) > 1:
+        raise ConfigError(
+            f"symbol {value!r} is ambiguous across market aliases: "
+            f"{', '.join(matches)}")
+    return matches[0] if matches else candidate
+
+
+def _native_symbol(canonical: str, hedge_venue: str) -> str:
+    return MARKET_SYMBOLS.get(canonical, {}).get(hedge_venue, canonical)
+
+
 # -------------------------------------------------------------------- loading
 
 def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
@@ -268,7 +294,7 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
             f"config.example.yaml 为 config.yaml 并修改")
     _validate(raw, _SCHEMA)
 
-    symbol = (symbol or "").strip()
+    symbol = _canonical_symbol(symbol or "")
     if not symbol:
         raise ConfigError("--symbol is required, e.g. --symbol SNDK / "
                           "必须用 --symbol 指定交易品种")
@@ -328,10 +354,11 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
                 _env_s("HL_ACCOUNT_ADDRESS_XYZ") or _env_s("HL_ACCOUNT_ADDRESS")),
         )
     else:
+        lighter_symbol = _native_symbol(symbol, hedge_venue)
         hedge = VenueConf(
             key="hedge", kind="lighter",
             label="LIGHTER" if hedge_venue == "lighter" else "RH",
-            symbol=symbol,
+            symbol=lighter_symbol,
             fee_bps=float(_get(raw, "hedge", "taker_fee_bps", 0.0)),
             cap_usd=float(_get(raw, "hedge", "max_position_usd", 1000.0)),
             orders_per_min=int(_get(raw, "hedge", "max_orders_per_min", 30)),
@@ -368,10 +395,10 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         venue_probe_sec=float(_get(raw, "execution", "venue_probe_sec", 30.0)),
         http_keepalive_sec=float(_get(raw, "execution", "http_keepalive_sec", 10.0)),
         recorder_enabled=bool(_get(raw, "recorder", "enabled", True)),
-        recorder_csv=_get(raw, "recorder", "csv", "logs/minutes.csv"),
+        recorder_csv=_get(raw, "recorder", "csv", "logs/record/minutes.csv"),
         log_level=str(_get(raw, "logging", "level", "INFO")).upper(),
         status_interval_sec=float(_get(raw, "logging", "status_interval_sec", 30.0)),
-        trades_csv=_get(raw, "logging", "trades_csv", "logs/trades.csv"),
+        trades_csv=_get(raw, "logging", "trades_csv", "logs/trades/trades.csv"),
         dashboard=bool(_get(raw, "logging", "dashboard", True)),
-        log_file=_get(raw, "logging", "file", "logs/engine.log"),
+        log_file=_get(raw, "logging", "file", "logs/engine/engine.log"),
     )
