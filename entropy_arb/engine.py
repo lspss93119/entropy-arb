@@ -132,6 +132,16 @@ class Engine:
             os.fsync(fh.fileno())
         self._unresolved_execution = True
 
+    def _clear_review_marker(self) -> None:
+        """Clear only a fully settled execution; sync directory for restart."""
+        os.unlink(self._recovery_marker)
+        directory = os.path.dirname(self._recovery_marker)
+        fd = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
     def request_stop(self) -> None:
         self.stop.set()
         self._update_evt.set()
@@ -360,27 +370,49 @@ class Engine:
         outcomes escalate to reconcile, everything else gets a net-delta
         check."""
         unresolved = False
+        prepared = False
         self._last_execution_id = None
+        # Durable write happens before either leg can reach a venue.
         try:
-            unresolved = await self._execute(buy, sell, plan)
-        except asyncio.CancelledError:
-            raise
+            self._persist_unknown('PREPARED before both-leg send')
+            prepared = True
         except Exception:
-            log.exception("execute failed; reconciliation required")
-            unresolved = True
-        finally:
+            self.halted = True
+            self._unresolved_execution = True
+            log.critical('Cannot persist pre-send marker; NO ORDERS SENT',
+                         exc_info=True)
+        if prepared:
+            try:
+                unresolved = await self._execute(buy, sell, plan)
+            except asyncio.CancelledError:
+                unresolved = True
+                raise
+            except Exception:
+                log.exception("execute failed; reconciliation required")
+                unresolved = True
+            finally:
+                self._vlock(buy.key).release()
+                self._vlock(sell.key).release()
+        else:
             self._vlock(buy.key).release()
             self._vlock(sell.key).release()
-        if unresolved:
-            try:
-                self._persist_unknown('uncertain execution outcome')
-            except Exception:
-                self.halted = True
-                log.critical('Unable to persist unknown outcome; HALTED', exc_info=True)
-            self._unresolved_execution = True
-            self._reconcile_evt.set()
-        else:
-            await self._maybe_hedge(execution_id=self._last_execution_id)
+        if prepared:
+            if unresolved:
+                self._unresolved_execution = True
+                self._reconcile_evt.set()
+            else:
+                try:
+                    await self._maybe_hedge(execution_id=self._last_execution_id)
+                    net = sum(v.position for v in self.venues.values())
+                    if self._unresolved_execution or abs(net) > self.cfg.net_tolerance_base:
+                        self._reconcile_evt.set()
+                    else:
+                        self._clear_review_marker()
+                        self._unresolved_execution = False
+                except Exception:
+                    log.exception('hedge/marker settlement uncertain; manual review required')
+                    self._unresolved_execution = True
+                    self._reconcile_evt.set()
         self._update_evt.set()  # freed venues may have a queued opportunity
 
     def _scan(self, now: float):
@@ -596,6 +628,7 @@ class Engine:
                               info.get("err") or "unresolved")
                     if str(info.get("err", "")).startswith("RATE_LIMITED"):
                         self._mark_limited(v)
+                    self._unresolved_execution = True
                     self._reconcile_evt.set()
                 else:
                     fill = info["filled_base"]
