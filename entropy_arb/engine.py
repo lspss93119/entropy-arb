@@ -130,6 +130,12 @@ class Engine:
             fh.write(f'{time.time():.3f} {reason}\n')
             fh.flush()
             os.fsync(fh.fileno())
+        # Persist newly-created directory entry, not only file data.
+        fd = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
         self._unresolved_execution = True
 
     def _clear_review_marker(self) -> None:
