@@ -382,6 +382,10 @@ class Engine:
             log.critical('Cannot persist pre-send marker; NO ORDERS SENT',
                          exc_info=True)
         if prepared:
+            # In-flight execution is protected by both venue locks; the durable
+            # marker remains on disk. The unresolved entry gate is for AFTER
+            # uncertain settlement, not this already-authorized execution.
+            self._unresolved_execution = False
             try:
                 unresolved = await self._execute(buy, sell, plan)
             except asyncio.CancelledError:
