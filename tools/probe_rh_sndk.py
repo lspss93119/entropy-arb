@@ -36,9 +36,7 @@ def resolve_market():
 async def observe(market_id, seconds=600):
     event_ages, last_event_ages, gaps = [], [], []
     messages, missing, invalid, updates = 0, 0, 0, 0
-    sample_connection_ages = []
     sample_gates = {str(t): {"eligible": 0, "blocked": 0} for t in (0, 0.5, 1, 2, 5, 10, 30, 60)}
-    first_valid_book = False
     last_update = None
     latest_source_ts = None
     sampled_quote_ages = []
@@ -56,7 +54,7 @@ async def observe(market_id, seconds=600):
                 for threshold, counts in sample_gates.items():
                     counts["eligible"] += 1
                     # Source freshness is an OPTIONAL extra check: compare thresholds.
-                    if float(threshold) > 0 and (age < 0 or age > float(threshold)):
+                    if float(threshold) > 0 and (age < -2 or age > float(threshold) or (last_update is not None and time.time()-last_update > float(threshold))):
                         counts["blocked"] += 1
     sampler = asyncio.create_task(sample_every_second())
     try:
