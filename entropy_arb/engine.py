@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import csv
 import logging
+import fcntl
 import os
 import time
 import uuid
@@ -156,15 +157,35 @@ class Engine:
 
     # ------------------------------------------------------------- lifecycle
 
-    async def run(self) -> None:
-        # Long keepalive so order-path connections survive quiet spells; the
-        # keepalive loop pings inside this window to hold them open.
-        self.session = aiohttp.ClientSession(connector=aiohttp.TCPConnector(
-            keepalive_timeout=75.0, ttl_dns_cache=300))
+    def _acquire_live_lock(self):
+        """Single-host advisory lock; never remove lock file during use."""
+        path = self._recovery_marker + ".lock"
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        fh = open(path, "a+", encoding="utf-8")
         try:
-            await self._run_inner()
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (OSError, BlockingIOError) as exc:
+            fh.close()
+            raise RuntimeError(
+                "Another LIVE process may already own the pair lock: " + path
+            ) from exc
+        return fh
+
+    async def run(self) -> None:
+        # Hold lock for the complete LIVE lifecycle, including startup and shutdown.
+        # Record-only must not contend with an existing LIVE instance.
+        live_lock = self._acquire_live_lock() if not self.record_only else None
+        try:
+            self.session = aiohttp.ClientSession(connector=aiohttp.TCPConnector(
+                keepalive_timeout=75.0, ttl_dns_cache=300))
+            try:
+                await self._run_inner()
+            finally:
+                await self.session.close()
         finally:
-            await self.session.close()
+            if live_lock is not None:
+                fcntl.flock(live_lock.fileno(), fcntl.LOCK_UN)
+                live_lock.close()
 
     def _make_venue(self, vc):
         if vc.kind == "lighter":
