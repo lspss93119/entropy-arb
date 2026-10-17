@@ -1,0 +1,19 @@
+name: P0 unified integration
+on:
+  push:
+    branches: [integration/p0-unified-review]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 7
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -r requirements.txt pytest
+      - run: python -m compileall -q entropy_arb tests
+      - run: python -m pytest -q tests/

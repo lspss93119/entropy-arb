@@ -78,7 +78,8 @@ execution:
   net_tolerance_base: 0.001    # max tolerated net delta (base units) / 允许的净敞口
   max_consecutive_errors: 3    # halt after N straight failures / 连续失败 N 次后停机
   rate_limit_pause_sec: 10.0   # pause a 429'd venue this long / 被限频后的暂停时长
-  staleness_sec: 10.0          # a feed older than this is stale / 行情超时判定
+  staleness_sec: 10.0          # transport heartbeat timeout / WS 连线存活检查
+  max_quote_age_sec: 0.0       # 0=off; enable only after venue timestamp validation / 未验证前停用
   reconcile_sec: 15.0          # on-chain position sync cadence / 链上持仓核对周期
   venue_probe_sec: 30.0        # probe cadence for a down venue / 故障交易所探测周期
   http_keepalive_sec: 10.0     # keep order-path TLS warm; 0 = off / 订单链路保活
