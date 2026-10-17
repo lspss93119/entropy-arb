@@ -402,6 +402,8 @@ class Engine:
                 self._reconcile_evt.set()
             else:
                 try:
+                    # Durable marker remains until all repairs settle.
+                    self._unresolved_execution = False
                     await self._maybe_hedge(execution_id=self._last_execution_id)
                     net = sum(v.position for v in self.venues.values())
                     if self._unresolved_execution or abs(net) > self.cfg.net_tolerance_base:
