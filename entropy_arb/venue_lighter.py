@@ -42,36 +42,69 @@ class AccountOrdersFeed:
     """Authenticated stream of our own order updates (settlement channel)."""
 
     def __init__(self, name: str, ws_url: str, market_id: int,
-                 account_index: int, signer) -> None:
+                 account_index: int, signer, on_late_settlement=None) -> None:
         self.name = name
         self.ws_url = ws_url
         self.market_id = market_id
         self.account_index = account_index
         self.signer = signer
+        self.on_late_settlement = on_late_settlement
         self.ready = asyncio.Event()
         self._pending: dict[int, asyncio.Future] = {}
+        self._traces: dict[int, dict] = {}
+        self._late_traces: OrderedDict[int, dict] = OrderedDict()
         self._terminal: OrderedDict[int, dict] = OrderedDict()
 
     def watch(self, coi: int) -> asyncio.Future:
         fut: asyncio.Future = asyncio.get_running_loop().create_future()
         if coi in self._terminal:
-            fut.set_result(self._terminal[coi])
+            info = self._terminal[coi]
+            trace = self._traces.pop(coi, None)
+            if trace is not None:
+                if info.get("exchange_order_id") is not None:
+                    trace["exchange_order_id"] = info["exchange_order_id"]
+                from .execution_journal import stamp
+                stamp(trace, "settlement_observed")
+            fut.set_result(info)
             return fut
         self._pending[coi] = fut
         return fut
 
-    def unwatch(self, coi: int) -> None:
+    def unwatch(self, coi: int, *, keep_trace: bool = False) -> None:
         fut = self._pending.pop(coi, None)
+        trace = self._traces.pop(coi, None)
+        if keep_trace and trace is not None:
+            self._late_traces[coi] = trace
+            while len(self._late_traces) > 512:
+                self._late_traces.popitem(last=False)
         if fut is not None and not fut.done():
             fut.cancel()
 
     def _resolve(self, coi: int, info: dict) -> None:
+        trace = self._traces.pop(coi, None)
+        late = False
+        if trace is None:
+            trace = self._late_traces.pop(coi, None)
+            late = trace is not None
+        if trace is not None:
+            if info.get("exchange_order_id") is not None:
+                trace["exchange_order_id"] = info["exchange_order_id"]
+            from .execution_journal import stamp
+            stamp(trace, 'settlement_observed')
         self._terminal[coi] = info
         while len(self._terminal) > 512:
             self._terminal.popitem(last=False)
         fut = self._pending.pop(coi, None)
-        if fut is not None and not fut.done():
+        if fut is not None and fut.cancelled():
+            late = trace is not None
+        elif fut is not None and not fut.done():
             fut.set_result(info)
+        if late and self.on_late_settlement is not None:
+            try:
+                self.on_late_settlement(coi, info, trace)
+            except Exception:
+                log.exception("[%s] late settlement callback failed for coi %d",
+                              self.name, coi)
 
     def _handle_orders(self, msg: dict) -> None:
         for lst in (msg.get("orders") or {}).values():
@@ -85,9 +118,14 @@ class AccountOrdersFeed:
                     continue
                 fb = float(o.get("filled_base_amount") or 0.0)
                 fq = float(o.get("filled_quote_amount") or 0.0)
+                exchange_order_id = (o.get("order_id") or o.get("orderId")
+                                     or o.get("oid"))
                 self._resolve(coi, {"status": status, "filled_base": fb,
                                     "filled_quote": fq,
-                                    "avg_px": (fq / fb) if fb > 0 else None})
+                                    "avg_px": (fq / fb) if fb > 0 else None,
+                                    "exchange_order_id": (
+                                        str(exchange_order_id)
+                                        if exchange_order_id is not None else None)})
 
     async def run(self, stop: asyncio.Event) -> None:
         backoff = 1.0
@@ -165,6 +203,8 @@ class LighterVenue:
         self.min_base = 0.0
         self.min_quote = 10.0
         self.signer = None
+        self.journal = None
+        self.on_reconcile_needed = None
         self.orders_feed: Optional[AccountOrdersFeed] = None
         self._coi = int(time.time() * 1000)
 
@@ -230,7 +270,8 @@ class LighterVenue:
         if live:
             self.orders_feed = AccountOrdersFeed(
                 self.name, self.profile.ws_url, self.market_id,
-                self.conf.lighter_creds.account_index, self.signer)
+                self.conf.lighter_creds.account_index, self.signer,
+                on_late_settlement=self._on_late_settlement)
             tasks.append(asyncio.create_task(self.orders_feed.run(stop),
                                              name=f"acct-{self.key}"))
         return tasks
@@ -268,15 +309,40 @@ class LighterVenue:
         self._coi += 1
         return self._coi
 
+    def _on_late_settlement(self, coi: int, info: dict, trace: dict) -> None:
+        execution_id = trace.get("execution_id")
+        journal = getattr(self, "journal", None)
+        if journal is not None and journal.enabled:
+            journal.emit(
+                "late_settlement", execution_id=execution_id,
+                leg_id=trace.get("leg_id", self.key), venue=self.name,
+                client_order_index=coi, status=info.get("status"),
+                filled_base=info.get("filled_base"),
+                avg_px=info.get("avg_px"),
+                exchange_order_id=info.get("exchange_order_id"),
+                unresolved=False, source="lighter_account_orders_ws",
+                timing=trace)
+        callback = getattr(self, "on_reconcile_needed", None)
+        if callback is not None:
+            callback(execution_id)
+
     async def send_taker(self, *, is_buy: bool, qty: float, limit_px: float,
-                         reduce_only: bool = False) -> dict:
+                         reduce_only: bool = False, trace: Optional[dict] = None) -> dict:
         """Market order with avg-price protection; settle via account ws."""
         assert self.signer is not None
         from lighter import SignerClient
         coi = self._next_coi()
+        if trace is not None:
+            from .execution_journal import stamp
+            trace['client_order_index'] = coi
+            stamp(trace, 'submit_enter')
+            if self.orders_feed:
+                self.orders_feed._traces[coi] = trace
         fut = self.orders_feed.watch(coi) if self.orders_feed else None
         base_amount = int(round(qty * 10 ** self.size_decimals))
         price = int(round(limit_px * 10 ** self.price_decimals))
+        if trace is not None:
+            stamp(trace, 'request_start')
         try:
             _tx, resp, err = await self.signer.create_order(
                 market_index=self.market_id,
@@ -290,13 +356,22 @@ class LighterVenue:
                 order_expiry=SignerClient.DEFAULT_IOC_EXPIRY,
             )
         except Exception as e:
+            if (fut is not None and fut.done() and not fut.cancelled()):
+                info = fut.result()
+                return {"status": info["status"],
+                        "filled_base": info["filled_base"],
+                        "avg_px": info.get("avg_px"), "err": None,
+                        "unresolved": False,
+                        "exchange_order_id": info.get("exchange_order_id")}
             if fut is not None:
-                self.orders_feed.unwatch(coi)
+                self.orders_feed.unwatch(coi, keep_trace=True)
             msg = f"{type(e).__name__}: {e}"
             if getattr(e, "status", None) == 429 or "(429)" in str(e):
                 msg = "RATE_LIMITED: " + msg
-            return {"status": "send-failed", "filled_base": 0.0, "avg_px": None,
-                    "err": msg, "unresolved": False}
+            return {"status": "unknown-exception", "filled_base": 0.0,
+                    "avg_px": None, "err": msg, "unresolved": True}
+        if trace is not None:
+            stamp(trace, 'api_response')
         if err is not None or (getattr(resp, "code", 200) or 200) != 200:
             if fut is not None:
                 self.orders_feed.unwatch(coi)
@@ -312,9 +387,11 @@ class LighterVenue:
         try:
             info = await asyncio.wait_for(fut, timeout=self.settle_timeout)
             return {"status": info["status"], "filled_base": info["filled_base"],
-                    "avg_px": info.get("avg_px"), "err": None, "unresolved": False}
+                    "avg_px": info.get("avg_px"), "err": None,
+                    "unresolved": False,
+                    "exchange_order_id": info.get("exchange_order_id")}
         except asyncio.TimeoutError:
-            self.orders_feed.unwatch(coi)
+            self.orders_feed.unwatch(coi, keep_trace=True)
             log.warning("[%s] no settle confirmation for coi %d in %.1fs",
                         self.name, coi, self.settle_timeout)
             return {"status": "timeout", "filled_base": 0.0, "avg_px": None,

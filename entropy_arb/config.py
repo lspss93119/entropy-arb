@@ -136,6 +136,8 @@ class Config:
     # runtime
     hl_api_url: str = HL_API_URL
     hl_ws_url: str = HL_WS_URL
+    journal_enabled: bool = False
+    journal_path: str = 'logs/execution_events.jsonl'
 
     @property
     def creds_complete(self) -> bool:
@@ -199,6 +201,8 @@ _SCHEMA: Dict[str, Any] = {
         "level": str,
         "status_interval_sec": float,
         "trades_csv": str,
+        "journal_enabled": bool,
+        "journal_path": str,
         "dashboard": bool,
         "file": str,
     },
@@ -364,6 +368,8 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         log_level=str(_get(raw, "logging", "level", "INFO")).upper(),
         status_interval_sec=float(_get(raw, "logging", "status_interval_sec", 30.0)),
         trades_csv=_get(raw, "logging", "trades_csv", "logs/trades.csv"),
+        journal_enabled=bool(_get(raw, "logging", "journal_enabled", False)),
+        journal_path=_get(raw, "logging", "journal_path", "logs/execution_events.jsonl"),
         dashboard=bool(_get(raw, "logging", "dashboard", True)),
         log_file=_get(raw, "logging", "file", "logs/engine.log"),
     )

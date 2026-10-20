@@ -180,10 +180,14 @@ class HLVenue:
         return Cloid.from_int(self._cloid)
 
     async def send_taker(self, *, is_buy: bool, qty: float, limit_px: float,
-                         reduce_only: bool = False) -> dict:
+                         reduce_only: bool = False, trace: Optional[dict] = None) -> dict:
         assert self.account is not None and self.asset_id >= 0
         s = self._signing
         cloid = self._next_cloid()
+        if trace is not None:
+            from .execution_journal import stamp
+            trace['cloid'] = str(cloid.to_raw())
+            stamp(trace, 'submit_enter')
         order_req = {"coin": self.coin, "is_buy": is_buy, "sz": round(qty, 8),
                      "limit_px": limit_px,
                      "order_type": {"limit": {"tif": "Ioc"}},
@@ -200,13 +204,21 @@ class HLVenue:
             return {"status": "send-failed", "filled_base": 0.0, "avg_px": None,
                     "err": f"signing failed: {e!r}", "unresolved": False}
 
+        if trace is not None:
+            stamp(trace, 'request_start')
         body, err, unresolved = await self._post_exchange(payload)
+        if trace is not None:
+            stamp(trace, 'api_response')
         if err is not None:
             return {"status": "send-failed", "filled_base": 0.0, "avg_px": None,
                     "err": err, "unresolved": False}
         if not unresolved:
             res = self._parse(body)
             if not res.get("unresolved"):
+                if trace is not None:
+                    if res.get("exchange_order_id") is not None:
+                        trace["exchange_order_id"] = res["exchange_order_id"]
+                    stamp(trace, 'settlement_observed')
                 return res
         # unknown outcome: poll orderStatus by cloid until the deadline
         deadline = time.time() + self.settle_timeout
@@ -227,8 +239,16 @@ class HLVenue:
                 except (TypeError, ValueError):
                     filled = 0.0
                 if status != "open":
+                    exchange_order_id = o.get("oid") or inner.get("oid")
+                    if trace is not None:
+                        if exchange_order_id is not None:
+                            trace["exchange_order_id"] = str(exchange_order_id)
+                        stamp(trace, "settlement_observed")
                     return {"status": status, "filled_base": filled,
-                            "avg_px": None, "err": None, "unresolved": False}
+                            "avg_px": None, "err": None, "unresolved": False,
+                            "exchange_order_id": (
+                                str(exchange_order_id)
+                                if exchange_order_id is not None else None)}
             await asyncio.sleep(0.5)
         return {"status": "timeout", "filled_base": 0.0, "avg_px": None,
                 "err": None, "unresolved": True}
@@ -267,10 +287,15 @@ class HLVenue:
             return fail(f"malformed response: {str(body)[:200]}")
         if "filled" in st:
             f = st["filled"]
+            exchange_order_id = (f.get("oid") or st.get("oid")
+                                 or f.get("order_id"))
             return {"status": "filled",
                     "filled_base": float(f.get("totalSz") or 0.0),
                     "avg_px": float(f["avgPx"]) if f.get("avgPx") else None,
-                    "err": None, "unresolved": False}
+                    "err": None, "unresolved": False,
+                    "exchange_order_id": (
+                        str(exchange_order_id)
+                        if exchange_order_id is not None else None)}
         if "error" in st:
             msg = str(st["error"])
             if "could not immediately match" in msg.lower():
@@ -278,8 +303,13 @@ class HLVenue:
                         "err": None, "unresolved": False}
             return fail(msg)
         if "resting" in st:
+            exchange_order_id = st["resting"].get("oid") if isinstance(
+                st["resting"], dict) else None
             return {"status": "resting?", "filled_base": 0.0, "avg_px": None,
-                    "err": None, "unresolved": True}
+                    "err": None, "unresolved": True,
+                    "exchange_order_id": (
+                        str(exchange_order_id)
+                        if exchange_order_id is not None else None)}
         return fail(f"unknown status: {str(st)[:150]}")
 
     # -------------------------------------------------------------- accounts
