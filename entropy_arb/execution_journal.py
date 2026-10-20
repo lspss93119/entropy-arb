@@ -62,7 +62,7 @@ class ExecutionJournal:
             }
             self.queue.put_nowait(event)
             self.accepted += 1
-        except (asyncio.QueueFull, Exception):
+        except Exception:
             self.dropped += 1
 
     @staticmethod
@@ -115,5 +115,10 @@ class ExecutionJournal:
         except Exception:
             log.exception("execution journal close failed")
         finally:
+            if self.dropped or self.write_errors:
+                log.error('execution journal incomplete: accepted=%d written=%d dropped=%d errors=%d',
+                          self.accepted, self.written, self.dropped, self.write_errors)
+            else:
+                log.info('execution journal closed: %d events written', self.written)
             self.worker = None
             self.queue = None
