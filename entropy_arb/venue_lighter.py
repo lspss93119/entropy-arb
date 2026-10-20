@@ -50,6 +50,7 @@ class AccountOrdersFeed:
         self.signer = signer
         self.ready = asyncio.Event()
         self._pending: dict[int, asyncio.Future] = {}
+        self._traces: dict[int, dict] = {}
         self._terminal: OrderedDict[int, dict] = OrderedDict()
 
     def watch(self, coi: int) -> asyncio.Future:
@@ -62,10 +63,15 @@ class AccountOrdersFeed:
 
     def unwatch(self, coi: int) -> None:
         fut = self._pending.pop(coi, None)
+        self._traces.pop(coi, None)
         if fut is not None and not fut.done():
             fut.cancel()
 
     def _resolve(self, coi: int, info: dict) -> None:
+        trace = self._traces.pop(coi, None)
+        if trace is not None:
+            from .execution_journal import stamp
+            stamp(trace, 'settlement_observed')
         self._terminal[coi] = info
         while len(self._terminal) > 512:
             self._terminal.popitem(last=False)
@@ -269,14 +275,22 @@ class LighterVenue:
         return self._coi
 
     async def send_taker(self, *, is_buy: bool, qty: float, limit_px: float,
-                         reduce_only: bool = False) -> dict:
+                         reduce_only: bool = False, trace: Optional[dict] = None) -> dict:
         """Market order with avg-price protection; settle via account ws."""
         assert self.signer is not None
         from lighter import SignerClient
         coi = self._next_coi()
+        if trace is not None:
+            from .execution_journal import stamp
+            trace['client_order_index'] = coi
+            stamp(trace, 'submit_enter')
+            if self.orders_feed:
+                self.orders_feed._traces[coi] = trace
         fut = self.orders_feed.watch(coi) if self.orders_feed else None
         base_amount = int(round(qty * 10 ** self.size_decimals))
         price = int(round(limit_px * 10 ** self.price_decimals))
+        if trace is not None:
+            stamp(trace, 'request_start')
         try:
             _tx, resp, err = await self.signer.create_order(
                 market_index=self.market_id,
@@ -297,6 +311,8 @@ class LighterVenue:
                 msg = "RATE_LIMITED: " + msg
             return {"status": "send-failed", "filled_base": 0.0, "avg_px": None,
                     "err": msg, "unresolved": False}
+        if trace is not None:
+            stamp(trace, 'api_response')
         if err is not None or (getattr(resp, "code", 200) or 200) != 200:
             if fut is not None:
                 self.orders_feed.unwatch(coi)
