@@ -122,6 +122,11 @@ class Engine:
         self._update_evt.set()
         self._reconcile_evt.set()
 
+    def _mark_reconcile_needed(self, execution_id: Optional[str] = None) -> None:
+        if execution_id is not None:
+            self._reconcile_execution_id = execution_id
+        self._reconcile_evt.set()
+
     # ------------------------------------------------------------- lifecycle
 
     async def run(self) -> None:
@@ -138,7 +143,10 @@ class Engine:
 
     def _make_venue(self, vc):
         if vc.kind == "lighter":
-            return LighterVenue(vc, self.session, self.cfg.settle_timeout_sec)
+            venue = LighterVenue(vc, self.session, self.cfg.settle_timeout_sec)
+            venue.journal = self.journal
+            venue.on_reconcile_needed = self._mark_reconcile_needed
+            return venue
         return HLVenue(vc, self.cfg.hl_api_url, self.cfg.hl_ws_url,
                        self.session, self.cfg.settle_timeout_sec)
 
@@ -468,6 +476,11 @@ class Engine:
         self._record_send(buy)
         self._record_send(sell)
         buy_trace, sell_trace = {}, {}
+        if execution_id is not None:
+            buy_trace["execution_id"] = execution_id
+            buy_trace["leg_id"] = buy.key
+            sell_trace["execution_id"] = execution_id
+            sell_trace["leg_id"] = sell.key
         if execution_id is None:
             buy_call = buy.send_taker(is_buy=True, qty=plan.qty, limit_px=buy_bound)
             sell_call = sell.send_taker(is_buy=False, qty=plan.qty, limit_px=sell_bound)
@@ -627,6 +640,7 @@ class Engine:
                 hedge_leg_id = f"hedge:{v.key}"
                 hedge_trace = {}
                 if execution_id is not None:
+                    hedge_trace["leg_id"] = hedge_leg_id
                     self.journal.emit(
                         "hedge_submit", execution_id=execution_id,
                         leg_id=hedge_leg_id, venue=v.name,
@@ -706,8 +720,10 @@ class Engine:
             vs.append(v)
         if not vs:
             return
+        reconcile_execution_id = execution_id or self._reconcile_execution_id
         got = await asyncio.gather(
-            *(self._reconcile_venue(v, strict) for v in vs),
+            *(self._reconcile_venue(v, strict, reconcile_execution_id)
+              for v in vs),
             return_exceptions=True)
         for r in got:
             if isinstance(r, BaseException):
@@ -719,7 +735,8 @@ class Engine:
                     <= self.cfg.net_tolerance_base:
                 self._reconcile_execution_id = None
 
-    async def _reconcile_venue(self, v, strict: bool) -> None:
+    async def _reconcile_venue(self, v, strict: bool,
+                               execution_id: Optional[str] = None) -> None:
         async with self._vlock(v.key):
             now = time.time()
             if now - v.last_traded_ts <= self.RECONCILE_GRACE_SEC:
@@ -746,6 +763,12 @@ class Engine:
                 elif v.key not in self._venue_down:
                     log.warning("[%s] position fetch failed (%d): %r",
                                 v.name, n, e)
+                if execution_id is not None:
+                    self.journal.emit(
+                        "reconcile", execution_id=execution_id,
+                        leg_id=f"reconcile:{v.key}", venue=v.name,
+                        status="error", source="authoritative_position",
+                        error_type=type(e).__name__)
                 return
             if v.key in self._venue_down:
                 log.warning("[%s] API recovered after %.0fs outage — "
@@ -753,6 +776,8 @@ class Engine:
                             now - self._venue_down.pop(v.key))
                 self._update_evt.set()
             self._venue_fetch_fails[v.key] = 0
+            position_before = v.position
+            cash_before = v.cash
             delta = r - v.position
             if abs(delta) > 1e-12:
                 if abs(delta) > self.cfg.net_tolerance_base:
@@ -762,6 +787,16 @@ class Engine:
                 if mid is not None:
                     v.cash -= delta * mid
                 v.position = r
+            if execution_id is not None:
+                self.journal.emit(
+                    "reconcile", execution_id=execution_id,
+                    leg_id=f"reconcile:{v.key}", venue=v.name,
+                    status="adjusted" if abs(delta) > 1e-12 else "matched",
+                    source="authoritative_position",
+                    local_position_before=position_before,
+                    authoritative_position=r, position_delta=delta,
+                    position_after=v.position, cash_before=cash_before,
+                    cash_after=v.cash)
 
     async def _reconcile_loop(self) -> None:
         while not self.stop.is_set():

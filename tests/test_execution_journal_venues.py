@@ -60,7 +60,7 @@ def test_lighter_send_taker_returns_exchange_order_id(monkeypatch):
                 "exchange_order_id": "987654",
             })
 
-        def unwatch(self, coi):
+        def unwatch(self, coi, *, keep_trace=False):
             return None
 
     class FakeSigner:
@@ -113,7 +113,7 @@ def test_lighter_send_taker_exception_is_unresolved(monkeypatch):
         def watch(self, coi):
             return asyncio.get_running_loop().create_future()
 
-        def unwatch(self, coi):
+        def unwatch(self, coi, *, keep_trace=False):
             self._traces.pop(coi, None)
 
     async def scenario():

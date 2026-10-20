@@ -230,6 +230,52 @@ def test_reconcile_hedge_keeps_unresolved_execution_id(tmp_path):
     assert pending_id is None
 
 
+def test_reconcile_records_authoritative_position_and_cash(tmp_path):
+    async def scenario():
+        (tmp_path / "config.yaml").write_text(
+            "thresholds:\n  midline_bps: 0\n  upper_bps: 4\n  lower_bps: 4\n")
+        cfg = load_config(str(tmp_path / "config.yaml"),
+                          str(tmp_path / "missing.env"),
+                          symbol="SNDK", hedge_venue="lighter-rh")
+        cfg.journal_enabled = True
+        cfg.journal_path = str(tmp_path / "reconcile-record.jsonl")
+        cfg.trades_csv = str(tmp_path / "trades.csv")
+        engine = Engine(cfg)
+        buy = FakeVenue("hedge")
+        sell = FakeVenue("entropy")
+        buy.authoritative_position = 0.4
+        sell.authoritative_position = 0.0
+
+        async def fetch_position(v):
+            return v.authoritative_position
+
+        buy.fetch_position = lambda: fetch_position(buy)
+        sell.fetch_position = lambda: fetch_position(sell)
+        engine.entropy = sell
+        engine.hedge = buy
+        engine.venues = {"entropy": sell, "hedge": buy}
+        engine._reconcile_execution_id = "unknown-e1"
+        engine.journal.start()
+        await engine._reconcile_positions(hedge=False)
+        await engine.journal.close()
+        events = [json.loads(line) for line in
+                  (tmp_path / "reconcile-record.jsonl").read_text().splitlines()]
+        return events, buy.position, buy.cash
+
+    events, position, cash = asyncio.run(scenario())
+    adjusted = [event for event in events
+                if event["event_type"] == "reconcile"
+                and event["venue"] == "hedge"]
+    assert len(adjusted) == 1
+    assert adjusted[0]["execution_id"] == "unknown-e1"
+    assert adjusted[0]["status"] == "adjusted"
+    assert adjusted[0]["authoritative_position"] == 0.4
+    assert adjusted[0]["position_delta"] == 0.4
+    assert adjusted[0]["position_after"] == 0.4
+    assert position == 0.4
+    assert cash == -40.2
+
+
 def test_unexpected_execute_exception_is_journaled_and_reconciled(tmp_path):
     async def scenario():
         (tmp_path / "config.yaml").write_text(
