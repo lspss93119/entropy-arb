@@ -131,13 +131,13 @@ class Config:
     log_level: str
     status_interval_sec: float
     trades_csv: str
-    journal_enabled: bool
-    journal_path: str
     dashboard: bool
     log_file: str
     # runtime
     hl_api_url: str = HL_API_URL
     hl_ws_url: str = HL_WS_URL
+    journal_enabled: bool = False
+    journal_path: str = 'logs/execution_events.jsonl'
 
     @property
     def creds_complete(self) -> bool:
