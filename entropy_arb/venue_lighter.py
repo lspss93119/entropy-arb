@@ -95,9 +95,11 @@ class AccountOrdersFeed:
         while len(self._terminal) > 512:
             self._terminal.popitem(last=False)
         fut = self._pending.pop(coi, None)
-        if fut is not None and not fut.done():
+        if fut is not None and fut.cancelled():
+            late = trace is not None
+        elif fut is not None and not fut.done():
             fut.set_result(info)
-        elif late and self.on_late_settlement is not None:
+        if late and self.on_late_settlement is not None:
             try:
                 self.on_late_settlement(coi, info, trace)
             except Exception:

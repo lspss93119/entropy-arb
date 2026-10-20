@@ -190,3 +190,49 @@ def test_late_hedge_settlement_rearms_reconcile_and_keeps_leg_id(tmp_path):
     assert len(events) == 1
     assert events[0]["event_type"] == "late_settlement"
     assert events[0]["leg_id"] == "hedge:hedge"
+
+
+def test_timeout_race_after_future_cancellation_keeps_late_settlement(
+        tmp_path, monkeypatch):
+    _install_lighter_sdk(monkeypatch)
+
+    async def scenario():
+        journal = ExecutionJournal(str(tmp_path / "late-timeout-race.jsonl"),
+                                   enabled=True)
+        journal.start()
+        message = {"orders": {"32": [{
+            "status": "filled", "client_order_index": 101,
+            "order_id": 97531, "filled_base_amount": "0.6",
+            "filled_quote_amount": "60.0",
+        }]}}
+
+        class RacingFeed(AccountOrdersFeed):
+            def unwatch(self, coi, *, keep_trace=False):
+                if keep_trace:
+                    self._handle_orders(message)
+                super().unwatch(coi, keep_trace=keep_trace)
+
+        class AcceptedSigner:
+            async def create_order(self, **kwargs):
+                return "tx", types.SimpleNamespace(code=200), None
+
+        feed = RacingFeed("RH", "wss://fake", 32, 7, object())
+        venue = _venue(journal, feed, AcceptedSigner())
+        venue.settle_timeout = 0.001
+        feed.on_late_settlement = venue._on_late_settlement
+        result = await venue.send_taker(
+            is_buy=True, qty=1.0, limit_px=100.0,
+            trace={"execution_id": "exec-timeout-race"})
+        await journal.close()
+        events = [json.loads(line) for line in
+                  (tmp_path / "late-timeout-race.jsonl").read_text().splitlines()]
+        return result, events
+
+    result, events = asyncio.run(scenario())
+    assert result["status"] == "timeout"
+    assert result["unresolved"] is True
+    late = [event for event in events
+            if event["event_type"] == "late_settlement"]
+    assert len(late) == 1
+    assert late[0]["exchange_order_id"] == "97531"
+    assert late[0]["filled_base"] == 0.6

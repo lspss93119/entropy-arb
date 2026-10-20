@@ -396,6 +396,8 @@ class Engine:
                 continue
             if self._venue_down:
                 continue  # a venue in outage pauses the (only) pair
+            if self._reconcile_execution_id is not None:
+                continue  # resolve one unknown execution before another send
             if self._vlock(buy.key).locked() or self._vlock(sell.key).locked():
                 continue  # mid-execution or mid-reconcile
             if self._venue_limited(buy) or self._venue_limited(sell):
