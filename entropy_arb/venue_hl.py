@@ -216,6 +216,8 @@ class HLVenue:
             res = self._parse(body)
             if not res.get("unresolved"):
                 if trace is not None:
+                    if res.get("exchange_order_id") is not None:
+                        trace["exchange_order_id"] = res["exchange_order_id"]
                     stamp(trace, 'settlement_observed')
                 return res
         # unknown outcome: poll orderStatus by cloid until the deadline
@@ -237,10 +239,16 @@ class HLVenue:
                 except (TypeError, ValueError):
                     filled = 0.0
                 if status != "open":
+                    exchange_order_id = o.get("oid") or inner.get("oid")
                     if trace is not None:
+                        if exchange_order_id is not None:
+                            trace["exchange_order_id"] = str(exchange_order_id)
                         stamp(trace, "settlement_observed")
                     return {"status": status, "filled_base": filled,
-                            "avg_px": None, "err": None, "unresolved": False}
+                            "avg_px": None, "err": None, "unresolved": False,
+                            "exchange_order_id": (
+                                str(exchange_order_id)
+                                if exchange_order_id is not None else None)}
             await asyncio.sleep(0.5)
         return {"status": "timeout", "filled_base": 0.0, "avg_px": None,
                 "err": None, "unresolved": True}
@@ -279,10 +287,15 @@ class HLVenue:
             return fail(f"malformed response: {str(body)[:200]}")
         if "filled" in st:
             f = st["filled"]
+            exchange_order_id = (f.get("oid") or st.get("oid")
+                                 or f.get("order_id"))
             return {"status": "filled",
                     "filled_base": float(f.get("totalSz") or 0.0),
                     "avg_px": float(f["avgPx"]) if f.get("avgPx") else None,
-                    "err": None, "unresolved": False}
+                    "err": None, "unresolved": False,
+                    "exchange_order_id": (
+                        str(exchange_order_id)
+                        if exchange_order_id is not None else None)}
         if "error" in st:
             msg = str(st["error"])
             if "could not immediately match" in msg.lower():
@@ -290,8 +303,13 @@ class HLVenue:
                         "err": None, "unresolved": False}
             return fail(msg)
         if "resting" in st:
+            exchange_order_id = st["resting"].get("oid") if isinstance(
+                st["resting"], dict) else None
             return {"status": "resting?", "filled_base": 0.0, "avg_px": None,
-                    "err": None, "unresolved": True}
+                    "err": None, "unresolved": True,
+                    "exchange_order_id": (
+                        str(exchange_order_id)
+                        if exchange_order_id is not None else None)}
         return fail(f"unknown status: {str(st)[:150]}")
 
     # -------------------------------------------------------------- accounts

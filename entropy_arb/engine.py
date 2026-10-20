@@ -56,6 +56,7 @@ class Engine:
         self.stop = asyncio.Event()
         self._update_evt = asyncio.Event()
         self._reconcile_evt = asyncio.Event()
+        self._reconcile_execution_id: Optional[str] = None
         # per-venue locks: an execution holds both; a reconcile holds one, so
         # a chain read can never race an in-flight order on that venue
         self._venue_locks: Dict[str, asyncio.Lock] = {}
@@ -345,19 +346,32 @@ class Engine:
         outcomes escalate to reconcile, everything else gets a net-delta
         check."""
         unresolved = False
+        execution_id = str(uuid.uuid4()) if self.journal.enabled else None
         try:
-            unresolved = await self._execute(buy, sell, plan)
+            unresolved = await self._execute(
+                buy, sell, plan, execution_id=execution_id)
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as exc:
             log.exception("execute failed")
+            unresolved = True
+            if execution_id is not None:
+                self.journal.emit(
+                    "execution_error", execution_id=execution_id,
+                    direction=("sell_entropy"
+                               if sell.key == "entropy" else "buy_entropy"),
+                    buy_venue=buy.key, sell_venue=sell.key,
+                    planned_qty=plan.qty, unresolved=True, success=False,
+                    error_type=type(exc).__name__)
         finally:
             self._vlock(buy.key).release()
             self._vlock(sell.key).release()
         if unresolved:
+            if execution_id is not None:
+                self._reconcile_execution_id = execution_id
             self._reconcile_evt.set()
         else:
-            await self._maybe_hedge()
+            await self._maybe_hedge(execution_id=execution_id)
         self._update_evt.set()  # freed venues may have a queued opportunity
 
     def _scan(self, now: float):
@@ -416,7 +430,8 @@ class Engine:
 
     # ------------------------------------------------------------- execution
 
-    async def _execute(self, buy, sell, plan: ArbPlan) -> bool:
+    async def _execute(self, buy, sell, plan: ArbPlan,
+                       execution_id: Optional[str] = None) -> bool:
         """Send both legs and settle the fills. Both venue locks are held by
         the caller. Returns True when an outcome is unresolved and the caller
         must escalate to reconcile."""
@@ -425,7 +440,8 @@ class Engine:
         cfg = self.cfg
         inv_bps = self._inv_add_bps(buy, sell)
         direction = "sell_entropy" if sell.key == "entropy" else "buy_entropy"
-        execution_id = str(uuid.uuid4()) if self.journal.enabled else None
+        if self.journal.enabled and execution_id is None:
+            execution_id = str(uuid.uuid4())
         if execution_id is not None:
             self.journal.emit(
                 "decision", execution_id=execution_id, direction=direction,
@@ -469,8 +485,8 @@ class Engine:
                               planned_qty=plan.qty, limit_px=sell_bound)
         res = await asyncio.gather(buy_call, sell_call, return_exceptions=True)
         binfo, sinfo = (r if isinstance(r, dict) else
-                        {"status": "send-failed", "filled_base": 0.0,
-                         "avg_px": None, "err": repr(r), "unresolved": False}
+                        {"status": "unknown-exception", "filled_base": 0.0,
+                         "avg_px": None, "err": repr(r), "unresolved": True}
                         for r in res)
         for v, info, side in ((buy, binfo, "buy"), (sell, sinfo, "sell")):
             if info.get("err"):
@@ -485,6 +501,7 @@ class Engine:
                     limit_px=bound, planned_qty=plan.qty,
                     status=info.get("status"), filled_base=info.get("filled_base"),
                     avg_px=info.get("avg_px"),
+                    exchange_order_id=info.get("exchange_order_id"),
                     price_source="exchange" if info.get("avg_px") else "unknown",
                     unresolved=bool(info.get("unresolved")),
                     error_type="present" if info.get("err") else None,
@@ -566,15 +583,18 @@ class Engine:
             "exp": plan.exp_edge_usd, "fill": fill_edge, "status": status,
             "ok": ok})
 
-    async def _maybe_hedge(self) -> None:
+    async def _maybe_hedge(self, execution_id: Optional[str] = None) -> None:
         net = sum(v.position for v in self.venues.values())
         if abs(net) > self.cfg.net_tolerance_base:
-            await self._hedge(net)
+            await self._hedge(net, execution_id=execution_id)
 
-    async def _hedge(self, net: float) -> None:
+    async def _hedge(self, net: float,
+                     execution_id: Optional[str] = None) -> None:
         """Reduce the venue that carries the imbalance back toward net zero
         (reduce-only taker with hedge_slippage_bps price protection)."""
         cfg = self.cfg
+        if execution_id is None and self.journal.enabled:
+            execution_id = str(uuid.uuid4())
         is_sell = net > 0
         sgn = 1.0 if net > 0 else -1.0
         slip = cfg.hedge_slippage_bps / 1e4
@@ -604,8 +624,43 @@ class Engine:
                             net, "SELL" if is_sell else "BUY", qty, v.name, limit)
                 self.hedges += 1
                 self._record_send(v)  # counts toward the budget, never blocked
-                info = await v.send_taker(is_buy=not is_sell, qty=qty,
-                                          limit_px=limit, reduce_only=True)
+                hedge_leg_id = f"hedge:{v.key}"
+                hedge_trace = {}
+                if execution_id is not None:
+                    self.journal.emit(
+                        "hedge_submit", execution_id=execution_id,
+                        leg_id=hedge_leg_id, venue=v.name,
+                        side="sell" if is_sell else "buy",
+                        planned_qty=qty, limit_px=limit, reduce_only=True,
+                        net_before=net, position_before=v.position)
+                try:
+                    if execution_id is not None:
+                        info = await v.send_taker(
+                            is_buy=not is_sell, qty=qty, limit_px=limit,
+                            reduce_only=True, trace=hedge_trace)
+                    else:
+                        info = await v.send_taker(
+                            is_buy=not is_sell, qty=qty, limit_px=limit,
+                            reduce_only=True)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    info = {"status": "unknown-exception", "filled_base": 0.0,
+                            "avg_px": None, "err": repr(exc),
+                            "unresolved": True}
+                if execution_id is not None:
+                    self.journal.emit(
+                        "hedge_result", execution_id=execution_id,
+                        leg_id=hedge_leg_id, venue=v.name,
+                        side="sell" if is_sell else "buy",
+                        planned_qty=qty, limit_px=limit,
+                        status=info.get("status"),
+                        filled_base=info.get("filled_base"),
+                        avg_px=info.get("avg_px"),
+                        exchange_order_id=info.get("exchange_order_id"),
+                        unresolved=bool(info.get("unresolved")),
+                        error_type="present" if info.get("err") else None,
+                        timing=hedge_trace)
                 if info.get("err") or info.get("unresolved"):
                     log.error("[HEDGE] %s: %s", v.name,
                               info.get("err") or "unresolved")
@@ -638,7 +693,8 @@ class Engine:
     RECONCILE_GRACE_SEC = 5.0
 
     async def _reconcile_positions(self, hedge: bool,
-                                   strict: bool = False) -> None:
+                                   strict: bool = False,
+                                   execution_id: Optional[str] = None) -> None:
         now = time.time()
         vs = []
         for v in self.venues.values():
@@ -657,7 +713,11 @@ class Engine:
             if isinstance(r, BaseException):
                 raise r  # strict startup: fail loudly
         if hedge:
-            await self._maybe_hedge()
+            await self._maybe_hedge(
+                execution_id=execution_id or self._reconcile_execution_id)
+            if abs(sum(v.position for v in self.venues.values())) \
+                    <= self.cfg.net_tolerance_base:
+                self._reconcile_execution_id = None
 
     async def _reconcile_venue(self, v, strict: bool) -> None:
         async with self._vlock(v.key):

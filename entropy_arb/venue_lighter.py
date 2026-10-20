@@ -70,6 +70,8 @@ class AccountOrdersFeed:
     def _resolve(self, coi: int, info: dict) -> None:
         trace = self._traces.pop(coi, None)
         if trace is not None:
+            if info.get("exchange_order_id") is not None:
+                trace["exchange_order_id"] = info["exchange_order_id"]
             from .execution_journal import stamp
             stamp(trace, 'settlement_observed')
         self._terminal[coi] = info
@@ -91,9 +93,14 @@ class AccountOrdersFeed:
                     continue
                 fb = float(o.get("filled_base_amount") or 0.0)
                 fq = float(o.get("filled_quote_amount") or 0.0)
+                exchange_order_id = (o.get("order_id") or o.get("orderId")
+                                     or o.get("oid"))
                 self._resolve(coi, {"status": status, "filled_base": fb,
                                     "filled_quote": fq,
-                                    "avg_px": (fq / fb) if fb > 0 else None})
+                                    "avg_px": (fq / fb) if fb > 0 else None,
+                                    "exchange_order_id": (
+                                        str(exchange_order_id)
+                                        if exchange_order_id is not None else None)})
 
     async def run(self, stop: asyncio.Event) -> None:
         backoff = 1.0
@@ -309,8 +316,8 @@ class LighterVenue:
             msg = f"{type(e).__name__}: {e}"
             if getattr(e, "status", None) == 429 or "(429)" in str(e):
                 msg = "RATE_LIMITED: " + msg
-            return {"status": "send-failed", "filled_base": 0.0, "avg_px": None,
-                    "err": msg, "unresolved": False}
+            return {"status": "unknown-exception", "filled_base": 0.0,
+                    "avg_px": None, "err": msg, "unresolved": True}
         if trace is not None:
             stamp(trace, 'api_response')
         if err is not None or (getattr(resp, "code", 200) or 200) != 200:
@@ -328,7 +335,9 @@ class LighterVenue:
         try:
             info = await asyncio.wait_for(fut, timeout=self.settle_timeout)
             return {"status": info["status"], "filled_base": info["filled_base"],
-                    "avg_px": info.get("avg_px"), "err": None, "unresolved": False}
+                    "avg_px": info.get("avg_px"), "err": None,
+                    "unresolved": False,
+                    "exchange_order_id": info.get("exchange_order_id")}
         except asyncio.TimeoutError:
             self.orders_feed.unwatch(coi)
             log.warning("[%s] no settle confirmation for coi %d in %.1fs",

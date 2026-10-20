@@ -51,3 +51,41 @@ def test_stamp_tracks_time():
     assert trace["submit_mono_ns"] > 0
     assert trace["submit_utc_ns"] > 0
     stamp(None, "submit")
+
+
+def test_write_failure_is_counted_without_blocking_close(tmp_path: Path):
+    async def scenario():
+        j = ExecutionJournal(str(tmp_path / "events.jsonl"), enabled=True)
+
+        def fail_append(path, events):
+            raise OSError("disk full")
+
+        j._append = fail_append
+        j.start()
+        j.emit("decision", execution_id="e1")
+        await j.close()
+        return j
+
+    j = asyncio.run(scenario())
+    assert j.written == 0
+    assert j.write_errors == 1
+    assert j.dropped == 0
+
+
+def test_journal_can_restart_after_clean_close(tmp_path: Path):
+    async def scenario():
+        p = tmp_path / "events.jsonl"
+        j = ExecutionJournal(str(p), enabled=True)
+        j.start()
+        j.emit("start", execution_id="first")
+        await j.close()
+        first_run = j.run_id
+        j.start()
+        j.emit("restart", execution_id="second")
+        await j.close()
+        return first_run, j.run_id, [json.loads(line) for line in p.read_text().splitlines()]
+
+    first_run, second_run, events = asyncio.run(scenario())
+    assert first_run == second_run
+    assert [event["event_type"] for event in events] == ["start", "restart"]
+    assert all(event["run_id"] == first_run for event in events)
