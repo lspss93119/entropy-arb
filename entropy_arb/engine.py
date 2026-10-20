@@ -460,6 +460,13 @@ class Engine:
                                       limit_px=buy_bound, trace=buy_trace)
             sell_call = sell.send_taker(is_buy=False, qty=plan.qty,
                                         limit_px=sell_bound, trace=sell_trace)
+        if execution_id is not None:
+            self.journal.emit("order_submit", execution_id=execution_id,
+                              leg_id=buy.key, venue=buy.name, side="buy",
+                              planned_qty=plan.qty, limit_px=buy_bound)
+            self.journal.emit("order_submit", execution_id=execution_id,
+                              leg_id=sell.key, venue=sell.name, side="sell",
+                              planned_qty=plan.qty, limit_px=sell_bound)
         res = await asyncio.gather(buy_call, sell_call, return_exceptions=True)
         binfo, sinfo = (r if isinstance(r, dict) else
                         {"status": "send-failed", "filled_base": 0.0,
