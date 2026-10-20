@@ -180,10 +180,14 @@ class HLVenue:
         return Cloid.from_int(self._cloid)
 
     async def send_taker(self, *, is_buy: bool, qty: float, limit_px: float,
-                         reduce_only: bool = False) -> dict:
+                         reduce_only: bool = False, trace: Optional[dict] = None) -> dict:
         assert self.account is not None and self.asset_id >= 0
         s = self._signing
         cloid = self._next_cloid()
+        if trace is not None:
+            from .execution_journal import stamp
+            trace['cloid'] = str(cloid.to_raw())
+            stamp(trace, 'submit_enter')
         order_req = {"coin": self.coin, "is_buy": is_buy, "sz": round(qty, 8),
                      "limit_px": limit_px,
                      "order_type": {"limit": {"tif": "Ioc"}},
@@ -200,13 +204,19 @@ class HLVenue:
             return {"status": "send-failed", "filled_base": 0.0, "avg_px": None,
                     "err": f"signing failed: {e!r}", "unresolved": False}
 
+        if trace is not None:
+            stamp(trace, 'request_start')
         body, err, unresolved = await self._post_exchange(payload)
+        if trace is not None:
+            stamp(trace, 'api_response')
         if err is not None:
             return {"status": "send-failed", "filled_base": 0.0, "avg_px": None,
                     "err": err, "unresolved": False}
         if not unresolved:
             res = self._parse(body)
             if not res.get("unresolved"):
+                if trace is not None:
+                    stamp(trace, 'settlement_observed')
                 return res
         # unknown outcome: poll orderStatus by cloid until the deadline
         deadline = time.time() + self.settle_timeout
@@ -227,6 +237,8 @@ class HLVenue:
                 except (TypeError, ValueError):
                     filled = 0.0
                 if status != "open":
+                    if trace is not None:
+                        stamp(trace, "settlement_observed")
                     return {"status": status, "filled_base": filled,
                             "avg_px": None, "err": None, "unresolved": False}
             await asyncio.sleep(0.5)
