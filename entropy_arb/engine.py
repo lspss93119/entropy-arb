@@ -19,6 +19,7 @@ import csv
 import logging
 import os
 import time
+import uuid
 from collections import deque
 from typing import Dict, List, Optional
 
@@ -27,6 +28,7 @@ import aiohttp
 from .book import ArbPlan, floor_step, plan_arb
 from .config import Config
 from .recorder import MinuteRecorder
+from .execution_journal import ExecutionJournal
 from .venue_hl import HLVenue
 from .venue_lighter import LighterVenue
 
@@ -44,6 +46,7 @@ class Engine:
     def __init__(self, cfg: Config, record_only: bool = False) -> None:
         self.cfg = cfg
         self.record_only = record_only
+        self.journal = ExecutionJournal(cfg.journal_path, enabled=cfg.journal_enabled)
         self.session: Optional[aiohttp.ClientSession] = None
         self.entropy = None
         self.hedge = None
@@ -125,9 +128,11 @@ class Engine:
         # keepalive loop pings inside this window to hold them open.
         self.session = aiohttp.ClientSession(connector=aiohttp.TCPConnector(
             keepalive_timeout=75.0, ttl_dns_cache=300))
+        self.journal.start()
         try:
             await self._run_inner()
         finally:
+            await self.journal.close()
             await self.session.close()
 
     def _make_venue(self, vc):
@@ -167,6 +172,9 @@ class Engine:
                              self._step)
         self._min_notional = max(cfg.min_order_notional,
                                  self.entropy.min_quote, self.hedge.min_quote)
+        self.journal.emit("parameter_snapshot", midline_bps=cfg.midline_bps,
+                          upper_bps=cfg.upper_bps, lower_bps=cfg.lower_bps,
+                          parameter_source="fixed_config")
         log.info("pair ENTROPY(%s)-%s(%s): midline=%+.2fbps band=[-%.2f, +%.2f] "
                  "fees=%.2f+%.2f step=%g min_ntl=$%g",
                  self.entropy.conf.symbol, self.hedge.name,
@@ -417,6 +425,21 @@ class Engine:
         cfg = self.cfg
         inv_bps = self._inv_add_bps(buy, sell)
         direction = "sell_entropy" if sell.key == "entropy" else "buy_entropy"
+        execution_id = str(uuid.uuid4()) if self.journal.enabled else None
+        if execution_id is not None:
+            self.journal.emit(
+                "decision", execution_id=execution_id, direction=direction,
+                buy_venue=buy.key, sell_venue=sell.key, qty=plan.qty,
+                buy_limit=plan.buy_limit, sell_limit=plan.sell_limit,
+                buy_bid=buy.book.best_bid(), buy_ask=buy.book.best_ask(),
+                sell_bid=sell.book.best_bid(), sell_ask=sell.book.best_ask(),
+                buy_book_updated_utc=buy.book.last_update_ts,
+                sell_book_updated_utc=sell.book.last_update_ts,
+                midline_bps=cfg.midline_bps, upper_bps=cfg.upper_bps,
+                lower_bps=cfg.lower_bps, inventory_add_bps=inv_bps,
+                expected_edge_usd=plan.exp_edge_usd,
+                buy_position_before=buy.position, sell_position_before=sell.position,
+            )
         self.last_trade_ts = time.time()
         log.info("[ARB] %s: BUY %s %.6g @<=%.6g | SELL %s @>=%.6g | "
                  "take $%.0f of $%.0f | prem %.2fbps | exp $%.4f",
@@ -428,10 +451,16 @@ class Engine:
         sell_bound = sell.px_round(plan.sell_limit * (1 - slip), round_up=True)
         self._record_send(buy)
         self._record_send(sell)
-        res = await asyncio.gather(
-            buy.send_taker(is_buy=True, qty=plan.qty, limit_px=buy_bound),
-            sell.send_taker(is_buy=False, qty=plan.qty, limit_px=sell_bound),
-            return_exceptions=True)
+        buy_trace, sell_trace = {}, {}
+        if execution_id is None:
+            buy_call = buy.send_taker(is_buy=True, qty=plan.qty, limit_px=buy_bound)
+            sell_call = sell.send_taker(is_buy=False, qty=plan.qty, limit_px=sell_bound)
+        else:
+            buy_call = buy.send_taker(is_buy=True, qty=plan.qty,
+                                      limit_px=buy_bound, trace=buy_trace)
+            sell_call = sell.send_taker(is_buy=False, qty=plan.qty,
+                                        limit_px=sell_bound, trace=sell_trace)
+        res = await asyncio.gather(buy_call, sell_call, return_exceptions=True)
         binfo, sinfo = (r if isinstance(r, dict) else
                         {"status": "send-failed", "filled_base": 0.0,
                          "avg_px": None, "err": repr(r), "unresolved": False}
@@ -439,6 +468,21 @@ class Engine:
         for v, info, side in ((buy, binfo, "buy"), (sell, sinfo, "sell")):
             if info.get("err"):
                 log.error("[%s] %s leg: %s", v.name, side, info["err"])
+        if execution_id is not None:
+            for venue, side, info, trace, bound in (
+                    (buy, "buy", binfo, buy_trace, buy_bound),
+                    (sell, "sell", sinfo, sell_trace, sell_bound)):
+                self.journal.emit(
+                    "order_result", execution_id=execution_id,
+                    leg_id=venue.key, venue=venue.name, side=side,
+                    limit_px=bound, planned_qty=plan.qty,
+                    status=info.get("status"), filled_base=info.get("filled_base"),
+                    avg_px=info.get("avg_px"),
+                    price_source="exchange" if info.get("avg_px") else "unknown",
+                    unresolved=bool(info.get("unresolved")),
+                    error_type="present" if info.get("err") else None,
+                    timing=trace,
+                )
         bfill = binfo["filled_base"]
         sfill = sinfo["filled_base"]
         buy.position += bfill
@@ -495,6 +539,15 @@ class Engine:
         self._log_csv(direction, buy, sell, plan, sent_ok, bfill, sfill,
                       binfo["status"], sinfo["status"], fill_edge, inv_bps)
         self.last_trade_ts = time.time()
+        if execution_id is not None:
+            self.journal.emit(
+                "execution_complete", execution_id=execution_id,
+                direction=direction, matched_base=matched,
+                buy_filled_base=bfill, sell_filled_base=sfill,
+                residual_base=bfill - sfill, unresolved=bool(unresolved),
+                success=bool(sent_ok), observed_fill_edge_usd=fill_edge
+                if binfo.get("avg_px") and sinfo.get("avg_px") else None,
+            )
         return bool(unresolved)
 
     def _record_trade(self, direction: str, plan: ArbPlan, fill_edge,
