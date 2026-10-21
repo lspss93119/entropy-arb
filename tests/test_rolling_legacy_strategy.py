@@ -1,4 +1,5 @@
 """Isolation and causal calculation tests for the opt-in Legacy Rolling strategy."""
+import asyncio
 import csv
 from types import SimpleNamespace
 
@@ -30,6 +31,34 @@ def test_legacy_p80_p50_uses_executable_room():
     # sell room 7 or 13; P80 -> 13; buy room 1 or 5; P50 -> 3
     assert snap.upper_bps == 13.0
     assert snap.lower_bps == 3.0
+
+
+def test_legacy_fees_are_subtracted_once_before_band_rounding():
+    snap = calculate_legacy(rows(), EFFECTIVE, MARKET, fees_bps=1.0)
+    assert snap.valid
+    # SellRoom is 6 or 12 -> P80 is 12; BuyRoom is 0 or 4 -> P50 is 2.
+    assert snap.upper_bps == 12.0
+    assert snap.lower_bps == 2.0
+
+
+def test_legacy_rejects_nonfinite_samples_and_bad_timestamps():
+    bad_samples = rows()
+    bad_samples[0]["samples"] = float("nan")
+    result = calculate_legacy(bad_samples, EFFECTIVE, MARKET)
+    assert not result.valid
+    assert result.invalid_reason == "invalid_or_low_samples"
+
+    fractional_samples = rows()
+    fractional_samples[0]["samples"] = 10.5
+    result = calculate_legacy(fractional_samples, EFFECTIVE, MARKET)
+    assert not result.valid
+    assert result.invalid_reason == "invalid_or_low_samples"
+
+    bad_timestamp = rows()
+    bad_timestamp[0]["ts"] = "not-a-timestamp"
+    result = calculate_legacy(bad_timestamp, EFFECTIVE, MARKET)
+    assert not result.valid
+    assert result.invalid_reason == "invalid_timestamp"
 
 
 def test_window_gap_and_low_samples_fail_closed():
@@ -66,6 +95,65 @@ def test_provider_reads_csv_and_rejects_missing_history(tmp_path):
     assert strategy.refresh(EFFECTIVE + 3600).valid is False
 
 
+def test_provider_rejects_mismatched_csv_market_identity(tmp_path):
+    p = tmp_path / "sndk-rh.csv"
+    with p.open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=[
+            "minute_ts", "market_key", "premium_close_bps",
+            "sell_edge_max_bps", "buy_edge_max_bps", "samples"])
+        writer.writeheader()
+        for r in rows():
+            writer.writerow({"minute_ts": r["ts"],
+                             "market_key": "wrong-market" if r["ts"] == EFFECTIVE - 60 else MARKET,
+                             "premium_close_bps": r["premium"],
+                             "sell_edge_max_bps": r["sell"],
+                             "buy_edge_max_bps": r["buy"],
+                             "samples": r["samples"]})
+    strategy = LegacyRollingStrategy(csv_path=str(p), market_key=MARKET)
+    result = strategy.refresh(EFFECTIVE)
+    assert not result.valid
+    assert result.invalid_reason == "market_mismatch"
+
+
+def test_provider_does_not_use_incomplete_tail_and_retries_after_flush(tmp_path):
+    p = tmp_path / "sndk-rh.csv"
+    with p.open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=[
+            "minute_ts", "premium_close_bps", "sell_edge_max_bps",
+            "buy_edge_max_bps", "samples"])
+        writer.writeheader()
+        for r in rows():
+            writer.writerow({"minute_ts": r["ts"],
+                             "premium_close_bps": r["premium"],
+                             "sell_edge_max_bps": r["sell"],
+                             "buy_edge_max_bps": r["buy"],
+                             "samples": r["samples"]})
+    complete = p.read_bytes()
+    assert complete.endswith(b"\n")
+    p.write_bytes(complete[:-1])
+
+    strategy = LegacyRollingStrategy(csv_path=str(p), market_key=MARKET)
+    first = strategy.refresh(EFFECTIVE)
+    assert not first.valid
+    assert first.invalid_reason == "incomplete_csv_tail"
+
+    p.write_bytes(complete)
+    second = strategy.refresh(EFFECTIVE)
+    assert second.valid
+
+
+def test_provider_rejects_strict_csv_parse_errors(tmp_path):
+    p = tmp_path / "sndk-rh.csv"
+    p.write_text(
+        "minute_ts,premium_close_bps,sell_edge_max_bps,buy_edge_max_bps,samples\n"
+        '"unterminated,0,0,0,30\n'
+    )
+    strategy = LegacyRollingStrategy(csv_path=str(p), market_key=MARKET)
+    result = strategy.refresh(EFFECTIVE)
+    assert not result.valid
+    assert result.invalid_reason == "csv_read_error:Error"
+
+
 def test_fixed_strategy_keeps_original_threshold_without_rolling_provider():
     cfg = SimpleNamespace(strategy_mode="fixed", midline_bps=10.0,
                           upper_bps=4.0, lower_bps=5.0,
@@ -94,3 +182,19 @@ def test_rolling_strategy_never_falls_back_to_fixed_config(tmp_path):
     assert eng._threshold_values() is None
     assert eng._refresh_rolling(EFFECTIVE) is False
     assert eng._threshold_values() is None
+
+
+def test_invalid_rolling_snapshot_blocks_engine_scan(tmp_path):
+    cfg = SimpleNamespace(strategy_mode="rolling_legacy",
+                          rolling_csv=str(tmp_path / "missing.csv"),
+                          rolling_sell_quantile=0.8,
+                          rolling_buy_quantile=0.5,
+                          entropy=SimpleNamespace(hl_dex="io", fee_bps=0),
+                          hedge=SimpleNamespace(fee_bps=0),
+                          symbol="SNDK", hedge_venue="lighter-rh",
+                          journal_path="unused", journal_enabled=False)
+    eng = Engine(cfg, record_only=False)
+    called = []
+    eng._scan = lambda now: called.append(now)
+    asyncio.run(eng._evaluate())
+    assert called == []

@@ -21,9 +21,11 @@ mode still requires all three fields exactly as before.
 
 **Important:** The file above must be dedicated to **one pair only**:
 `io:SNDK` versus `lighter-rh:SNDK`. Existing Recorder CSV files do not
-carry a market ID. Therefore the program cannot independently verify pair
-provenance; select and review the file path before using the live mode. Do
-not point it to the shared multi-market Recorder output.
+carry a market ID. If a source export does include a `market_key` or `market`
+column, the provider rejects rows for another pair; for the existing schema,
+the program cannot independently verify pair provenance. Select and review
+the file path before using the live mode. Do not point it to the shared
+multi-market Recorder output.
 
 If recording in the same trading process, configure `recorder.csv` to the
 same dedicated pair file. It must contain the original recorder columns:
