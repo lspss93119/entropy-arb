@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 import time
 from datetime import datetime, timezone
@@ -40,7 +41,7 @@ def main() -> int:
         parser.error("--effective-at must be a UTC whole hour")
     if args.market_key != "io:SNDK|lighter-rh:SNDK":
         parser.error("this SNDK × RH verifier requires market-key io:SNDK|lighter-rh:SNDK")
-    if not 0 <= args.fees_bps < 1000:
+    if not math.isfinite(args.fees_bps) or not 0 <= args.fees_bps < 1000:
         parser.error("--fees-bps must be finite and non-negative")
 
     provider = LegacyRollingStrategy(
