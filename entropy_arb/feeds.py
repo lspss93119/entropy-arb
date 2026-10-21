@@ -9,14 +9,15 @@ HLBookFeed: the official Hyperliquid websocket (wss://api.hyperliquid.xyz/ws)
     l2Book channel with fast snapshots and client app-pings. Every price this
     bot trades on comes straight from the exchange that will fill the order.
 
-Both touch the book on any inbound frame (connection-based freshness: a quiet
-market is not stale, only a dead feed is) and reconnect with backoff.
+Both retain connection liveness separately from book event timestamps.
+Reconnects use backoff; quote-age checking is an optional decision gate.
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
+import math
 from typing import Callable, Optional
 
 try:
@@ -40,6 +41,19 @@ def _chan_id(channel: str) -> Optional[int]:
     return None
 
 
+def _source_time_seconds(value, *, divisor: float) -> Optional[float]:
+    """Normalize documented venue event time (milliseconds/microseconds)."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        stamp = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(stamp) or stamp <= 0:
+        return None
+    return stamp / divisor
+
+
 class LighterBookFeed:
     """zkLighter order book for one market over one connection."""
 
@@ -61,10 +75,15 @@ class LighterBookFeed:
         if _chan_id(msg.get("channel", "")) != self.market_id:
             return
         ob = msg["order_book"]
+        # Prefer matching-engine time (microseconds) over broadcast time (ms).
+        source_us = ob.get("last_updated_at", msg.get("last_updated_at"))
+        source_ts = (_source_time_seconds(source_us, divisor=1_000_000.0)
+                     if source_us is not None else
+                     _source_time_seconds(msg.get("timestamp"), divisor=1000.0))
         if snapshot:
             self._nonce = ob.get("nonce")
             self._synced = True
-            self.book.apply_lighter(ob, snapshot=True)
+            self.book.apply_lighter(ob, snapshot=True, source_ts=source_ts)
             log.info("[%s] snapshot: %d bids / %d asks", self.name,
                      len(self.book.bids), len(self.book.asks))
             self.notify()
@@ -87,7 +106,7 @@ class LighterBookFeed:
             return
         if end is not None:
             self._nonce = end
-        self.book.apply_lighter(ob, snapshot=False)
+        self.book.apply_lighter(ob, snapshot=False, source_ts=source_ts)
         self.notify()
 
     async def run(self, stop: asyncio.Event) -> None:
@@ -146,7 +165,9 @@ class HLBookFeed:
         if msg.get("channel") == "l2Book":
             d = msg.get("data") or {}
             if d.get("coin") == self.coin:
-                self.book.apply_hl(d["levels"])
+                self.book.apply_hl(
+                    d["levels"],
+                    source_ts=_source_time_seconds(d.get("time"), divisor=1000.0))
                 if not self._snapped:
                     self._snapped = True
                     log.info("[%s] snapshot: %d bids / %d asks", self.name,

@@ -389,8 +389,8 @@ class Engine:
         best = None
         for buy, sell, dkey in ((self.hedge, self.entropy, "sell_entropy"),
                                 (self.entropy, self.hedge, "buy_entropy")):
-            if not (buy.book.is_fresh(cfg.staleness_sec)
-                    and sell.book.is_fresh(cfg.staleness_sec)):
+            if not (buy.book.is_fresh(cfg.staleness_sec, cfg.max_quote_age_sec)
+                    and sell.book.is_fresh(cfg.staleness_sec, cfg.max_quote_age_sec)):
                 continue
             if not (buy.ready_to_trade() and sell.ready_to_trade()):
                 continue
@@ -884,7 +884,8 @@ class Engine:
                 raise
             books = " | ".join(
                 f"{v.name} {v.book.best_bid() or '—'}/{v.book.best_ask() or '—'}"
-                + ("" if v.book.is_fresh(cfg.staleness_sec) else " STALE")
+                + ("" if v.book.is_fresh(cfg.staleness_sec, cfg.max_quote_age_sec)
+                   else " STALE")
                 + (" RATE-LTD" if self._venue_limited(v) else "")
                 + (" DOWN" if v.key in self._venue_down else "")
                 for v in self.venues.values())
