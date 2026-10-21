@@ -65,3 +65,34 @@ git diff --check
 
 Review the known baseline Rich terminal truncation test separately;
 do not interpret it as a new strategy regression without comparison.
+
+
+## Pre-live offline source check (no trading)
+
+Use the dedicated rolling example `config.sndk-rh-rolling.example.yaml`.
+The fixed `config.example.yaml` is unchanged. Neither file contains
+credentials. The pilot example has per-leg cap $100, per-order cap $25,
+but **do not start it to validate parameters**: the normal `main.py`
+invocation without `--record-only` can send real orders.
+
+Instead, from repository root run:
+
+```bash
+python tools/verify_rolling_sndk_rh.py \
+  --csv logs/sndk-rh-minutes.csv \
+  --effective-at 2026-10-20T11:00:00Z
+```
+
+The command is read-only, does not instantiate Engine, and exits with 0 for
+a valid 480-minute window, 2 for an invalid window. Omit
+`--effective-at` to check the most recent UTC hour. Check `valid`,
+`rows`, `coverage`, `reason` and the three parameters in the JSON output.
+A historical exported CSV verifies calculation only, **not** that Mac mini
+has a current, automatically updating dedicated source.
+
+The existing multi-market Recorder processes must not be modified or
+restarted merely to validate the strategy. Verify source provenance
+manually for the old schema, which has no embedded market key.
+
+This step does not test signed account queries, true IOC fills, quote-age,
+recovery, or authorize live trading.
