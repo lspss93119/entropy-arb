@@ -191,9 +191,10 @@ class Engine:
                              self._step)
         self._min_notional = max(cfg.min_order_notional,
                                  self.entropy.min_quote, self.hedge.min_quote)
-        self.journal.emit("parameter_snapshot", midline_bps=cfg.midline_bps,
-                          upper_bps=cfg.upper_bps, lower_bps=cfg.lower_bps,
-                          parameter_source="fixed_config")
+        if self._rolling is None:
+            self.journal.emit("parameter_snapshot", midline_bps=cfg.midline_bps,
+                              upper_bps=cfg.upper_bps, lower_bps=cfg.lower_bps,
+                              parameter_source="fixed_config")
         log.info("pair ENTROPY(%s)-%s(%s): midline=%+.2fbps band=[-%.2f, +%.2f] "
                  "fees=%.2f+%.2f step=%g min_ntl=$%g",
                  self.entropy.conf.symbol, self.hedge.name,
