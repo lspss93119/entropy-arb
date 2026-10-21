@@ -49,7 +49,7 @@ class Engine:
         self.record_only = record_only
         self._rolling = None
         self._active_rolling = None
-        if cfg.strategy_mode == "rolling_legacy" and not record_only:
+        if getattr(cfg, "strategy_mode", "fixed") == "rolling_legacy" and not record_only:
             self._rolling = LegacyRollingStrategy(
                 csv_path=cfg.rolling_csv,
                 market_key=f"{cfg.entropy.hl_dex}:{cfg.symbol}|{cfg.hedge_venue}:{cfg.symbol}",
