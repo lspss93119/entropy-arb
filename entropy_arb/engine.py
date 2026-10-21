@@ -29,6 +29,7 @@ from .book import ArbPlan, floor_step, plan_arb
 from .config import Config
 from .recorder import MinuteRecorder
 from .execution_journal import ExecutionJournal
+from .rolling_legacy_strategy import LegacyRollingStrategy
 from .venue_hl import HLVenue
 from .venue_lighter import LighterVenue
 
@@ -46,6 +47,15 @@ class Engine:
     def __init__(self, cfg: Config, record_only: bool = False) -> None:
         self.cfg = cfg
         self.record_only = record_only
+        self._rolling = None
+        self._active_rolling = None
+        if cfg.strategy_mode == "rolling_legacy" and not record_only:
+            self._rolling = LegacyRollingStrategy(
+                csv_path=cfg.rolling_csv,
+                market_key=f"{cfg.entropy.hl_dex}:{cfg.symbol}|{cfg.hedge_venue}:{cfg.symbol}",
+                sell_quantile=cfg.rolling_sell_quantile,
+                buy_quantile=cfg.rolling_buy_quantile,
+                fees_bps=cfg.entropy.fee_bps + cfg.hedge.fee_bps)
         self.journal = ExecutionJournal(cfg.journal_path, enabled=cfg.journal_enabled)
         self.session: Optional[aiohttp.ClientSession] = None
         self.entropy = None
@@ -263,15 +273,52 @@ class Engine:
 
         return max(ramp(buy, buy.position >= 0), ramp(sell, sell.position <= 0))
 
+    def _threshold_values(self):
+        if self._rolling is None:
+            return (self.cfg.midline_bps, self.cfg.upper_bps,
+                    self.cfg.lower_bps)
+        if self._active_rolling is None or not self._active_rolling.valid:
+            return None
+        p = self._active_rolling
+        return p.midline_bps, p.upper_bps, p.lower_bps
+
+    def _refresh_rolling(self, now):
+        if self._rolling is None:
+            return True
+        previous = self._active_rolling
+        current = self._rolling.refresh(now)
+        self._active_rolling = current
+        if previous is None or previous.effective_at != current.effective_at:
+            self.journal.emit(
+                "parameter_snapshot", parameter_source="rolling_legacy",
+                effective_at=current.effective_at,
+                window_start=current.window_start,
+                window_end=current.window_end,
+                sample_count=current.sample_count,
+                coverage=current.coverage, valid=current.valid,
+                invalid_reason=current.invalid_reason,
+                midline_bps=current.midline_bps,
+                upper_bps=current.upper_bps,
+                lower_bps=current.lower_bps)
+            log.info("[ROLLING LEGACY] effective=%s valid=%s M=%s U=%s L=%s reason=%s",
+                     current.effective_at, current.valid, current.midline_bps,
+                     current.upper_bps, current.lower_bps,
+                     current.invalid_reason)
+        return bool(current.valid)
+
     def _eff_threshold(self, buy, sell) -> float:
         """Net hurdle (bps, on top of fees) for the direction buy->sell.
 
         selling entropy: executable premium must clear midline + upper;
         buying entropy: the reverse premium must clear lower - midline."""
+        values = self._threshold_values()
+        if values is None:
+            raise RuntimeError("no valid rolling parameter snapshot")
+        midline, upper, lower = values
         if sell.key == "entropy":
-            base = self.cfg.midline_bps + self.cfg.upper_bps
+            base = midline + upper
         else:
-            base = self.cfg.lower_bps - self.cfg.midline_bps
+            base = lower - midline
         return base + self._inv_add_bps(buy, sell)
 
     def _headroom(self, buy, sell, ref_px: float) -> float:
@@ -330,6 +377,8 @@ class Engine:
         if self.halted:
             return
         now = time.time()
+        if not self._refresh_rolling(now):
+            return
         if now - self.last_trade_ts < cfg.cooldown_sec:
             self._schedule_poke(cfg.cooldown_sec - (now - self.last_trade_ts))
             return
@@ -461,8 +510,10 @@ class Engine:
                 sell_bid=sell.book.best_bid(), sell_ask=sell.book.best_ask(),
                 buy_book_updated_utc=buy.book.last_update_ts,
                 sell_book_updated_utc=sell.book.last_update_ts,
-                midline_bps=cfg.midline_bps, upper_bps=cfg.upper_bps,
-                lower_bps=cfg.lower_bps, inventory_add_bps=inv_bps,
+                midline_bps=self._threshold_values()[0],
+                upper_bps=self._threshold_values()[1],
+                lower_bps=self._threshold_values()[2],
+                inventory_add_bps=inv_bps,
                 expected_edge_usd=plan.exp_edge_usd,
                 buy_position_before=buy.position, sell_position_before=sell.position,
             )
