@@ -138,6 +138,10 @@ class Config:
     hl_ws_url: str = HL_WS_URL
     journal_enabled: bool = False
     journal_path: str = 'logs/execution_events.jsonl'
+    strategy_mode: str = 'fixed'
+    rolling_csv: str = ''
+    rolling_sell_quantile: float = 0.80
+    rolling_buy_quantile: float = 0.50
 
     @property
     def creds_complete(self) -> bool:
@@ -154,6 +158,12 @@ class Config:
 
 # Schema: nested dict of key -> type (or nested dict). Unknown keys are errors.
 _SCHEMA: Dict[str, Any] = {
+    "strategy": {
+        "mode": str,
+        "rolling_csv": str,
+        "sell_quantile": float,
+        "buy_quantile": float,
+    },
     "thresholds": {
         "midline_bps": float,
         "upper_bps": float,
@@ -278,6 +288,18 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
             f"--hedge must be one of {list(HEDGE_VENUES)}, got "
             f"{hedge_venue!r} / --hedge 必须是 {list(HEDGE_VENUES)} 之一")
 
+    strat = raw.get("strategy") or {}
+    mode = strat.get("mode", "fixed")
+    if mode not in ("fixed", "rolling_legacy"):
+        raise ConfigError("strategy.mode must be fixed or rolling_legacy")
+    if mode == "rolling_legacy":
+        if not strat.get("rolling_csv"):
+            raise ConfigError("strategy.rolling_csv requires a dedicated pair CSV")
+        for key, default in (("sell_quantile", 0.80), ("buy_quantile", 0.50)):
+            q = strat.get(key, default)
+            if not 0 < q < 1:
+                raise ConfigError(f"strategy.{key} must be in (0,1)")
+
     thr = raw.get("thresholds") or {}
     for k in ("midline_bps", "upper_bps", "lower_bps"):
         if k not in thr:
@@ -370,6 +392,10 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         trades_csv=_get(raw, "logging", "trades_csv", "logs/trades.csv"),
         journal_enabled=bool(_get(raw, "logging", "journal_enabled", False)),
         journal_path=_get(raw, "logging", "journal_path", "logs/execution_events.jsonl"),
+        strategy_mode=mode,
+        rolling_csv=strat.get("rolling_csv", ""),
+        rolling_sell_quantile=float(strat.get("sell_quantile", 0.80)),
+        rolling_buy_quantile=float(strat.get("buy_quantile", 0.50)),
         dashboard=bool(_get(raw, "logging", "dashboard", True)),
         log_file=_get(raw, "logging", "file", "logs/engine.log"),
     )
