@@ -301,12 +301,13 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
                 raise ConfigError(f"strategy.{key} must be in (0,1)")
 
     thr = raw.get("thresholds") or {}
-    for k in ("midline_bps", "upper_bps", "lower_bps"):
-        if k not in thr:
-            raise ConfigError(f"'thresholds.{k}' is required — derive it from "
-                              f"recorded minute data / 必须填写，请用采集的分钟"
-                              f"数据计算后填入")
-    upper, lower = float(thr["upper_bps"]), float(thr["lower_bps"])
+    if mode == "fixed":
+        for k in ("midline_bps", "upper_bps", "lower_bps"):
+            if k not in thr:
+                raise ConfigError(f"'thresholds.{k}' is required — derive it from "
+                                  f"recorded minute data / 必须填写，请用采集的分钟"
+                                  f"数据计算后填入")
+    upper, lower = float(thr.get("upper_bps", 1.0)), float(thr.get("lower_bps", 1.0))
     if upper <= 0 or lower <= 0:
         raise ConfigError("thresholds.upper_bps and lower_bps must be > 0 "
                           "(the round trip nets upper+lower bps after fees)")
@@ -365,7 +366,7 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         hedge_venue=hedge_venue,
         entropy=entropy,
         hedge=hedge,
-        midline_bps=float(thr["midline_bps"]),
+        midline_bps=float(thr.get("midline_bps", 0.0)),
         upper_bps=upper,
         lower_bps=lower,
         take_fraction=take_fraction,
