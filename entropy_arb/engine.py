@@ -951,8 +951,12 @@ class Engine:
             log.info("[status] %s | prem %s bps (band %+.2f..%+.2f) | pos %s "
                      "net %+.6g | trades %d hedges %d | MTM %s expEdge $%.4f "
                      "fillEdge $%.4f%s%s",
-                     books, prem_s, cfg.midline_bps - cfg.lower_bps,
-                     cfg.midline_bps + cfg.upper_bps, pos, net, self.trades,
+                     books, prem_s,
+                     ((self._threshold_values() or (0.0, 0.0, 0.0))[0] -
+                      (self._threshold_values() or (0.0, 0.0, 0.0))[2]),
+                     ((self._threshold_values() or (0.0, 0.0, 0.0))[0] +
+                      (self._threshold_values() or (0.0, 0.0, 0.0))[1]),
+                     pos, net, self.trades,
                      self.hedges,
                      f"${pnl:+.4f}" if pnl is not None else "—",
                      self.total_exp_edge, self.total_fill_edge, rec,
@@ -980,7 +984,7 @@ class Engine:
                             f"{plan.buy_notional:.2f}", f"{plan.sell_notional:.2f}",
                             f"{plan.exp_edge_usd:.4f}", f"{plan.gross_edge_usd:.4f}",
                             f"{plan.marginal_premium_bps:.3f}",
-                            f"{self.cfg.midline_bps:.3f}",
+                            f"{self._threshold_values()[0]:.3f}",
                             f"{inv_bps:.3f}", int(ok), f"{bfill:.8g}",
                             f"{sfill:.8g}", bstatus, sstatus, f"{fill_edge:.4f}"])
         except Exception:
