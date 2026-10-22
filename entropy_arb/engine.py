@@ -195,12 +195,19 @@ class Engine:
             self.journal.emit("parameter_snapshot", midline_bps=cfg.midline_bps,
                               upper_bps=cfg.upper_bps, lower_bps=cfg.lower_bps,
                               parameter_source="fixed_config")
-        log.info("pair ENTROPY(%s)-%s(%s): midline=%+.2fbps band=[-%.2f, +%.2f] "
-                 "fees=%.2f+%.2f step=%g min_ntl=$%g",
-                 self.entropy.conf.symbol, self.hedge.name,
-                 self.hedge.conf.symbol, cfg.midline_bps, cfg.lower_bps,
-                 cfg.upper_bps, self.entropy.fee_bps, self.hedge.fee_bps,
-                 self._step, self._min_notional)
+        if self._rolling is None:
+            log.info("pair ENTROPY(%s)-%s(%s): midline=%+.2fbps "
+                     "band=[-%.2f, +%.2f] fees=%.2f+%.2f step=%g min_ntl=$%g",
+                     self.entropy.conf.symbol, self.hedge.name,
+                     self.hedge.conf.symbol, cfg.midline_bps, cfg.lower_bps,
+                     cfg.upper_bps, self.entropy.fee_bps, self.hedge.fee_bps,
+                     self._step, self._min_notional)
+        else:
+            log.info("pair ENTROPY(%s)-%s(%s): rolling legacy parameters "
+                     "pending fees=%.2f+%.2f step=%g min_ntl=$%g",
+                     self.entropy.conf.symbol, self.hedge.name,
+                     self.hedge.conf.symbol, self.entropy.fee_bps,
+                     self.hedge.fee_bps, self._step, self._min_notional)
 
         if self.record_only:
             log.warning("RECORD-ONLY — collecting minute data, no strategy, "
@@ -948,14 +955,15 @@ class Engine:
             pnl = self.session_pnl()
             rec = (f" | rec {self.recorder.rows_written} rows"
                    if self.recorder else "")
-            log.info("[status] %s | prem %s bps (band %+.2f..%+.2f) | pos %s "
+            values = self._threshold_values()
+            band = ("INVALID" if values is None else
+                    f"{values[0] - values[2]:+.2f}.."
+                    f"{values[0] + values[1]:+.2f}")
+            log.info("[status] %s | prem %s bps (band %s) | pos %s "
                      "net %+.6g | trades %d hedges %d | MTM %s expEdge $%.4f "
                      "fillEdge $%.4f%s%s",
                      books, prem_s,
-                     ((self._threshold_values() or (0.0, 0.0, 0.0))[0] -
-                      (self._threshold_values() or (0.0, 0.0, 0.0))[2]),
-                     ((self._threshold_values() or (0.0, 0.0, 0.0))[0] +
-                      (self._threshold_values() or (0.0, 0.0, 0.0))[1]),
+                     band,
                      pos, net, self.trades,
                      self.hedges,
                      f"${pnl:+.4f}" if pnl is not None else "—",
