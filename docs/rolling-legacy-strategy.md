@@ -11,7 +11,7 @@ Copy the existing `config.example.yaml` to a separate configuration file
 ```yaml
 strategy:
   mode: rolling_legacy
-  rolling_csv: logs/sndk-rh-minutes.csv
+  rolling_csv: logs/minutes-SNDK-lighter-rh.csv
   sell_quantile: 0.80
   buy_quantile: 0.50
 ```
@@ -79,7 +79,7 @@ Instead, from repository root run:
 
 ```bash
 python tools/verify_rolling_sndk_rh.py \
-  --csv logs/sndk-rh-minutes.csv \
+  --csv logs/minutes-SNDK-lighter-rh.csv \
   --effective-at 2026-10-20T11:00:00Z
 ```
 

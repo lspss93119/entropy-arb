@@ -11,6 +11,11 @@ import math
 import sys
 import time
 from datetime import datetime, timezone
+from pathlib import Path
+
+# Support the documented ``python3 tools/verify_rolling_sndk_rh.py`` form
+# without requiring callers to set PYTHONPATH manually.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from entropy_arb.rolling_legacy_strategy import LegacyRollingStrategy
 

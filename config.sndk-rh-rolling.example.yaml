@@ -5,7 +5,9 @@
 
 strategy:
   mode: rolling_legacy
-  rolling_csv: logs/sndk-rh-minutes.csv
+  # Existing multi-market Recorder output for --symbol SNDK --hedge lighter-rh.
+  # Keep recorder.csv below separate so this example never overwrites that file.
+  rolling_csv: logs/minutes-SNDK-lighter-rh.csv
   sell_quantile: 0.80
   buy_quantile: 0.50
 
