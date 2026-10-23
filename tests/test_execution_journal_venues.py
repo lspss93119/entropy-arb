@@ -3,6 +3,8 @@ import asyncio
 import sys
 import types
 
+import pytest
+
 from entropy_arb.venue_hl import HLVenue
 from entropy_arb.venue_lighter import AccountOrdersFeed, LighterVenue
 
@@ -195,3 +197,103 @@ def test_hyperliquid_ioc_timing_stamps_api_before_settlement():
     assert result["exchange_order_id"] == "24680"
     assert trace["exchange_order_id"] == "24680"
     assert trace["api_response_utc_ns"] <= trace["settlement_observed_utc_ns"]
+
+
+def test_hyperliquid_standard_equity_is_scoped_to_configured_dex():
+    async def scenario():
+        venue = HLVenue.__new__(HLVenue)
+        venue.conf = types.SimpleNamespace(hl_dex="io")
+        venue.include_core_equity = True
+        venue.account = None
+        venue._query_address = lambda: "0xuser"
+        calls = []
+
+        async def info(payload):
+            calls.append(payload)
+            if payload["type"] == "userAbstraction":
+                return "disabled"
+            return {"marginSummary": {"accountValue": "0"},
+                    "withdrawable": "0"}
+
+        venue._info = info
+        return await venue.fetch_equity(), calls
+
+    result, calls = asyncio.run(scenario())
+    assert result == (0.0, 0.0)
+    assert calls == [
+        {"type": "userAbstraction", "user": "0xuser"},
+        {"type": "clearinghouseState", "user": "0xuser", "dex": "io"},
+    ]
+
+
+def test_hyperliquid_unified_equity_uses_spot_collateral_state():
+    async def scenario():
+        venue = HLVenue.__new__(HLVenue)
+        venue.conf = types.SimpleNamespace(hl_dex="io")
+        venue.collateral_token = 0
+        venue.include_core_equity = True
+        venue.account = None
+        venue._query_address = lambda: "0xuser"
+        calls = []
+
+        async def info(payload):
+            calls.append(payload)
+            if payload["type"] == "userAbstraction":
+                return "unifiedAccount"
+            if payload["type"] == "spotClearinghouseState":
+                return {
+                    "balances": [{"coin": "USDC", "token": 0,
+                                  "total": "3679.140172", "hold": "0"}],
+                    "tokenToAvailableAfterMaintenance": [[0, "3679.140172"]],
+                }
+            raise AssertionError(f"unexpected info request: {payload}")
+
+        venue._info = info
+        return await venue.fetch_equity(), calls
+
+    result, calls = asyncio.run(scenario())
+    assert result == (3679.140172, 3679.140172)
+    assert calls == [
+        {"type": "userAbstraction", "user": "0xuser"},
+        {"type": "spotClearinghouseState", "user": "0xuser"},
+    ]
+
+
+def test_hyperliquid_unified_equity_can_be_excluded_for_shared_account():
+    async def scenario():
+        venue = HLVenue.__new__(HLVenue)
+        venue.conf = types.SimpleNamespace(hl_dex="io")
+        venue.collateral_token = 0
+        venue.include_core_equity = False
+        venue.account = None
+        venue._query_address = lambda: "0xuser"
+
+        async def info(payload):
+            assert payload == {"type": "userAbstraction", "user": "0xuser"}
+            return "unifiedAccount"
+
+        venue._info = info
+        return await venue.fetch_equity()
+
+    assert asyncio.run(scenario()) == (0.0, 0.0)
+
+
+def test_hyperliquid_equity_rejects_missing_authoritative_fields():
+    async def scenario():
+        venue = HLVenue.__new__(HLVenue)
+        venue.conf = types.SimpleNamespace(hl_dex="io")
+        venue.include_core_equity = True
+        venue.account = None
+        venue._query_address = lambda: "0xuser"
+
+        async def info(payload):
+            if payload["type"] == "userAbstraction":
+                return "disabled"
+            assert payload["type"] == "clearinghouseState"
+            return {"marginSummary": {}}
+
+        venue._info = info
+        return await venue.fetch_equity()
+
+    with pytest.raises(RuntimeError, match="accountValue"):
+        asyncio.run(scenario())

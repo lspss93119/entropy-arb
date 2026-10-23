@@ -29,6 +29,7 @@ from .book import ArbPlan, floor_step, plan_arb
 from .config import Config
 from .recorder import MinuteRecorder
 from .execution_journal import ExecutionJournal
+from .rolling_legacy_strategy import LegacyRollingStrategy
 from .venue_hl import HLVenue
 from .venue_lighter import LighterVenue
 
@@ -46,6 +47,15 @@ class Engine:
     def __init__(self, cfg: Config, record_only: bool = False) -> None:
         self.cfg = cfg
         self.record_only = record_only
+        self._rolling = None
+        self._active_rolling = None
+        if getattr(cfg, "strategy_mode", "fixed") == "rolling_legacy" and not record_only:
+            self._rolling = LegacyRollingStrategy(
+                csv_path=cfg.rolling_csv,
+                market_key=f"{cfg.entropy.hl_dex}:{cfg.symbol}|{cfg.hedge_venue}:{cfg.symbol}",
+                sell_quantile=cfg.rolling_sell_quantile,
+                buy_quantile=cfg.rolling_buy_quantile,
+                fees_bps=cfg.entropy.fee_bps + cfg.hedge.fee_bps)
         self.journal = ExecutionJournal(cfg.journal_path, enabled=cfg.journal_enabled)
         self.session: Optional[aiohttp.ClientSession] = None
         self.entropy = None
@@ -181,15 +191,23 @@ class Engine:
                              self._step)
         self._min_notional = max(cfg.min_order_notional,
                                  self.entropy.min_quote, self.hedge.min_quote)
-        self.journal.emit("parameter_snapshot", midline_bps=cfg.midline_bps,
-                          upper_bps=cfg.upper_bps, lower_bps=cfg.lower_bps,
-                          parameter_source="fixed_config")
-        log.info("pair ENTROPY(%s)-%s(%s): midline=%+.2fbps band=[-%.2f, +%.2f] "
-                 "fees=%.2f+%.2f step=%g min_ntl=$%g",
-                 self.entropy.conf.symbol, self.hedge.name,
-                 self.hedge.conf.symbol, cfg.midline_bps, cfg.lower_bps,
-                 cfg.upper_bps, self.entropy.fee_bps, self.hedge.fee_bps,
-                 self._step, self._min_notional)
+        if self._rolling is None:
+            self.journal.emit("parameter_snapshot", midline_bps=cfg.midline_bps,
+                              upper_bps=cfg.upper_bps, lower_bps=cfg.lower_bps,
+                              parameter_source="fixed_config")
+        if self._rolling is None:
+            log.info("pair ENTROPY(%s)-%s(%s): midline=%+.2fbps "
+                     "band=[-%.2f, +%.2f] fees=%.2f+%.2f step=%g min_ntl=$%g",
+                     self.entropy.conf.symbol, self.hedge.name,
+                     self.hedge.conf.symbol, cfg.midline_bps, cfg.lower_bps,
+                     cfg.upper_bps, self.entropy.fee_bps, self.hedge.fee_bps,
+                     self._step, self._min_notional)
+        else:
+            log.info("pair ENTROPY(%s)-%s(%s): rolling legacy parameters "
+                     "pending fees=%.2f+%.2f step=%g min_ntl=$%g",
+                     self.entropy.conf.symbol, self.hedge.name,
+                     self.hedge.conf.symbol, self.entropy.fee_bps,
+                     self.hedge.fee_bps, self._step, self._min_notional)
 
         if self.record_only:
             log.warning("RECORD-ONLY — collecting minute data, no strategy, "
@@ -263,15 +281,52 @@ class Engine:
 
         return max(ramp(buy, buy.position >= 0), ramp(sell, sell.position <= 0))
 
+    def _threshold_values(self):
+        if self._rolling is None:
+            return (self.cfg.midline_bps, self.cfg.upper_bps,
+                    self.cfg.lower_bps)
+        if self._active_rolling is None or not self._active_rolling.valid:
+            return None
+        p = self._active_rolling
+        return p.midline_bps, p.upper_bps, p.lower_bps
+
+    def _refresh_rolling(self, now):
+        if self._rolling is None:
+            return True
+        previous = self._active_rolling
+        current = self._rolling.refresh(now)
+        self._active_rolling = current
+        if previous is None or previous.effective_at != current.effective_at:
+            self.journal.emit(
+                "parameter_snapshot", parameter_source="rolling_legacy",
+                effective_at=current.effective_at,
+                window_start=current.window_start,
+                window_end=current.window_end,
+                sample_count=current.sample_count,
+                coverage=current.coverage, valid=current.valid,
+                invalid_reason=current.invalid_reason,
+                midline_bps=current.midline_bps,
+                upper_bps=current.upper_bps,
+                lower_bps=current.lower_bps)
+            log.info("[ROLLING LEGACY] effective=%s valid=%s M=%s U=%s L=%s reason=%s",
+                     current.effective_at, current.valid, current.midline_bps,
+                     current.upper_bps, current.lower_bps,
+                     current.invalid_reason)
+        return bool(current.valid)
+
     def _eff_threshold(self, buy, sell) -> float:
         """Net hurdle (bps, on top of fees) for the direction buy->sell.
 
         selling entropy: executable premium must clear midline + upper;
         buying entropy: the reverse premium must clear lower - midline."""
+        values = self._threshold_values()
+        if values is None:
+            raise RuntimeError("no valid rolling parameter snapshot")
+        midline, upper, lower = values
         if sell.key == "entropy":
-            base = self.cfg.midline_bps + self.cfg.upper_bps
+            base = midline + upper
         else:
-            base = self.cfg.lower_bps - self.cfg.midline_bps
+            base = lower - midline
         return base + self._inv_add_bps(buy, sell)
 
     def _headroom(self, buy, sell, ref_px: float) -> float:
@@ -330,6 +385,8 @@ class Engine:
         if self.halted:
             return
         now = time.time()
+        if not self._refresh_rolling(now):
+            return
         if now - self.last_trade_ts < cfg.cooldown_sec:
             self._schedule_poke(cfg.cooldown_sec - (now - self.last_trade_ts))
             return
@@ -461,8 +518,10 @@ class Engine:
                 sell_bid=sell.book.best_bid(), sell_ask=sell.book.best_ask(),
                 buy_book_updated_utc=buy.book.last_update_ts,
                 sell_book_updated_utc=sell.book.last_update_ts,
-                midline_bps=cfg.midline_bps, upper_bps=cfg.upper_bps,
-                lower_bps=cfg.lower_bps, inventory_add_bps=inv_bps,
+                midline_bps=self._threshold_values()[0],
+                upper_bps=self._threshold_values()[1],
+                lower_bps=self._threshold_values()[2],
+                inventory_add_bps=inv_bps,
                 expected_edge_usd=plan.exp_edge_usd,
                 buy_position_before=buy.position, sell_position_before=sell.position,
             )
@@ -896,11 +955,16 @@ class Engine:
             pnl = self.session_pnl()
             rec = (f" | rec {self.recorder.rows_written} rows"
                    if self.recorder else "")
-            log.info("[status] %s | prem %s bps (band %+.2f..%+.2f) | pos %s "
+            values = self._threshold_values()
+            band = ("INVALID" if values is None else
+                    f"{values[0] - values[2]:+.2f}.."
+                    f"{values[0] + values[1]:+.2f}")
+            log.info("[status] %s | prem %s bps (band %s) | pos %s "
                      "net %+.6g | trades %d hedges %d | MTM %s expEdge $%.4f "
                      "fillEdge $%.4f%s%s",
-                     books, prem_s, cfg.midline_bps - cfg.lower_bps,
-                     cfg.midline_bps + cfg.upper_bps, pos, net, self.trades,
+                     books, prem_s,
+                     band,
+                     pos, net, self.trades,
                      self.hedges,
                      f"${pnl:+.4f}" if pnl is not None else "—",
                      self.total_exp_edge, self.total_fill_edge, rec,
@@ -928,7 +992,7 @@ class Engine:
                             f"{plan.buy_notional:.2f}", f"{plan.sell_notional:.2f}",
                             f"{plan.exp_edge_usd:.4f}", f"{plan.gross_edge_usd:.4f}",
                             f"{plan.marginal_premium_bps:.3f}",
-                            f"{self.cfg.midline_bps:.3f}",
+                            f"{self._threshold_values()[0]:.3f}",
                             f"{inv_bps:.3f}", int(ok), f"{bfill:.8g}",
                             f"{sfill:.8g}", bstatus, sstatus, f"{fill_edge:.4f}"])
         except Exception:

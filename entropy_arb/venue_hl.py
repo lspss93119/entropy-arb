@@ -83,6 +83,7 @@ class HLVenue:
         self.account: Optional[HLAccount] = None
         self.coin = ""
         self.asset_id = -1
+        self.collateral_token: Optional[int] = None
         self.size_decimals = 0
         self.min_base = 0.0
         self.min_quote = 10.0
@@ -105,6 +106,7 @@ class HLVenue:
                                f"{[n for n in names if n][:20]}...)")
         dex_index = names.index(self.conf.hl_dex)
         meta = await self._info({"type": "meta", "dex": self.conf.hl_dex})
+        self.collateral_token = meta.get("collateralToken")
         want = f"{self.conf.hl_dex}:{self.conf.symbol}"
         for idx, a in enumerate(meta["universe"]):
             if a["name"] not in (want, self.conf.symbol):
@@ -321,34 +323,97 @@ class HLVenue:
         return c.account_address.lower() if c and c.account_address else None
 
     async def fetch_equity(self):
-        """Unified account equity via the portfolio endpoint — the same
-        Portfolio Value the HL UI shows. Falls back to summing clearinghouse
-        buckets if the endpoint shape changes. When both venues share one HL
-        account (include_core_equity cleared on the hedge), that venue reports
-        only its dex bucket to avoid double-counting."""
+        """Return equity and available margin for this venue's account scope.
+
+        Unified and portfolio-margin accounts expose their cross-venue
+        collateral through ``spotClearinghouseState``.  Standard accounts
+        use the configured DEX's ``clearinghouseState``.  Missing or
+        non-finite authoritative fields are errors rather than zero-valued
+        balances.
+        """
         addr = self._query_address()
         if addr is None:
             return None
-        if self.include_core_equity:
+        abstraction = await self._info({"type": "userAbstraction",
+                                        "user": addr})
+        if not isinstance(abstraction, str):
+            raise RuntimeError("userAbstraction returned a non-string")
+        if abstraction in ("unifiedAccount", "portfolioMargin"):
+            if not self.include_core_equity:
+                return 0.0, 0.0
+            if self.collateral_token is None:
+                raise RuntimeError(
+                    f"missing collateral token for dex {self.conf.hl_dex!r}")
+            state = await self._info({"type": "spotClearinghouseState",
+                                      "user": addr})
+            if not isinstance(state, dict):
+                raise RuntimeError(
+                    "spotClearinghouseState returned a non-object")
+            balances = state.get("balances")
+            if not isinstance(balances, list):
+                raise RuntimeError(
+                    "spotClearinghouseState missing balances")
+            balance = next((b for b in balances
+                            if isinstance(b, dict)
+                            and b.get("token") == self.collateral_token), None)
+            if not isinstance(balance, dict) or "total" not in balance:
+                raise RuntimeError(
+                    f"spotClearinghouseState missing collateral token "
+                    f"{self.collateral_token}")
+            available_map = state.get("tokenToAvailableAfterMaintenance")
+            available = None
+            if isinstance(available_map, dict):
+                available = available_map.get(str(self.collateral_token))
+                if available is None:
+                    available = available_map.get(self.collateral_token)
+            elif isinstance(available_map, list):
+                for item in available_map:
+                    if (isinstance(item, (list, tuple)) and len(item) == 2
+                            and item[0] == self.collateral_token):
+                        available = item[1]
+                        break
+            if available is None:
+                raise RuntimeError(
+                    "spotClearinghouseState missing available-after-"
+                    "maintenance collateral value")
             try:
-                p = await self._info({"type": "portfolio", "user": addr})
-                for period, d in p:
-                    if period == "day":
-                        hist = d.get("accountValueHistory") or []
-                        if hist:
-                            return float(hist[-1][1]), None
-            except Exception as e:
-                log.debug("[%s] portfolio fetch failed, falling back: %r",
-                          self.name, e)
-        dexs = [self.conf.hl_dex] + ([""] if self.include_core_equity else [])
-        eq = fr = 0.0
-        for dex in dexs:
-            st = await self._info({"type": "clearinghouseState", "user": addr,
-                                   "dex": dex})
-            ms = st.get("marginSummary") or {}
-            eq += float(ms.get("accountValue") or 0.0)
-            fr += float(st.get("withdrawable") or 0.0)
-        return eq, fr
+                eq = float(balance["total"])
+                free = float(available)
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(
+                    "spotClearinghouseState has non-numeric collateral "
+                    "fields") from exc
+            if not math.isfinite(eq) or not math.isfinite(free):
+                raise RuntimeError(
+                    "spotClearinghouseState has non-finite collateral "
+                    "fields")
+            return eq, free
+
+        state = await self._info({"type": "clearinghouseState", "user": addr,
+                                  "dex": self.conf.hl_dex})
+        if not isinstance(state, dict):
+            raise RuntimeError("clearinghouseState returned a non-object")
+        ms = state.get("marginSummary")
+        if not isinstance(ms, dict) or "accountValue" not in ms:
+            raise RuntimeError(
+                f"clearinghouseState missing accountValue for dex "
+                f"{self.conf.hl_dex!r}")
+        if "withdrawable" not in state:
+            raise RuntimeError(
+                f"clearinghouseState missing withdrawable for dex "
+                f"{self.conf.hl_dex!r}")
+        try:
+            eq = float(ms["accountValue"])
+            free = float(state["withdrawable"])
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                f"clearinghouseState has non-numeric equity fields for dex "
+                f"{self.conf.hl_dex!r}") from exc
+        if not math.isfinite(eq) or not math.isfinite(free):
+            raise RuntimeError(
+                f"clearinghouseState has non-finite equity fields for dex "
+                f"{self.conf.hl_dex!r}")
+        return eq, free
 
     async def fetch_position(self) -> float:
         addr = self._query_address()
