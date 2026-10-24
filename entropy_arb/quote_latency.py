@@ -12,6 +12,7 @@ import math
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Optional, Sequence, Tuple
 
@@ -88,15 +89,15 @@ def _timestamp_candidates(message: dict, venue: str):
     )
 
 
-def _timestamp_unit(value: float) -> tuple[str, float]:
+def _timestamp_unit(value: Decimal) -> tuple[str, Decimal]:
     magnitude = abs(value)
-    if magnitude >= 1e18:
-        return "nanoseconds", 1.0
-    if magnitude >= 1e15:
-        return "microseconds", 1_000.0
-    if magnitude >= 1e12:
-        return "milliseconds", 1_000_000.0
-    return "seconds", 1_000_000_000.0
+    if magnitude >= Decimal("1e18"):
+        return "nanoseconds", Decimal("1")
+    if magnitude >= Decimal("1e15"):
+        return "microseconds", Decimal("1000")
+    if magnitude >= Decimal("1e12"):
+        return "milliseconds", Decimal("1000000")
+    return "seconds", Decimal("1000000000")
 
 
 def extract_source_timestamp(message: dict, venue: str) -> TimestampInfo:
@@ -108,14 +109,15 @@ def extract_source_timestamp(message: dict, venue: str) -> TimestampInfo:
         if isinstance(raw, bool):
             return TimestampInfo("invalid", raw, field)
         try:
-            value = float(raw)
-        except (TypeError, ValueError):
+            value = Decimal(str(raw))
+        except (InvalidOperation, TypeError, ValueError):
             return TimestampInfo("invalid", raw, field)
-        if not math.isfinite(value) or value < 0:
+        if not value.is_finite() or value < 0:
             return TimestampInfo("invalid", raw, field)
         unit, multiplier = _timestamp_unit(value)
         return TimestampInfo("present", raw, field, unit,
-                             int(round(value * multiplier)))
+                             int((value * multiplier).to_integral_value(
+                                 rounding=ROUND_HALF_UP)))
     return TimestampInfo("missing")
 
 

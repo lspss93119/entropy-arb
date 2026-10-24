@@ -93,6 +93,9 @@ def test_fake_run_writes_quotes_signals_decay_and_manifest(tmp_path):
     assert manifest["market_ids"] == {"entropy": "io:SNDK", "lighter-rh": 32}
     assert manifest["dropped_updates"] == 0
     assert manifest["lifecycle_events"] == 4
+    assert manifest["source_timestamp_counts"] == {
+        "present": 1, "missing": 1, "invalid": 0,
+    }
     assert (tmp_path / "manifest.json").exists()
     assert list(tmp_path.glob("quotes-*.jsonl"))
     assert list(tmp_path.glob("signals-*.jsonl"))
@@ -104,7 +107,11 @@ def test_fake_run_writes_quotes_signals_decay_and_manifest(tmp_path):
     assert signal["midline_bps"] == 0.0
     assert signal["upper_bps"] == 2.0
     assert signal["lower_bps"] == 3.0
-    assert signal["source_timestamp_status"] if "source_timestamp_status" in signal else True
+    quotes = list(tmp_path.glob("quotes-*.jsonl"))[0]
+    quote_rows = [json.loads(line) for line in quotes.read_text().splitlines()]
+    assert {row["source_timestamp_status"] for row in quote_rows} == {
+        "present", "missing",
+    }
 
 
 def test_queue_pressure_is_counted_without_blocking(tmp_path):
@@ -127,4 +134,31 @@ def test_cli_help_works_when_invoked_from_tools_path():
 
     assert result.returncode == 0
     assert "record-only public SNDK" in result.stdout
+
+
+def test_run_rebinds_queue_created_before_asyncio_run(tmp_path):
+    recorder = QuoteLatencyRecorder(
+        tmp_path, symbol="SNDK", hedge="lighter-rh",
+        rolling_provider=SimpleNamespace(refresh=lambda now: _params()),
+        feed_factory=fake_factory,
+    )
+
+    async def bind_to_another_loop():
+        task = asyncio.create_task(recorder._queue.get())
+        await asyncio.sleep(0)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    other_loop = asyncio.new_event_loop()
+    try:
+        other_loop.run_until_complete(bind_to_another_loop())
+    finally:
+        other_loop.close()
+
+    manifest = asyncio.run(recorder.run(0.01))
+
+    assert manifest["record_only"] is True
 

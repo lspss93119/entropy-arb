@@ -241,6 +241,10 @@ class QuoteLatencyRecorder:
     async def run(self, duration_sec: float) -> dict:
         if duration_sec <= 0 or duration_sec > 3600:
             raise ValueError("duration_sec must be in (0, 3600]")
+        # The recorder is constructed by a synchronous CLI before
+        # ``asyncio.run`` creates its loop.  Rebind the queue here so Python
+        # 3.9+ never awaits a queue attached to a previous loop.
+        self._queue = asyncio.Queue(maxsize=self.queue_size)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         manifest_path = self.output_dir / "manifest.json"
         if manifest_path.exists():

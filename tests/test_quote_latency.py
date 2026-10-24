@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import time
 from types import SimpleNamespace
 
 from entropy_arb.book import OrderBook
@@ -55,6 +57,15 @@ def test_hl_source_time_is_milliseconds_and_age_is_not_zero():
     assert info.unit == "milliseconds"
     assert info.source_timestamp_ns == 1_700_000_123_456_000_000
     assert info.age_ms(1_700_000_123_999_000_000) == 543.0
+
+
+def test_integer_source_milliseconds_preserve_nanosecond_conversion():
+    info = extract_source_timestamp(
+        {"channel": "order_book:32", "timestamp": 1_792_812_890_621},
+        "lighter-rh",
+    )
+
+    assert info.source_timestamp_ns == 1_792_812_890_621_000_000
 
 
 def test_rh_missing_source_time_remains_unknown_not_zero_latency():
@@ -337,4 +348,20 @@ def test_bounded_writer_rotates_and_reports_rows(tmp_path):
     assert sum(path.read_text().count("\n") for path in files) == 5
     assert writer.stats["rows_written"] == 5
     assert writer.stats["rotations"] == 2
+
+
+def test_bounded_writer_expires_old_files_within_its_prefix(tmp_path):
+    old = tmp_path / "quotes-old-0001.jsonl"
+    old.write_text('{"old":true}\n')
+    old_time = time.time() - 7_200
+    os.utime(old, (old_time, old_time))
+
+    writer = BoundedJsonlWriter(
+        tmp_path, "quotes", max_rows=10, max_bytes=10_000,
+        retention_hours=1, max_files=10, run_id="new",
+    )
+    writer.close()
+
+    assert not old.exists()
+    assert writer.stats["files_expired"] == 1
 
