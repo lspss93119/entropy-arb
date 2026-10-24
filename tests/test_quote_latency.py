@@ -365,3 +365,24 @@ def test_bounded_writer_expires_old_files_within_its_prefix(tmp_path):
     assert not old.exists()
     assert writer.stats["files_expired"] == 1
 
+
+def test_decay_late_quote_not_mislabelled_as_on_time():
+    base = 1_700_000_000_000_000_000
+    tracker = EdgeDecayTracker()
+    params = _params()
+    tracker.ingest(_quote("entropy", base, 101, 101), params)
+    events = tracker.ingest(
+        _quote("lighter-rh", base + 1_000_000, 100, 100.5), params)
+    assert any(e["record_type"] == "signal" for e in events)
+
+    # First subsequent frame only at 300ms: 50/100ms are NOT measured.
+    events = tracker.ingest(
+        _quote("entropy", base + 301_000_000, 101, 101), params)
+    rows = {e["target_ms"]: e for e in events
+            if e["record_type"] == "decay"}
+    assert rows[50]["status"] == "late_quote_outside_tolerance"
+    assert rows[100]["status"] == "late_quote_outside_tolerance"
+    assert rows[250]["status"] == "late_quote_outside_tolerance"
+    assert rows[50]["sell_edge_bps"] is None
+    assert rows[50]["sampling_lag_ms"] > 200
+    assert rows[50]["observed_wall_ns"] is not None
