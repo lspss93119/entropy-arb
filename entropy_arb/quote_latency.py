@@ -302,6 +302,9 @@ class EdgeDecayTracker:
                 latest_ns = (max(q.received_wall_ns for q in pair)
                              if pair is not None else None)
                 observed = pair is not None and latest_ns is not None and latest_ns >= due_ns
+                sampling_lag_ms = ((latest_ns - due_ns) / 1e6 if observed else None)
+                # A later update cannot be represented as an exact earlier sample.
+                within_tolerance = (observed and sampling_lag_ms <= 50.0)
                 row = {
                     "record_type": "decay",
                     "signal_id": signal_id,
@@ -309,15 +312,17 @@ class EdgeDecayTracker:
                     "target_ms": target_ms,
                     "signal_wall_ns": pending["signal_wall_ns"],
                     "observed_wall_ns": latest_ns if observed else None,
+                    "sampling_lag_ms": sampling_lag_ms,
                     "observed_after_ms": (
                         (latest_ns - pending["signal_wall_ns"]) / 1e6
                         if observed else None),
-                    "status": ("observed" if observed else
+                    "status": ("observed" if within_tolerance else
+                               "late_quote_outside_tolerance" if observed else
                                "not_observed_before_capture_end"
                                if final else "missing_quote_after_horizon"),
                 }
-                row.update(self._base_record(obs if observed else None,
-                                              params if observed else None))
+                row.update(self._base_record(obs if within_tolerance else None,
+                                              params if within_tolerance else None))
                 rows.append(row)
             if remaining:
                 pending["remaining"] = remaining
