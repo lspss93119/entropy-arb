@@ -10,6 +10,8 @@ import argparse
 import asyncio
 import json
 import logging
+import shutil
+import time
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -46,6 +48,41 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+
+def expire_previous_runs(root: Path, retention_hours: float) -> int:
+    """Only remove expired completed runs made by this exact research recorder.
+
+    Never delete active (no manifest), symlink, unknown, or unrelated folders.
+    """
+    if retention_hours <= 0 or not root.is_dir():
+        return 0
+    cutoff = time.time_ns() - int(retention_hours * 3600 * 1e9)
+    removed = 0
+    for child in root.iterdir():
+        if not child.is_dir() or child.is_symlink():
+            continue
+        manifest_path = child / "manifest.json"
+        if manifest_path.is_symlink() or not manifest_path.is_file():
+            continue
+        try:
+            info = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if (info.get("schema_version") != 1
+                or info.get("market") != "io:SNDK|lighter-rh:SNDK"
+                or info.get("record_only") is not True):
+                continue
+            ended_ns = info.get("ended_wall_ns")
+            if not isinstance(ended_ns, int) or ended_ns <= 0 or ended_ns >= cutoff:
+                continue
+            # Do not traverse a run with symlinks. Filesystem data may be shared.
+            if any(path.is_symlink() for path in child.rglob("*")):
+                continue
+            shutil.rmtree(child)
+            removed += 1
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            continue
+    return removed
+
+
 def main() -> int:
     args = build_parser().parse_args()
     logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO),
@@ -64,7 +101,9 @@ def main() -> int:
         retention_hours=args.retention_hours, max_files=args.max_files,
     )
     manifest = asyncio.run(recorder.run(args.duration_sec))
-    print(json.dumps({"run_dir": str(run_dir), "manifest": manifest},
+    expired_runs = expire_previous_runs(Path(args.output_dir), args.retention_hours)
+    print(json.dumps({"run_dir": str(run_dir), "expired_previous_runs": expired_runs,
+                      "manifest": manifest},
                      indent=2))
     return 0
 
