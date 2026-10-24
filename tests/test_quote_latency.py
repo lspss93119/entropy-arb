@@ -375,9 +375,10 @@ def test_decay_late_quote_not_mislabelled_as_on_time():
         _quote("lighter-rh", base + 1_000_000, 100, 100.5), params)
     assert any(e["record_type"] == "signal" for e in events)
 
-    # First subsequent frame only at 300ms: 50/100ms are NOT measured.
+    # First subsequent frame only at 301ms after the signal: every measured
+    # 50/100/250ms horizon is more than the 50ms sampling tolerance late.
     events = tracker.ingest(
-        _quote("entropy", base + 301_000_000, 101, 101), params)
+        _quote("entropy", base + 302_000_000, 101, 101), params)
     rows = {e["target_ms"]: e for e in events
             if e["record_type"] == "decay"}
     assert rows[50]["status"] == "late_quote_outside_tolerance"
