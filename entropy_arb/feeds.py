@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from typing import Callable, Optional
 
 try:
@@ -27,6 +28,9 @@ except ImportError:
 from .book import OrderBook
 
 log = logging.getLogger("feeds")
+
+FeedUpdateCallback = Callable[[str, str, dict, int, int, int], None]
+FeedLifecycleCallback = Callable[[str, str, int, int, int], None]
 
 
 def _chan_id(channel: str) -> Optional[int]:
@@ -44,20 +48,51 @@ class LighterBookFeed:
     """zkLighter order book for one market over one connection."""
 
     def __init__(self, name: str, ws_url: str, market_id: int, book: OrderBook,
-                 notify: Callable[[], None]) -> None:
+                 notify: Callable[[], None], *,
+                 on_update: Optional[FeedUpdateCallback] = None,
+                 on_lifecycle: Optional[FeedLifecycleCallback] = None) -> None:
         self.name = name
         self.ws_url = ws_url
         self.market_id = market_id
         self.book = book
         self.notify = notify
+        self.on_update = on_update
+        self.on_lifecycle = on_lifecycle
         self._nonce: Optional[int] = None
         self._synced = False
+        self._connection_id = 0
+
+    def _emit_lifecycle(self, event: str) -> None:
+        if self.on_lifecycle is None:
+            return
+        try:
+            self.on_lifecycle(self.name, event, time.time_ns(),
+                              time.monotonic_ns(), self._connection_id)
+        except Exception:
+            log.exception("[%s] lifecycle callback failed", self.name)
+
+    def _emit_update(self, kind: str, msg: dict,
+                     received_wall_ns: Optional[int],
+                     received_mono_ns: Optional[int]) -> None:
+        if self.on_update is None:
+            return
+        if received_wall_ns is None:
+            received_wall_ns = time.time_ns()
+        if received_mono_ns is None:
+            received_mono_ns = time.monotonic_ns()
+        try:
+            self.on_update(self.name, kind, msg, received_wall_ns,
+                           received_mono_ns, self._connection_id)
+        except Exception:
+            log.exception("[%s] update callback failed", self.name)
 
     async def _subscribe(self, ws) -> None:
         await ws.send(json.dumps({"type": "subscribe",
                                   "channel": f"order_book/{self.market_id}"}))
 
-    async def _handle_book(self, ws, msg: dict, snapshot: bool) -> None:
+    async def _handle_book(self, ws, msg: dict, snapshot: bool,
+                           received_wall_ns: Optional[int] = None,
+                           received_mono_ns: Optional[int] = None) -> None:
         if _chan_id(msg.get("channel", "")) != self.market_id:
             return
         ob = msg["order_book"]
@@ -67,6 +102,8 @@ class LighterBookFeed:
             self.book.apply_lighter(ob, snapshot=True)
             log.info("[%s] snapshot: %d bids / %d asks", self.name,
                      len(self.book.bids), len(self.book.asks))
+            self._emit_update("snapshot", msg, received_wall_ns,
+                              received_mono_ns)
             self.notify()
             return
         # diff: a skipped nonce means we lost a level update — the book is now
@@ -80,6 +117,7 @@ class LighterBookFeed:
             self._nonce = None
             self._synced = False
             self.book.clear()
+            self._emit_lifecycle("book_gap")
             self.notify()
             await ws.send(json.dumps({"type": "unsubscribe",
                                       "channel": f"order_book/{self.market_id}"}))
@@ -88,6 +126,7 @@ class LighterBookFeed:
         if end is not None:
             self._nonce = end
         self.book.apply_lighter(ob, snapshot=False)
+        self._emit_update("diff", msg, received_wall_ns, received_mono_ns)
         self.notify()
 
     async def run(self, stop: asyncio.Event) -> None:
@@ -96,19 +135,29 @@ class LighterBookFeed:
             try:
                 async with ws_connect(self.ws_url, max_size=2**23, open_timeout=10,
                                       ping_interval=15, ping_timeout=15) as ws:
+                    self._connection_id += 1
+                    self._emit_lifecycle("connected")
                     log.info("[%s] connected (%s)", self.name, self.ws_url)
                     self.book.clear()
                     self._nonce = None
                     self._synced = False
                     async for raw in ws:
                         backoff = 1.0
+                        received_wall_ns = time.time_ns()
+                        received_mono_ns = time.monotonic_ns()
                         msg = json.loads(raw)
                         t = msg.get("type")
                         self.book.touch()
                         if t == "update/order_book":
-                            await self._handle_book(ws, msg, snapshot=False)
+                            await self._handle_book(
+                                ws, msg, snapshot=False,
+                                received_wall_ns=received_wall_ns,
+                                received_mono_ns=received_mono_ns)
                         elif t == "subscribed/order_book":
-                            await self._handle_book(ws, msg, snapshot=True)
+                            await self._handle_book(
+                                ws, msg, snapshot=True,
+                                received_wall_ns=received_wall_ns,
+                                received_mono_ns=received_mono_ns)
                         elif t == "connected":
                             await self._subscribe(ws)
                         elif t == "ping":
@@ -120,6 +169,7 @@ class LighterBookFeed:
             except Exception as e:
                 log.warning("[%s] ws error: %s — reconnect in %.0fs",
                             self.name, e, backoff)
+            self._emit_lifecycle("disconnected")
             self.book.ready = False
             self.notify()
             if stop.is_set():
@@ -132,16 +182,46 @@ class HLBookFeed:
     """Official Hyperliquid l2Book consumer for one coin (e.g. 'io:SNDK')."""
 
     def __init__(self, name: str, ws_url: str, coin: str, book: OrderBook,
-                 notify: Callable[[], None], ping_sec: float = 5.0) -> None:
+                 notify: Callable[[], None], ping_sec: float = 5.0, *,
+                 on_update: Optional[FeedUpdateCallback] = None,
+                 on_lifecycle: Optional[FeedLifecycleCallback] = None) -> None:
         self.name = name
         self.ws_url = ws_url
         self.coin = coin
         self.book = book
         self.notify = notify
+        self.on_update = on_update
+        self.on_lifecycle = on_lifecycle
         self.ping_sec = ping_sec
         self._snapped = False
+        self._connection_id = 0
 
-    def _on_frame(self, msg: dict) -> None:
+    def _emit_lifecycle(self, event: str) -> None:
+        if self.on_lifecycle is None:
+            return
+        try:
+            self.on_lifecycle(self.name, event, time.time_ns(),
+                              time.monotonic_ns(), self._connection_id)
+        except Exception:
+            log.exception("[%s] lifecycle callback failed", self.name)
+
+    def _emit_update(self, kind: str, msg: dict,
+                     received_wall_ns: Optional[int],
+                     received_mono_ns: Optional[int]) -> None:
+        if self.on_update is None:
+            return
+        if received_wall_ns is None:
+            received_wall_ns = time.time_ns()
+        if received_mono_ns is None:
+            received_mono_ns = time.monotonic_ns()
+        try:
+            self.on_update(self.name, kind, msg, received_wall_ns,
+                           received_mono_ns, self._connection_id)
+        except Exception:
+            log.exception("[%s] update callback failed", self.name)
+
+    def _on_frame(self, msg: dict, received_wall_ns: Optional[int] = None,
+                  received_mono_ns: Optional[int] = None) -> None:
         self.book.touch()
         if msg.get("channel") == "l2Book":
             d = msg.get("data") or {}
@@ -151,6 +231,8 @@ class HLBookFeed:
                     self._snapped = True
                     log.info("[%s] snapshot: %d bids / %d asks", self.name,
                              len(self.book.bids), len(self.book.asks))
+                self._emit_update("snapshot", msg, received_wall_ns,
+                                  received_mono_ns)
                 self.notify()
 
     async def _pinger(self, ws) -> None:
@@ -173,6 +255,8 @@ class HLBookFeed:
             try:
                 async with ws_connect(self.ws_url, max_size=2**23, open_timeout=10,
                                       ping_interval=15, ping_timeout=15) as ws:
+                    self._connection_id += 1
+                    self._emit_lifecycle("connected")
                     log.info("[%s] connected (official ws, %s)", self.name, self.coin)
                     self.book.clear()
                     self._snapped = False
@@ -183,7 +267,8 @@ class HLBookFeed:
                     ptask = asyncio.create_task(self._pinger(ws))
                     async for raw in ws:
                         backoff = 1.0
-                        self._on_frame(json.loads(raw))
+                        self._on_frame(
+                            json.loads(raw), time.time_ns(), time.monotonic_ns())
                         if stop.is_set():
                             break
             except asyncio.CancelledError:
@@ -194,6 +279,7 @@ class HLBookFeed:
             finally:
                 if ptask is not None:
                     ptask.cancel()
+            self._emit_lifecycle("disconnected")
             self.book.ready = False
             self.notify()
             if stop.is_set():
