@@ -162,3 +162,47 @@ def test_run_rebinds_queue_created_before_asyncio_run(tmp_path):
 
     assert manifest["record_only"] is True
 
+
+def test_quote_rows_are_bounded_without_full_raw_frame():
+    from entropy_arb.quote_latency import normalize_feed_update
+    from entropy_arb.book import OrderBook
+    book = OrderBook()
+    msg = _hl_message()
+    msg["data"]["extra_diagnostic_payload"] = "X" * 10_000
+    book.apply_hl(msg["data"]["levels"])
+    quote = normalize_feed_update("entropy", "snapshot", msg,
+                                  1_700_000_000_100_000_000, 123, 1, book)
+    row = QuoteLatencyRecorder._quote_record(quote, msg, _params())
+    assert "raw_frame" not in row
+    assert row["bids"] == [[101.0, 5.0]]
+    assert "X" * 100 not in json.dumps(row)
+
+
+def test_expire_completed_previous_runs_only(tmp_path):
+    from tools.record_sndk_rh_quote_latency import expire_previous_runs
+    import time
+
+    old = tmp_path / "old-run"
+    old.mkdir()
+    (old / "quotes-0001.jsonl").write_text("{}\n")
+    (old / "manifest.json").write_text(json.dumps({
+        "schema_version": 1,
+        "record_only": True,
+        "market": "io:SNDK|lighter-rh:SNDK",
+        "ended_wall_ns": time.time_ns() - int(48 * 3600 * 1e9),
+    }))
+    active = tmp_path / "active-run"
+    active.mkdir()
+    (active / "quotes-0001.jsonl").write_text("{}\n")
+    unrelated = tmp_path / "unrelated-run"
+    unrelated.mkdir()
+    (unrelated / "manifest.json").write_text(json.dumps({
+        "schema_version": 1,
+        "record_only": True,
+        "market": "BTC",
+        "ended_wall_ns": time.time_ns() - int(48 * 3600 * 1e9),
+    }))
+    assert expire_previous_runs(tmp_path, 24) == 1
+    assert not old.exists()
+    assert active.exists()
+    assert unrelated.exists()
