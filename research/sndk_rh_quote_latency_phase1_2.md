@@ -34,7 +34,7 @@ The monotonic receive clock is retained for local ordering and interval analysis
 
 ### Raw packet samples from the final smoke
 
-The following are reduced public samples; the stored quote rows retain the complete raw frame.
+The following are reduced public samples from the earlier smoke; current quote rows retain normalized bounded fields and deliberately omit the complete raw frame.
 
 ```json
 {"channel":"l2Book","data":{"coin":"io:SNDK","time":1792813137075,"levels":[[{"px":"1241.1","sz":"2.3507","n":8}],[{"px":"1241.2","sz":"1.5304","n":13}]]}}
@@ -55,7 +55,7 @@ Implemented files:
 - `tools/record_sndk_rh_quote_latency.py`: explicit CLI with required pair selection, bounded output, retention and endpoint options. It creates a unique run directory and refuses to overwrite an existing manifest.
 - `entropy_arb/feeds.py`: optional update/lifecycle callbacks, source-independent local wall/monotonic capture, connection IDs, and RH nonce-gap lifecycle events.
 
-Each quote row records venue, message kind/channel, full raw public frame, BBO/depth (default five levels), source timestamp status/field/unit/raw/ns, source age, local wall/monotonic receive times, connection ID, and the current Rolling parameter snapshot. Candidate rows record the threshold and the same parameter fields. The candidate thresholds are `M + U` for `sell_entropy` and `L - M` for `buy_entropy`; this is an observation filter only and does not place or simulate orders.
+Each quote row records venue, message kind/channel, bounded BBO/depth (default five levels), source timestamp status/field/unit/raw/ns, source age, local wall/monotonic receive times, connection ID, and the current Rolling parameter snapshot. It deliberately omits the unbounded raw WebSocket frame. Candidate rows record the threshold and the same parameter fields. The candidate thresholds are `M + U` for `sell_entropy` and `L - M` for `buy_entropy`; this is an observation filter only and does not place or simulate orders.
 
 Storage is bounded per JSONL prefix by rows, bytes, file count, and retention hours. The final smoke used `max_file_rows=1000`, `retention_hours=1`, and `max_files=4`. Rotation/retention is scoped to the recorder's own prefix and does not touch minute Recorder files.
 
