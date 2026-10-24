@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 
 from entropy_arb.book import OrderBook
@@ -145,6 +146,107 @@ def test_lighter_callback_receives_snapshot_and_diff():
     assert [item[1] for item in updates] == ["snapshot", "diff"]
     assert updates[0][0] == "lighter-rh"
     assert updates[1][3:6] == (50, 60, 9)
+
+
+def test_lighter_nonce_gap_emits_lifecycle_and_drops_book():
+    book = OrderBook()
+    updates = []
+    lifecycle = []
+    feed = LighterBookFeed(
+        "lighter-rh", "wss://example.invalid", 32, book,
+        lambda: None,
+        on_update=lambda *args: updates.append(args),
+        on_lifecycle=lambda *args: lifecycle.append(args),
+    )
+    feed._connection_id = 4
+
+    class FakeWS:
+        sent = []
+
+        async def send(self, value):
+            self.sent.append(value)
+
+    async def exercise():
+        ws = FakeWS()
+        await feed._handle_book(ws, _rh_message(), snapshot=True)
+        await feed._handle_book(
+            ws,
+            {"channel": "order_book:32", "order_book": {
+                "begin_nonce": 20, "nonce": 20,
+                "bids": [], "asks": [],
+            }},
+            snapshot=False,
+        )
+        return ws
+
+    ws = asyncio.run(exercise())
+    assert [item[1] for item in updates] == ["snapshot"]
+    assert lifecycle[0][1] == "book_gap"
+    assert not book.ready
+    assert any("unsubscribe" in item for item in ws.sent)
+
+
+def test_lighter_feed_reconnects_with_new_connection_id(monkeypatch):
+    import entropy_arb.feeds as feeds
+
+    stop = asyncio.Event()
+    lifecycle = []
+    connections = []
+
+    class FakeWS:
+        def __init__(self, index):
+            self.index = index
+            self.sent = []
+            self.failed = False
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if not self.failed:
+                self.failed = True
+                return json.dumps({"type": "connected"})
+            if self.index == 0:
+                raise RuntimeError("simulated disconnect")
+            raise StopAsyncIteration
+
+        async def send(self, value):
+            self.sent.append(value)
+
+    def fake_connect(*args, **kwargs):
+        ws = FakeWS(len(connections))
+        connections.append(ws)
+        return ws
+
+    real_sleep = asyncio.sleep
+
+    async def fast_sleep(_delay):
+        await real_sleep(0)
+
+    monkeypatch.setattr(feeds, "ws_connect", fake_connect)
+    monkeypatch.setattr(feeds.asyncio, "sleep", fast_sleep)
+
+    def on_lifecycle(*args):
+        lifecycle.append(args)
+        if args[1] == "connected" and args[4] == 2:
+            stop.set()
+
+    feed = LighterBookFeed(
+        "lighter-rh", "wss://example.invalid", 32, OrderBook(),
+        lambda: None, on_lifecycle=on_lifecycle,
+    )
+    asyncio.run(feed.run(stop))
+
+    assert [item[1] for item in lifecycle] == [
+        "connected", "disconnected", "connected", "disconnected"
+    ]
+    assert [item[4] for item in lifecycle] == [1, 1, 2, 2]
 
 
 def _quote(venue, wall_ns, bid, ask):

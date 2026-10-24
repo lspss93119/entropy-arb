@@ -370,8 +370,9 @@ class EdgeDecayTracker:
         rows.extend(self._collect_due(quote.received_wall_ns, params))
         return rows
 
-    def flush(self, now_wall_ns: int, *, final: bool = False) -> list[dict]:
-        return self._collect_due(now_wall_ns, None, final=final)
+    def flush(self, now_wall_ns: int, *, params: object = None,
+              final: bool = False) -> list[dict]:
+        return self._collect_due(now_wall_ns, params, final=final)
 
     @property
     def pending_count(self) -> int:
