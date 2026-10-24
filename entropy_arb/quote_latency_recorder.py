@@ -149,7 +149,7 @@ class QuoteLatencyRecorder:
             "message_kind": quote.kind,
             "channel": message.get("channel"),
             "message_type": message.get("type"),
-            "raw_frame": message,
+            # Bounded normalized depth and timing replace unbounded raw frames.
             "received_wall_ns": quote.received_wall_ns,
             "received_mono_ns": quote.received_mono_ns,
             "connection_id": quote.connection_id,
