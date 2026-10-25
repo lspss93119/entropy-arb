@@ -16,12 +16,12 @@
   "max_consecutive_failures": 3,
   "retry_backoff_sec": 300,
   "timeout_grace_sec": 120,
-  "fees_bps": 0.0,
+  "fees_bps": 0,
   "sell_quantile": 0.8,
   "buy_quantile": 0.5,
   "depth_levels": 5,
-  "pair_max_skew_ms": 250.0,
+  "pair_max_skew_ms": 250,
   "max_file_rows": 50000,
   "max_file_bytes": 8388608,
-  "max_files": 2
+  "max_files": 32
 }
