@@ -27,9 +27,14 @@ def audit(path: Path, effective_at: int) -> dict:
     counter = Counter(ts for ts, _ in rows)
     missing = [ts for ts in range(start, effective_at, 60) if ts not in counter]
     duplicate = sorted(ts for ts, count in counter.items() if count > 1)
+    def invalid_samples(value: str | None) -> bool:
+        try:
+            return value is None or float(value) < 10
+        except (TypeError, ValueError):
+            return True
+
     low_samples = sorted(ts for ts, samples in rows
-                         if samples is None or not samples.isdigit()
-                         or int(samples) < 10)
+                         if invalid_samples(samples))
     return {
         "effective_at_utc": datetime.fromtimestamp(
             effective_at, timezone.utc).isoformat(),
