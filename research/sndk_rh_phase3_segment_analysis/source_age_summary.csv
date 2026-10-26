@@ -1,0 +1,3 @@
+venue,total_quote_rows,valid_snapshot_rows,source_present,age_nonnegative_rows,invalid_snapshot_rows,source_age_ms_n,source_age_ms_p50,source_age_ms_p90,source_age_ms_p95,source_age_ms_p99,source_age_ms_max,source_age_ms_mean
+entropy,156366,126804,156366,126804,29562,126804,282.381,390.5247,493.1278499999998,698.6532600000002,3207.275,308.9877341329926
+lighter-rh,504279,411372,504279,411372,92907,411372,24.751,27.477,28.728,37.71628999999998,3684.66,25.643928395709963
