@@ -19,6 +19,7 @@ def test_capture_command_is_one_hour_public_sndk_rh_only():
         "max_files": 2,
         "depth_levels": 5,
         "pair_max_skew_ms": 250,
+        "preserve_raw": True,
     }
 
     command = build_capture_command(config)
@@ -29,3 +30,4 @@ def test_capture_command_is_one_hour_public_sndk_rh_only():
     assert "--duration-sec" in command and command[command.index("--duration-sec") + 1] == "3600"
     assert "--rolling-csv" in command
     assert "--retention-hours" in command
+    assert "--preserve-raw" in command

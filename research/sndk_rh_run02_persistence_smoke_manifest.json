@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "record_only": true,
+  "market": "io:SNDK|lighter-rh:SNDK",
+  "symbol": "SNDK",
+  "hedge": "lighter-rh",
+  "market_ids": {
+    "entropy": "io:SNDK",
+    "lighter-rh": 32
+  },
+  "public_endpoints": {
+    "entropy_ws": "wss://api.hyperliquid.xyz/ws",
+    "lighter_rh_ws": "wss://api.rh.lighter.xyz/stream"
+  },
+  "depth_levels": 5,
+  "pair_max_skew_ms": 250.0,
+  "decay_horizons_ms": [
+    50,
+    100,
+    250,
+    500,
+    1000
+  ],
+  "rolling_csv": "/Users/lspss93119/entropy-arb-multi-market-recorder/logs/minutes-SNDK-lighter-rh.csv",
+  "rolling_quantiles": {
+    "sell": 0.8,
+    "buy": 0.5
+  },
+  "fees_bps_for_rolling": 0.0,
+  "retention_hours": 168.0,
+  "max_file_rows": 50000,
+  "max_file_bytes": 8388608,
+  "max_files": 4096,
+  "preserve_raw": true,
+  "started_wall_ns": 1793015596740022000,
+  "ended_wall_ns": 1793015657106263000,
+  "source_timestamp_counts": {
+    "present": 1130,
+    "missing": 0,
+    "invalid": 0
+  },
+  "lifecycle_events": 4,
+  "dropped_updates": 0,
+  "dropped_lifecycle": 0,
+  "pending_decay_horizons": 0,
+  "writer_stats": {
+    "quotes": {
+      "rows_written": 1130,
+      "rotations": 0,
+      "files_expired": 0,
+      "write_errors": 0
+    },
+    "signals": {
+      "rows_written": 5,
+      "rotations": 0,
+      "files_expired": 0,
+      "write_errors": 0
+    },
+    "decay": {
+      "rows_written": 25,
+      "rotations": 0,
+      "files_expired": 0,
+      "write_errors": 0
+    },
+    "lifecycle": {
+      "rows_written": 4,
+      "rotations": 0,
+      "files_expired": 0,
+      "write_errors": 0
+    }
+  }
+}

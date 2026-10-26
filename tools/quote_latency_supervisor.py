@@ -41,7 +41,7 @@ def build_capture_command(config: dict[str, Any]) -> list[str]:
     def value(name: str) -> str:
         return str(config[name])
 
-    return [
+    command = [
         value("python_path"), value("cli_path"),
         "--symbol", "SNDK", "--hedge", "lighter-rh",
         "--output-dir", value("output_dir"),
@@ -58,6 +58,9 @@ def build_capture_command(config: dict[str, Any]) -> list[str]:
         "--max-files", value("max_files"),
         "--log-level", "WARNING",
     ]
+    if config.get("preserve_raw", False):
+        command.append("--preserve-raw")
+    return command
 
 
 def load_config(path: Path) -> dict[str, Any]:

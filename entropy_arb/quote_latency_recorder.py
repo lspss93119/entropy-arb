@@ -43,6 +43,7 @@ class QuoteLatencyRecorder:
                  max_file_rows: int = 50_000,
                  max_file_bytes: int = 64 * 1024 * 1024,
                  retention_hours: float = 24.0, max_files: int = 24,
+                 preserve_raw: bool = False,
                  feed_factory: Optional[Callable] = None,
                  rolling_provider: Optional[object] = None) -> None:
         if symbol.upper() != "SNDK":
@@ -68,6 +69,7 @@ class QuoteLatencyRecorder:
         self.max_file_bytes = max_file_bytes
         self.retention_hours = retention_hours
         self.max_files = max_files
+        self.preserve_raw = bool(preserve_raw)
         self._feed_factory = feed_factory
         self._queue: asyncio.Queue = asyncio.Queue(maxsize=queue_size)
         self.books = {"entropy": OrderBook(), "lighter-rh": OrderBook()}
@@ -84,7 +86,8 @@ class QuoteLatencyRecorder:
             name: BoundedJsonlWriter(
                 self.output_dir, name, max_rows=max_file_rows,
                 max_bytes=max_file_bytes, retention_hours=retention_hours,
-                max_files=max_files, run_id=self._run_id)
+                max_files=max_files, preserve_files=self.preserve_raw,
+                run_id=self._run_id)
             for name in ("quotes", "signals", "decay", "lifecycle")
         }
         self.rolling_provider = rolling_provider
@@ -227,6 +230,7 @@ class QuoteLatencyRecorder:
             "max_file_rows": self.max_file_rows,
             "max_file_bytes": self.max_file_bytes,
             "max_files": self.max_files,
+            "preserve_raw": self.preserve_raw,
             "started_wall_ns": started_ns,
             "ended_wall_ns": ended_ns,
             "source_timestamp_counts": self._source_timestamp_counts,

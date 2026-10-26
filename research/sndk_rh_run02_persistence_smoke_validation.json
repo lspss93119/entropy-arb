@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "run_dir": "/Users/lspss93119/entropy-arb-quote-latency-research/run02-20261026T115135Z/smoke-runs/20261026T115316739725Z",
+  "record_only": true,
+  "market": "io:SNDK|lighter-rh:SNDK",
+  "started_utc": "2026-10-26T11:53:16.740022Z",
+  "ended_utc": "2026-10-26T11:54:17.106263Z",
+  "manifest_counts": {
+    "quotes": 1130,
+    "signals": 5,
+    "decay": 25,
+    "lifecycle": 4
+  },
+  "actual_jsonl_counts": {
+    "quotes": 1130,
+    "signals": 5,
+    "decay": 25,
+    "lifecycle": 4
+  },
+  "source_timestamp_status": {
+    "present": 1130,
+    "missing": 0,
+    "invalid": 0
+  },
+  "depth": {
+    "quote_rows": 1130,
+    "bids_min": 5,
+    "asks_min": 5,
+    "bids_max": 5,
+    "asks_max": 5
+  },
+  "rolling": {
+    "effective_at_utc": "2026-10-26T11:00:00Z",
+    "coverage": 1.0,
+    "valid_quote_rows": 1130,
+    "midline_bps": 2.8,
+    "upper_bps": 2.5,
+    "lower_bps": 1.5,
+    "threshold_sell_bps": 5.3,
+    "threshold_buy_edge_bps": -1.3
+  },
+  "signals": {
+    "buy_entropy": 4,
+    "sell_entropy": 1,
+    "starting_edge_bps": {
+      "sell_entropy": [5.62558930028878],
+      "buy_entropy": [2.139800285305693, -1.2673267326734905, -1.1083841342718337, -0.5541920671359168]
+    }
+  },
+  "decay_status": {
+    "observed": 23,
+    "late_quote_outside_tolerance": 2,
+    "missing_quote_after_horizon": 0,
+    "not_observed_before_capture_end": 0
+  },
+  "drops": {
+    "updates": 0,
+    "lifecycle": 0,
+    "writer_errors": 0,
+    "files_expired": 0,
+    "received_order_violations": 0,
+    "raw_frame_lines": 0
+  },
+  "file_bytes": 953694,
+  "file_sha256": {
+    "quotes-20261026T115316739901Z-0001.jsonl": "b190950ad12f6a2038d87a87ce94a6f4febeaf644ade3ebc0720bf87940a389b",
+    "signals-20261026T115316739901Z-0001.jsonl": "23b662d667e6daadff6452611e523de2afd063ec1d368a19687073ecd0d448d0",
+    "decay-20261026T115316739901Z-0001.jsonl": "097d8266fff74b76c91c210f5f5b3eff6122a99408ffae593280e77be56ab7b5",
+    "lifecycle-20261026T115316739901Z-0001.jsonl": "2ead58f75ca9e628dd8fcdd21fdf63fe94e6818e1b254865db76e169f8bd41d3"
+  }
+}

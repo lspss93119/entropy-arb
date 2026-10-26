@@ -206,3 +206,51 @@ def test_expire_completed_previous_runs_only(tmp_path):
     assert not old.exists()
     assert active.exists()
     assert unrelated.exists()
+
+
+def test_raw_preservation_skips_cross_run_cleanup(tmp_path):
+    from tools.record_sndk_rh_quote_latency import expire_previous_runs_if_allowed
+
+    old = tmp_path / "old-run"
+    old.mkdir()
+    (old / "manifest.json").write_text(json.dumps({
+        "schema_version": 1,
+        "record_only": True,
+        "market": "io:SNDK|lighter-rh:SNDK",
+        "ended_wall_ns": 1,
+    }))
+
+    assert expire_previous_runs_if_allowed(tmp_path, 1, preserve_raw=True) == 0
+    assert old.exists()
+
+
+def test_raw_preservation_disables_writer_eviction(tmp_path):
+    from entropy_arb.quote_latency import BoundedJsonlWriter
+
+    writer = BoundedJsonlWriter(
+        tmp_path, "quotes", max_rows=1, max_bytes=1024,
+        retention_hours=0, max_files=1, preserve_files=True,
+        run_id="run02",
+    )
+    writer.append({"n": 1})
+    writer.append({"n": 2})
+    writer.close()
+
+    files = sorted(tmp_path.glob("quotes-*.jsonl"))
+    assert len(files) == 2
+    assert writer.stats["files_expired"] == 0
+    assert [json.loads(line)["n"] for path in files for line in path.open()] == [1, 2]
+
+
+def test_recorder_manifest_declares_raw_preservation(tmp_path):
+    recorder = QuoteLatencyRecorder(
+        tmp_path, symbol="SNDK", hedge="lighter-rh", preserve_raw=True,
+        rolling_provider=SimpleNamespace(refresh=lambda now: _params()),
+        feed_factory=fake_factory, max_file_rows=100,
+    )
+
+    manifest = asyncio.run(recorder.run(0.01))
+
+    assert manifest["preserve_raw"] is True
+    assert all(stats["files_expired"] == 0
+               for stats in manifest["writer_stats"].values())

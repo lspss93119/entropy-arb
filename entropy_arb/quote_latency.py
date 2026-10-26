@@ -392,6 +392,7 @@ class BoundedJsonlWriter:
     def __init__(self, directory: str | Path, prefix: str, *,
                  max_rows: int = 50_000, max_bytes: int = 64 * 1024 * 1024,
                  retention_hours: float = 24.0, max_files: int = 24,
+                 preserve_files: bool = False,
                  run_id: Optional[str] = None) -> None:
         if max_rows <= 0 or max_bytes <= 0 or max_files <= 0:
             raise ValueError("writer bounds must be positive")
@@ -403,6 +404,7 @@ class BoundedJsonlWriter:
         self.max_bytes = max_bytes
         self.retention_seconds = retention_hours * 3600.0
         self.max_files = max_files
+        self.preserve_files = bool(preserve_files)
         self.run_id = run_id or datetime.now(timezone.utc).strftime(
             "%Y%m%dT%H%M%S%fZ")
         self._fh = None
@@ -412,7 +414,8 @@ class BoundedJsonlWriter:
         self._sequence = 0
         self._stats = {"rows_written": 0, "rotations": 0,
                        "files_expired": 0, "write_errors": 0}
-        self._cleanup()
+        if not self.preserve_files:
+            self._cleanup()
 
     def _matching_files(self) -> list[Path]:
         return sorted(self.directory.glob(f"{self.prefix}-*.jsonl"),
@@ -467,7 +470,8 @@ class BoundedJsonlWriter:
         self._rows += 1
         self._bytes += len(encoded)
         self._stats["rows_written"] += 1
-        self._cleanup()
+        if not self.preserve_files:
+            self._cleanup()
 
     def close(self) -> None:
         if self._fh is not None:

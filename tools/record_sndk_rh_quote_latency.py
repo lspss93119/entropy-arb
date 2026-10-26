@@ -42,6 +42,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-file-bytes", type=int, default=64 * 1024 * 1024)
     parser.add_argument("--retention-hours", type=float, default=24.0)
     parser.add_argument("--max-files", type=int, default=24)
+    parser.add_argument(
+        "--preserve-raw", action="store_true",
+        help="disable retention/rotation cleanup for this isolated research run",
+    )
     parser.add_argument("--hl-ws-url", default=HL_WS_URL)
     parser.add_argument("--rh-ws-url", default=LIGHTER_PROFILES["lighter-rh"].ws_url)
     parser.add_argument("--log-level", default="INFO")
@@ -83,6 +87,14 @@ def expire_previous_runs(root: Path, retention_hours: float) -> int:
     return removed
 
 
+def expire_previous_runs_if_allowed(root: Path, retention_hours: float,
+                                    *, preserve_raw: bool) -> int:
+    """Keep every prior run when raw preservation is explicitly enabled."""
+    if preserve_raw:
+        return 0
+    return expire_previous_runs(root, retention_hours)
+
+
 def main() -> int:
     args = build_parser().parse_args()
     logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO),
@@ -99,9 +111,13 @@ def main() -> int:
         queue_size=args.queue_size, max_file_rows=args.max_file_rows,
         max_file_bytes=args.max_file_bytes,
         retention_hours=args.retention_hours, max_files=args.max_files,
+        preserve_raw=args.preserve_raw,
     )
     manifest = asyncio.run(recorder.run(args.duration_sec))
-    expired_runs = expire_previous_runs(Path(args.output_dir), args.retention_hours)
+    expired_runs = expire_previous_runs_if_allowed(
+        Path(args.output_dir), args.retention_hours,
+        preserve_raw=args.preserve_raw,
+    )
     print(json.dumps({"run_dir": str(run_dir), "expired_previous_runs": expired_runs,
                       "manifest": manifest},
                      indent=2))
