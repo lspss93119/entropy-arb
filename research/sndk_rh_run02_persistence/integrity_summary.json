@@ -1,0 +1,755 @@
+{
+  "supervisor": {
+    "schema_version": 1,
+    "record_only": true,
+    "market": "io:SNDK|lighter-rh:SNDK",
+    "source_commit": "46932e71adafd46852a366f88167fd8031fdead5",
+    "target_runs": 12,
+    "completed_runs": 12,
+    "failed_runs": 0,
+    "consecutive_failures": 0,
+    "status": "COMPLETED",
+    "started_wall_ns": 1793022234358327000,
+    "current_child_pid": null,
+    "last_return_code": 0,
+    "last_data_bytes": 578779750,
+    "ended_wall_ns": 1793065450013095000
+  },
+  "manifest_count": 12,
+  "eligible_run_count": 12,
+  "completed_runs": 12,
+  "target_runs": 12,
+  "failed_runs": 0,
+  "status": "COMPLETED",
+  "total_files": 119,
+  "total_bytes": 578779750,
+  "sha256_mismatch_count": 0,
+  "parse_error_count": 0,
+  "row_counts": {
+    "quotes": {
+      "written": 628027,
+      "retained": 628027,
+      "retention_pct": 100.0
+    },
+    "signals": {
+      "written": 15338,
+      "retained": 15338,
+      "retention_pct": 100.0
+    },
+    "decay": {
+      "written": 76690,
+      "retained": 76690,
+      "retention_pct": 100.0
+    },
+    "lifecycle": {
+      "written": 49,
+      "retained": 49,
+      "retention_pct": 100.0
+    }
+  },
+  "source_timestamp_status": {
+    "present": 628027
+  },
+  "depth_shapes": {
+    "5x5": 628027
+  },
+  "rolling_status": {
+    "valid_480": 626927,
+    "invalid": 1100
+  },
+  "rolling_by_run": {
+    "20261026T134354427778Z": {
+      "valid_480": 73949,
+      "invalid": 8,
+      "invalid:data_gap_or_insufficient_window": 8
+    },
+    "20261026T144355933641Z": {
+      "valid_480": 69980,
+      "invalid": 17,
+      "invalid:data_gap_or_insufficient_window": 17
+    },
+    "20261026T154356779042Z": {
+      "valid_480": 62122,
+      "invalid": 8,
+      "invalid:data_gap_or_insufficient_window": 8
+    },
+    "20261026T164357349234Z": {
+      "valid_480": 60238,
+      "invalid": 4,
+      "invalid:data_gap_or_insufficient_window": 4
+    },
+    "20261026T174358565078Z": {
+      "valid_480": 56794,
+      "invalid": 3,
+      "invalid:data_gap_or_insufficient_window": 3
+    },
+    "20261026T184359440078Z": {
+      "valid_480": 54129,
+      "invalid": 1006,
+      "invalid:data_gap_or_insufficient_window": 1006
+    },
+    "20261026T194400579380Z": {
+      "valid_480": 45076,
+      "invalid": 17,
+      "invalid:data_gap_or_insufficient_window": 17
+    },
+    "20261026T204401927331Z": {
+      "valid_480": 26408,
+      "invalid": 2,
+      "invalid:data_gap_or_insufficient_window": 2
+    },
+    "20261026T214404025676Z": {
+      "valid_480": 31046,
+      "invalid": 10,
+      "invalid:data_gap_or_insufficient_window": 10
+    },
+    "20261026T224404993045Z": {
+      "valid_480": 39279,
+      "invalid": 12,
+      "invalid:data_gap_or_insufficient_window": 12
+    },
+    "20261026T234406360245Z": {
+      "valid_480": 54953,
+      "invalid": 8,
+      "invalid:data_gap_or_insufficient_window": 8
+    },
+    "20261027T004408519907Z": {
+      "valid_480": 52953,
+      "invalid": 5,
+      "invalid:data_gap_or_insufficient_window": 5
+    }
+  },
+  "dropped_updates": 0,
+  "dropped_lifecycle": 0,
+  "files_expired": 0,
+  "write_errors": 0,
+  "rotations": 59,
+  "preserve_raw_all_runs": true,
+  "run_integrity": [
+    {
+      "run_id": "20261026T134354427778Z",
+      "market": "io:SNDK|lighter-rh:SNDK",
+      "record_only": true,
+      "preserve_raw": true,
+      "started_utc": "2026-10-26T13:43:54.428082+00:00",
+      "ended_utc": "2026-10-26T14:43:54.998761+00:00",
+      "duration_sec": 3600.570679,
+      "files": 13,
+      "bytes": 73901789,
+      "sha256_mismatch_count": 0,
+      "parse_error_count": 0,
+      "dropped_updates": 0,
+      "dropped_lifecycle": 0,
+      "source_timestamp_counts": {
+        "present": 73957,
+        "missing": 0,
+        "invalid": 0
+      },
+      "rows": {
+        "quotes": {
+          "written": 73957,
+          "retained": 73957,
+          "match": true,
+          "retention_pct": 100.0
+        },
+        "signals": {
+          "written": 3281,
+          "retained": 3281,
+          "match": true,
+          "retention_pct": 100.0
+        },
+        "decay": {
+          "written": 16405,
+          "retained": 16405,
+          "match": true,
+          "retention_pct": 100.0
+        },
+        "lifecycle": {
+          "written": 3,
+          "retained": 3,
+          "match": true,
+          "retention_pct": 100.0
+        }
+      },
+      "files_expired": 0,
+      "write_errors": 0,
+      "rotations": 8,
+      "completed": true,
+      "row_counts_match": true,
+      "eligible": true
+    },
+    {
+      "run_id": "20261026T144355933641Z",
+      "market": "io:SNDK|lighter-rh:SNDK",
+      "record_only": true,
+      "preserve_raw": true,
+      "started_utc": "2026-10-26T14:43:55.933950+00:00",
+      "ended_utc": "2026-10-26T15:43:56.300763+00:00",
+      "duration_sec": 3600.366813,
+      "files": 12,
+      "bytes": 75139720,
+      "sha256_mismatch_count": 0,
+      "parse_error_count": 0,
+      "dropped_updates": 0,
+      "dropped_lifecycle": 0,
+      "source_timestamp_counts": {
+        "present": 69997,
+        "missing": 0,
+        "invalid": 0
+      },
+      "rows": {
+        "quotes": {
+          "written": 69997,
+          "retained": 69997,
+          "match": true,
+          "retention_pct": 100.0
+        },
+        "signals": {
+          "written": 4445,
+          "retained": 4445,
+          "match": true,
+          "retention_pct": 100.0
+        },
+        "decay": {
+          "written": 22225,
+          "retained": 22225,
+          "match": true,
+          "retention_pct": 100.0
+        },
+        "lifecycle": {
+          "written": 4,
+          "retained": 4,
+          "match": true,
+          "retention_pct": 100.0
+        }
+      },
+      "files_expired": 0,
+      "write_errors": 0,
+      "rotations": 7,
+      "completed": true,
+      "row_counts_match": true,
+      "eligible": true
+    },
+    {
+      "run_id": "20261026T154356779042Z",
+      "market": "io:SNDK|lighter-rh:SNDK",
+      "record_only": true,
+      "preserve_raw": true,
+      "started_utc": "2026-10-26T15:43:56.779533+00:00",
+      "ended_utc": "2026-10-26T16:43:57.125686+00:00",
+      "duration_sec": 3600.346153,
+      "files": 12,
+      "bytes": 68191406,
+      "sha256_mismatch_count": 0,
+      "parse_error_count": 0,
+      "dropped_updates": 0,
+      "dropped_lifecycle": 0,
+      "source_timestamp_counts": {
+        "present": 62130,
+        "missing": 0,
+        "invalid": 0
+      },
+      "rows": {
+        "quotes": {
+          "written": 62130,
+          "retained": 62130,
+          "match": true,
+          "retention_pct": 100.0
+        },
+        "signals": {
+          "written": 4347,
+          "retained": 4347,
+          "match": true,
+          "retention_pct": 100.0
+        },
+        "decay": {
+          "written": 21735,
+          "retained": 21735,
+          "match": true,
+          "retention_pct": 100.0
+        },
+        "lifecycle": {
+          "written": 4,
+          "retained": 4,
+          "match": true,
+          "retention_pct": 100.0
+        }
+      },
+      "files_expired": 0,
+      "write_errors": 0,
+      "rotations": 7,
+      "completed": true,
+      "row_counts_match": true,
+      "eligible": true
+    },
+    {
+      "run_id": "20261026T164357349234Z",
+      "market": "io:SNDK|lighter-rh:SNDK",
+      "record_only": true,
+      "preserve_raw": true,
+      "started_utc": "2026-10-26T16:43:57.349675+00:00",
+      "ended_utc": "2026-10-26T17:43:58.283035+00:00",
+      "duration_sec": 3600.93336,
+      "files": 10,
+      "bytes": 57277440,
+      "sha256_mismatch_count": 0,
+      "parse_error_count": 0,
+      "dropped_updates": 0,
+      "dropped_lifecycle": 0,
+      "source_timestamp_counts": {
+        "present": 60242,
+        "missing": 0,
+        "invalid": 0
+      },
+      "rows": {
+        "quotes": {
+          "written": 60242,
+          "retained": 60242,
+          "match": true,
+          "retention_pct": 100.0
+        },
+        "signals": {
+          "written": 1938,
+          "retained": 1938,
+          "match": true,
+          "retention_pct": 100.0
+        },
+        "decay": {
+          "written": 9690,
+          "retained": 9690,
+          "match": true,
+          "retention_pct": 100.0
+        },
+        "lifecycle": {
+          "written": 4,
+          "retained": 4,
+          "match": true,
+          "retention_pct": 100.0
+        }
+      },
+      "files_expired": 0,
+      "write_errors": 0,
+      "rotations": 5,
+      "completed": true,
+      "row_counts_match": true,
+      "eligible": true
+    },
+    {
+      "run_id": "20261026T174358565078Z",
+      "market": "io:SNDK|lighter-rh:SNDK",
+      "record_only": true,
+      "preserve_raw": true,
+      "started_utc": "2026-10-26T17:43:58.565553+00:00",
+      "ended_utc": "2026-10-26T18:43:59.284499+00:00",
+      "duration_sec": 3600.718946,
+      "files": 10,
+      "bytes": 48951283,
+      "sha256_mismatch_count": 0,
+      "parse_error_count": 0,
+      "dropped_updates": 0,
+      "dropped_lifecycle": 0,
+      "source_timestamp_counts": {
+        "present": 56797,
+        "missing": 0,
+        "invalid": 0
+      },
+      "rows": {
+        "quotes": {
+          "written": 56797,
+          "retained": 56797,
+          "match": true,
+          "retention_pct": 100.0
+        },
+        "signals": {
+          "written": 516,
+          "retained": 516,
+          "match": true,
+          "retention_pct": 100.0
+        },
+        "decay": {
+          "written": 2580,
+          "retained": 2580,
+          "match": true,
+          "retention_pct": 100.0
+        },
+        "lifecycle": {
+          "written": 3,
+          "retained": 3,
+          "match": true,
+          "retention_pct": 100.0
+        }
+      },
+      "files_expired": 0,
+      "write_errors": 0,
+      "rotations": 5,
+      "completed": true,
+      "row_counts_match": true,
+      "eligible": true
+    },
+    {
+      "run_id": "20261026T184359440078Z",
+      "market": "io:SNDK|lighter-rh:SNDK",
+      "record_only": true,
+      "preserve_raw": true,
+      "started_utc": "2026-10-26T18:43:59.440575+00:00",
+      "ended_utc": "2026-10-26T19:43:59.673387+00:00",
+      "duration_sec": 3600.232812,
+      "files": 10,
+      "bytes": 46623120,
+      "sha256_mismatch_count": 0,
+      "parse_error_count": 0,
+      "dropped_updates": 0,
+      "dropped_lifecycle": 0,
+      "source_timestamp_counts": {
+        "present": 55135,
+        "missing": 0,
+        "invalid": 0
+      },
+      "rows": {
+        "quotes": {
+          "written": 55135,
+          "retained": 55135,
+          "match": true,
+          "retention_pct": 100.0
+        },
+        "signals": {
+          "written": 241,
+          "retained": 241,
+          "match": true,
+          "retention_pct": 100.0
+        },
+        "decay": {
+          "written": 1205,
+          "retained": 1205,
+          "match": true,
+          "retention_pct": 100.0
+        },
+        "lifecycle": {
+          "written": 4,
+          "retained": 4,
+          "match": true,
+          "retention_pct": 100.0
+        }
+      },
+      "files_expired": 0,
+      "write_errors": 0,
+      "rotations": 5,
+      "completed": true,
+      "row_counts_match": true,
+      "eligible": true
+    },
+    {
+      "run_id": "20261026T194400579380Z",
+      "market": "io:SNDK|lighter-rh:SNDK",
+      "record_only": true,
+      "preserve_raw": true,
+      "started_utc": "2026-10-26T19:44:00.579731+00:00",
+      "ended_utc": "2026-10-26T20:44:00.811500+00:00",
+      "duration_sec": 3600.231769,
+      "files": 9,
+      "bytes": 37688705,
+      "sha256_mismatch_count": 0,
+      "parse_error_count": 0,
+      "dropped_updates": 0,
+      "dropped_lifecycle": 0,
+      "source_timestamp_counts": {
+        "present": 45093,
+        "missing": 0,
+        "invalid": 0
+      },
+      "rows": {
+        "quotes": {
+          "written": 45093,
+          "retained": 45093,
+          "match": true,
+          "retention_pct": 100.0
+        },
+        "signals": {
+          "written": 98,
+          "retained": 98,
+          "match": true,
+          "retention_pct": 100.0
+        },
+        "decay": {
+          "written": 490,
+          "retained": 490,
+          "match": true,
+          "retention_pct": 100.0
+        },
+        "lifecycle": {
+          "written": 6,
+          "retained": 6,
+          "match": true,
+          "retention_pct": 100.0
+        }
+      },
+      "files_expired": 0,
+      "write_errors": 0,
+      "rotations": 4,
+      "completed": true,
+      "row_counts_match": true,
+      "eligible": true
+    },
+    {
+      "run_id": "20261026T204401927331Z",
+      "market": "io:SNDK|lighter-rh:SNDK",
+      "record_only": true,
+      "preserve_raw": true,
+      "started_utc": "2026-10-26T20:44:01.927770+00:00",
+      "ended_utc": "2026-10-26T21:44:03.305340+00:00",
+      "duration_sec": 3601.37757,
+      "files": 7,
+      "bytes": 21808647,
+      "sha256_mismatch_count": 0,
+      "parse_error_count": 0,
+      "dropped_updates": 0,
+      "dropped_lifecycle": 0,
+      "source_timestamp_counts": {
+        "present": 26410,
+        "missing": 0,
+        "invalid": 0
+      },
+      "rows": {
+        "quotes": {
+          "written": 26410,
+          "retained": 26410,
+          "match": true,
+          "retention_pct": 100.0
+        },
+        "signals": {
+          "written": 3,
+          "retained": 3,
+          "match": true,
+          "retention_pct": 100.0
+        },
+        "decay": {
+          "written": 15,
+          "retained": 15,
+          "match": true,
+          "retention_pct": 100.0
+        },
+        "lifecycle": {
+          "written": 3,
+          "retained": 3,
+          "match": true,
+          "retention_pct": 100.0
+        }
+      },
+      "files_expired": 0,
+      "write_errors": 0,
+      "rotations": 2,
+      "completed": true,
+      "row_counts_match": true,
+      "eligible": true
+    },
+    {
+      "run_id": "20261026T214404025676Z",
+      "market": "io:SNDK|lighter-rh:SNDK",
+      "record_only": true,
+      "preserve_raw": true,
+      "started_utc": "2026-10-26T21:44:04.026133+00:00",
+      "ended_utc": "2026-10-26T22:44:04.285384+00:00",
+      "duration_sec": 3600.259251,
+      "files": 8,
+      "bytes": 25707012,
+      "sha256_mismatch_count": 0,
+      "parse_error_count": 0,
+      "dropped_updates": 0,
+      "dropped_lifecycle": 0,
+      "source_timestamp_counts": {
+        "present": 31056,
+        "missing": 0,
+        "invalid": 0
+      },
+      "rows": {
+        "quotes": {
+          "written": 31056,
+          "retained": 31056,
+          "match": true,
+          "retention_pct": 100.0
+        },
+        "signals": {
+          "written": 9,
+          "retained": 9,
+          "match": true,
+          "retention_pct": 100.0
+        },
+        "decay": {
+          "written": 45,
+          "retained": 45,
+          "match": true,
+          "retention_pct": 100.0
+        },
+        "lifecycle": {
+          "written": 6,
+          "retained": 6,
+          "match": true,
+          "retention_pct": 100.0
+        }
+      },
+      "files_expired": 0,
+      "write_errors": 0,
+      "rotations": 3,
+      "completed": true,
+      "row_counts_match": true,
+      "eligible": true
+    },
+    {
+      "run_id": "20261026T224404993045Z",
+      "market": "io:SNDK|lighter-rh:SNDK",
+      "record_only": true,
+      "preserve_raw": true,
+      "started_utc": "2026-10-26T22:44:04.993488+00:00",
+      "ended_utc": "2026-10-26T23:44:05.731350+00:00",
+      "duration_sec": 3600.737862,
+      "files": 8,
+      "bytes": 32676055,
+      "sha256_mismatch_count": 0,
+      "parse_error_count": 0,
+      "dropped_updates": 0,
+      "dropped_lifecycle": 0,
+      "source_timestamp_counts": {
+        "present": 39291,
+        "missing": 0,
+        "invalid": 0
+      },
+      "rows": {
+        "quotes": {
+          "written": 39291,
+          "retained": 39291,
+          "match": true,
+          "retention_pct": 100.0
+        },
+        "signals": {
+          "written": 48,
+          "retained": 48,
+          "match": true,
+          "retention_pct": 100.0
+        },
+        "decay": {
+          "written": 240,
+          "retained": 240,
+          "match": true,
+          "retention_pct": 100.0
+        },
+        "lifecycle": {
+          "written": 6,
+          "retained": 6,
+          "match": true,
+          "retention_pct": 100.0
+        }
+      },
+      "files_expired": 0,
+      "write_errors": 0,
+      "rotations": 3,
+      "completed": true,
+      "row_counts_match": true,
+      "eligible": true
+    },
+    {
+      "run_id": "20261026T234406360245Z",
+      "market": "io:SNDK|lighter-rh:SNDK",
+      "record_only": true,
+      "preserve_raw": true,
+      "started_utc": "2026-10-26T23:44:06.360847+00:00",
+      "ended_utc": "2026-10-27T00:44:07.379179+00:00",
+      "duration_sec": 3601.018332,
+      "files": 10,
+      "bytes": 46402936,
+      "sha256_mismatch_count": 0,
+      "parse_error_count": 0,
+      "dropped_updates": 0,
+      "dropped_lifecycle": 0,
+      "source_timestamp_counts": {
+        "present": 54961,
+        "missing": 0,
+        "invalid": 0
+      },
+      "rows": {
+        "quotes": {
+          "written": 54961,
+          "retained": 54961,
+          "match": true,
+          "retention_pct": 100.0
+        },
+        "signals": {
+          "written": 245,
+          "retained": 245,
+          "match": true,
+          "retention_pct": 100.0
+        },
+        "decay": {
+          "written": 1225,
+          "retained": 1225,
+          "match": true,
+          "retention_pct": 100.0
+        },
+        "lifecycle": {
+          "written": 3,
+          "retained": 3,
+          "match": true,
+          "retention_pct": 100.0
+        }
+      },
+      "files_expired": 0,
+      "write_errors": 0,
+      "rotations": 5,
+      "completed": true,
+      "row_counts_match": true,
+      "eligible": true
+    },
+    {
+      "run_id": "20261027T004408519907Z",
+      "market": "io:SNDK|lighter-rh:SNDK",
+      "record_only": true,
+      "preserve_raw": true,
+      "started_utc": "2026-10-27T00:44:08.520395+00:00",
+      "ended_utc": "2026-10-27T01:44:09.284530+00:00",
+      "duration_sec": 3600.764135,
+      "files": 10,
+      "bytes": 44411637,
+      "sha256_mismatch_count": 0,
+      "parse_error_count": 0,
+      "dropped_updates": 0,
+      "dropped_lifecycle": 0,
+      "source_timestamp_counts": {
+        "present": 52958,
+        "missing": 0,
+        "invalid": 0
+      },
+      "rows": {
+        "quotes": {
+          "written": 52958,
+          "retained": 52958,
+          "match": true,
+          "retention_pct": 100.0
+        },
+        "signals": {
+          "written": 167,
+          "retained": 167,
+          "match": true,
+          "retention_pct": 100.0
+        },
+        "decay": {
+          "written": 835,
+          "retained": 835,
+          "match": true,
+          "retention_pct": 100.0
+        },
+        "lifecycle": {
+          "written": 3,
+          "retained": 3,
+          "match": true,
+          "retention_pct": 100.0
+        }
+      },
+      "files_expired": 0,
+      "write_errors": 0,
+      "rotations": 5,
+      "completed": true,
+      "row_counts_match": true,
+      "eligible": true
+    }
+  ],
+  "excluded_runs": []
+}

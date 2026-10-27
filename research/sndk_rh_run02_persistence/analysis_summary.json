@@ -1,0 +1,1102 @@
+{
+  "schema_version": 1,
+  "data_root": "/private/tmp/entropy-arb-run02-analysis-20261027/raw",
+  "output_dir": "research/sndk_rh_run02_persistence",
+  "integrity": {
+    "supervisor": {
+      "schema_version": 1,
+      "record_only": true,
+      "market": "io:SNDK|lighter-rh:SNDK",
+      "source_commit": "46932e71adafd46852a366f88167fd8031fdead5",
+      "target_runs": 12,
+      "completed_runs": 12,
+      "failed_runs": 0,
+      "consecutive_failures": 0,
+      "status": "COMPLETED",
+      "started_wall_ns": 1793022234358327000,
+      "current_child_pid": null,
+      "last_return_code": 0,
+      "last_data_bytes": 578779750,
+      "ended_wall_ns": 1793065450013095000
+    },
+    "manifest_count": 12,
+    "eligible_run_count": 12,
+    "completed_runs": 12,
+    "target_runs": 12,
+    "failed_runs": 0,
+    "status": "COMPLETED",
+    "total_files": 119,
+    "total_bytes": 578779750,
+    "sha256_mismatch_count": 0,
+    "parse_error_count": 0,
+    "row_counts": {
+      "quotes": {
+        "written": 628027,
+        "retained": 628027,
+        "retention_pct": 100.0
+      },
+      "signals": {
+        "written": 15338,
+        "retained": 15338,
+        "retention_pct": 100.0
+      },
+      "decay": {
+        "written": 76690,
+        "retained": 76690,
+        "retention_pct": 100.0
+      },
+      "lifecycle": {
+        "written": 49,
+        "retained": 49,
+        "retention_pct": 100.0
+      }
+    },
+    "source_timestamp_status": {
+      "present": 628027
+    },
+    "depth_shapes": {
+      "5x5": 628027
+    },
+    "rolling_status": {
+      "valid_480": 626927,
+      "invalid": 1100
+    },
+    "rolling_by_run": {
+      "20261026T134354427778Z": {
+        "valid_480": 73949,
+        "invalid": 8,
+        "invalid:data_gap_or_insufficient_window": 8
+      },
+      "20261026T144355933641Z": {
+        "valid_480": 69980,
+        "invalid": 17,
+        "invalid:data_gap_or_insufficient_window": 17
+      },
+      "20261026T154356779042Z": {
+        "valid_480": 62122,
+        "invalid": 8,
+        "invalid:data_gap_or_insufficient_window": 8
+      },
+      "20261026T164357349234Z": {
+        "valid_480": 60238,
+        "invalid": 4,
+        "invalid:data_gap_or_insufficient_window": 4
+      },
+      "20261026T174358565078Z": {
+        "valid_480": 56794,
+        "invalid": 3,
+        "invalid:data_gap_or_insufficient_window": 3
+      },
+      "20261026T184359440078Z": {
+        "valid_480": 54129,
+        "invalid": 1006,
+        "invalid:data_gap_or_insufficient_window": 1006
+      },
+      "20261026T194400579380Z": {
+        "valid_480": 45076,
+        "invalid": 17,
+        "invalid:data_gap_or_insufficient_window": 17
+      },
+      "20261026T204401927331Z": {
+        "valid_480": 26408,
+        "invalid": 2,
+        "invalid:data_gap_or_insufficient_window": 2
+      },
+      "20261026T214404025676Z": {
+        "valid_480": 31046,
+        "invalid": 10,
+        "invalid:data_gap_or_insufficient_window": 10
+      },
+      "20261026T224404993045Z": {
+        "valid_480": 39279,
+        "invalid": 12,
+        "invalid:data_gap_or_insufficient_window": 12
+      },
+      "20261026T234406360245Z": {
+        "valid_480": 54953,
+        "invalid": 8,
+        "invalid:data_gap_or_insufficient_window": 8
+      },
+      "20261027T004408519907Z": {
+        "valid_480": 52953,
+        "invalid": 5,
+        "invalid:data_gap_or_insufficient_window": 5
+      }
+    },
+    "dropped_updates": 0,
+    "dropped_lifecycle": 0,
+    "files_expired": 0,
+    "write_errors": 0,
+    "rotations": 59,
+    "preserve_raw_all_runs": true,
+    "run_integrity": [
+      {
+        "run_id": "20261026T134354427778Z",
+        "market": "io:SNDK|lighter-rh:SNDK",
+        "record_only": true,
+        "preserve_raw": true,
+        "started_utc": "2026-10-26T13:43:54.428082+00:00",
+        "ended_utc": "2026-10-26T14:43:54.998761+00:00",
+        "duration_sec": 3600.570679,
+        "files": 13,
+        "bytes": 73901789,
+        "sha256_mismatch_count": 0,
+        "parse_error_count": 0,
+        "dropped_updates": 0,
+        "dropped_lifecycle": 0,
+        "source_timestamp_counts": {
+          "present": 73957,
+          "missing": 0,
+          "invalid": 0
+        },
+        "rows": {
+          "quotes": {
+            "written": 73957,
+            "retained": 73957,
+            "match": true,
+            "retention_pct": 100.0
+          },
+          "signals": {
+            "written": 3281,
+            "retained": 3281,
+            "match": true,
+            "retention_pct": 100.0
+          },
+          "decay": {
+            "written": 16405,
+            "retained": 16405,
+            "match": true,
+            "retention_pct": 100.0
+          },
+          "lifecycle": {
+            "written": 3,
+            "retained": 3,
+            "match": true,
+            "retention_pct": 100.0
+          }
+        },
+        "files_expired": 0,
+        "write_errors": 0,
+        "rotations": 8,
+        "completed": true,
+        "row_counts_match": true,
+        "eligible": true
+      },
+      {
+        "run_id": "20261026T144355933641Z",
+        "market": "io:SNDK|lighter-rh:SNDK",
+        "record_only": true,
+        "preserve_raw": true,
+        "started_utc": "2026-10-26T14:43:55.933950+00:00",
+        "ended_utc": "2026-10-26T15:43:56.300763+00:00",
+        "duration_sec": 3600.366813,
+        "files": 12,
+        "bytes": 75139720,
+        "sha256_mismatch_count": 0,
+        "parse_error_count": 0,
+        "dropped_updates": 0,
+        "dropped_lifecycle": 0,
+        "source_timestamp_counts": {
+          "present": 69997,
+          "missing": 0,
+          "invalid": 0
+        },
+        "rows": {
+          "quotes": {
+            "written": 69997,
+            "retained": 69997,
+            "match": true,
+            "retention_pct": 100.0
+          },
+          "signals": {
+            "written": 4445,
+            "retained": 4445,
+            "match": true,
+            "retention_pct": 100.0
+          },
+          "decay": {
+            "written": 22225,
+            "retained": 22225,
+            "match": true,
+            "retention_pct": 100.0
+          },
+          "lifecycle": {
+            "written": 4,
+            "retained": 4,
+            "match": true,
+            "retention_pct": 100.0
+          }
+        },
+        "files_expired": 0,
+        "write_errors": 0,
+        "rotations": 7,
+        "completed": true,
+        "row_counts_match": true,
+        "eligible": true
+      },
+      {
+        "run_id": "20261026T154356779042Z",
+        "market": "io:SNDK|lighter-rh:SNDK",
+        "record_only": true,
+        "preserve_raw": true,
+        "started_utc": "2026-10-26T15:43:56.779533+00:00",
+        "ended_utc": "2026-10-26T16:43:57.125686+00:00",
+        "duration_sec": 3600.346153,
+        "files": 12,
+        "bytes": 68191406,
+        "sha256_mismatch_count": 0,
+        "parse_error_count": 0,
+        "dropped_updates": 0,
+        "dropped_lifecycle": 0,
+        "source_timestamp_counts": {
+          "present": 62130,
+          "missing": 0,
+          "invalid": 0
+        },
+        "rows": {
+          "quotes": {
+            "written": 62130,
+            "retained": 62130,
+            "match": true,
+            "retention_pct": 100.0
+          },
+          "signals": {
+            "written": 4347,
+            "retained": 4347,
+            "match": true,
+            "retention_pct": 100.0
+          },
+          "decay": {
+            "written": 21735,
+            "retained": 21735,
+            "match": true,
+            "retention_pct": 100.0
+          },
+          "lifecycle": {
+            "written": 4,
+            "retained": 4,
+            "match": true,
+            "retention_pct": 100.0
+          }
+        },
+        "files_expired": 0,
+        "write_errors": 0,
+        "rotations": 7,
+        "completed": true,
+        "row_counts_match": true,
+        "eligible": true
+      },
+      {
+        "run_id": "20261026T164357349234Z",
+        "market": "io:SNDK|lighter-rh:SNDK",
+        "record_only": true,
+        "preserve_raw": true,
+        "started_utc": "2026-10-26T16:43:57.349675+00:00",
+        "ended_utc": "2026-10-26T17:43:58.283035+00:00",
+        "duration_sec": 3600.93336,
+        "files": 10,
+        "bytes": 57277440,
+        "sha256_mismatch_count": 0,
+        "parse_error_count": 0,
+        "dropped_updates": 0,
+        "dropped_lifecycle": 0,
+        "source_timestamp_counts": {
+          "present": 60242,
+          "missing": 0,
+          "invalid": 0
+        },
+        "rows": {
+          "quotes": {
+            "written": 60242,
+            "retained": 60242,
+            "match": true,
+            "retention_pct": 100.0
+          },
+          "signals": {
+            "written": 1938,
+            "retained": 1938,
+            "match": true,
+            "retention_pct": 100.0
+          },
+          "decay": {
+            "written": 9690,
+            "retained": 9690,
+            "match": true,
+            "retention_pct": 100.0
+          },
+          "lifecycle": {
+            "written": 4,
+            "retained": 4,
+            "match": true,
+            "retention_pct": 100.0
+          }
+        },
+        "files_expired": 0,
+        "write_errors": 0,
+        "rotations": 5,
+        "completed": true,
+        "row_counts_match": true,
+        "eligible": true
+      },
+      {
+        "run_id": "20261026T174358565078Z",
+        "market": "io:SNDK|lighter-rh:SNDK",
+        "record_only": true,
+        "preserve_raw": true,
+        "started_utc": "2026-10-26T17:43:58.565553+00:00",
+        "ended_utc": "2026-10-26T18:43:59.284499+00:00",
+        "duration_sec": 3600.718946,
+        "files": 10,
+        "bytes": 48951283,
+        "sha256_mismatch_count": 0,
+        "parse_error_count": 0,
+        "dropped_updates": 0,
+        "dropped_lifecycle": 0,
+        "source_timestamp_counts": {
+          "present": 56797,
+          "missing": 0,
+          "invalid": 0
+        },
+        "rows": {
+          "quotes": {
+            "written": 56797,
+            "retained": 56797,
+            "match": true,
+            "retention_pct": 100.0
+          },
+          "signals": {
+            "written": 516,
+            "retained": 516,
+            "match": true,
+            "retention_pct": 100.0
+          },
+          "decay": {
+            "written": 2580,
+            "retained": 2580,
+            "match": true,
+            "retention_pct": 100.0
+          },
+          "lifecycle": {
+            "written": 3,
+            "retained": 3,
+            "match": true,
+            "retention_pct": 100.0
+          }
+        },
+        "files_expired": 0,
+        "write_errors": 0,
+        "rotations": 5,
+        "completed": true,
+        "row_counts_match": true,
+        "eligible": true
+      },
+      {
+        "run_id": "20261026T184359440078Z",
+        "market": "io:SNDK|lighter-rh:SNDK",
+        "record_only": true,
+        "preserve_raw": true,
+        "started_utc": "2026-10-26T18:43:59.440575+00:00",
+        "ended_utc": "2026-10-26T19:43:59.673387+00:00",
+        "duration_sec": 3600.232812,
+        "files": 10,
+        "bytes": 46623120,
+        "sha256_mismatch_count": 0,
+        "parse_error_count": 0,
+        "dropped_updates": 0,
+        "dropped_lifecycle": 0,
+        "source_timestamp_counts": {
+          "present": 55135,
+          "missing": 0,
+          "invalid": 0
+        },
+        "rows": {
+          "quotes": {
+            "written": 55135,
+            "retained": 55135,
+            "match": true,
+            "retention_pct": 100.0
+          },
+          "signals": {
+            "written": 241,
+            "retained": 241,
+            "match": true,
+            "retention_pct": 100.0
+          },
+          "decay": {
+            "written": 1205,
+            "retained": 1205,
+            "match": true,
+            "retention_pct": 100.0
+          },
+          "lifecycle": {
+            "written": 4,
+            "retained": 4,
+            "match": true,
+            "retention_pct": 100.0
+          }
+        },
+        "files_expired": 0,
+        "write_errors": 0,
+        "rotations": 5,
+        "completed": true,
+        "row_counts_match": true,
+        "eligible": true
+      },
+      {
+        "run_id": "20261026T194400579380Z",
+        "market": "io:SNDK|lighter-rh:SNDK",
+        "record_only": true,
+        "preserve_raw": true,
+        "started_utc": "2026-10-26T19:44:00.579731+00:00",
+        "ended_utc": "2026-10-26T20:44:00.811500+00:00",
+        "duration_sec": 3600.231769,
+        "files": 9,
+        "bytes": 37688705,
+        "sha256_mismatch_count": 0,
+        "parse_error_count": 0,
+        "dropped_updates": 0,
+        "dropped_lifecycle": 0,
+        "source_timestamp_counts": {
+          "present": 45093,
+          "missing": 0,
+          "invalid": 0
+        },
+        "rows": {
+          "quotes": {
+            "written": 45093,
+            "retained": 45093,
+            "match": true,
+            "retention_pct": 100.0
+          },
+          "signals": {
+            "written": 98,
+            "retained": 98,
+            "match": true,
+            "retention_pct": 100.0
+          },
+          "decay": {
+            "written": 490,
+            "retained": 490,
+            "match": true,
+            "retention_pct": 100.0
+          },
+          "lifecycle": {
+            "written": 6,
+            "retained": 6,
+            "match": true,
+            "retention_pct": 100.0
+          }
+        },
+        "files_expired": 0,
+        "write_errors": 0,
+        "rotations": 4,
+        "completed": true,
+        "row_counts_match": true,
+        "eligible": true
+      },
+      {
+        "run_id": "20261026T204401927331Z",
+        "market": "io:SNDK|lighter-rh:SNDK",
+        "record_only": true,
+        "preserve_raw": true,
+        "started_utc": "2026-10-26T20:44:01.927770+00:00",
+        "ended_utc": "2026-10-26T21:44:03.305340+00:00",
+        "duration_sec": 3601.37757,
+        "files": 7,
+        "bytes": 21808647,
+        "sha256_mismatch_count": 0,
+        "parse_error_count": 0,
+        "dropped_updates": 0,
+        "dropped_lifecycle": 0,
+        "source_timestamp_counts": {
+          "present": 26410,
+          "missing": 0,
+          "invalid": 0
+        },
+        "rows": {
+          "quotes": {
+            "written": 26410,
+            "retained": 26410,
+            "match": true,
+            "retention_pct": 100.0
+          },
+          "signals": {
+            "written": 3,
+            "retained": 3,
+            "match": true,
+            "retention_pct": 100.0
+          },
+          "decay": {
+            "written": 15,
+            "retained": 15,
+            "match": true,
+            "retention_pct": 100.0
+          },
+          "lifecycle": {
+            "written": 3,
+            "retained": 3,
+            "match": true,
+            "retention_pct": 100.0
+          }
+        },
+        "files_expired": 0,
+        "write_errors": 0,
+        "rotations": 2,
+        "completed": true,
+        "row_counts_match": true,
+        "eligible": true
+      },
+      {
+        "run_id": "20261026T214404025676Z",
+        "market": "io:SNDK|lighter-rh:SNDK",
+        "record_only": true,
+        "preserve_raw": true,
+        "started_utc": "2026-10-26T21:44:04.026133+00:00",
+        "ended_utc": "2026-10-26T22:44:04.285384+00:00",
+        "duration_sec": 3600.259251,
+        "files": 8,
+        "bytes": 25707012,
+        "sha256_mismatch_count": 0,
+        "parse_error_count": 0,
+        "dropped_updates": 0,
+        "dropped_lifecycle": 0,
+        "source_timestamp_counts": {
+          "present": 31056,
+          "missing": 0,
+          "invalid": 0
+        },
+        "rows": {
+          "quotes": {
+            "written": 31056,
+            "retained": 31056,
+            "match": true,
+            "retention_pct": 100.0
+          },
+          "signals": {
+            "written": 9,
+            "retained": 9,
+            "match": true,
+            "retention_pct": 100.0
+          },
+          "decay": {
+            "written": 45,
+            "retained": 45,
+            "match": true,
+            "retention_pct": 100.0
+          },
+          "lifecycle": {
+            "written": 6,
+            "retained": 6,
+            "match": true,
+            "retention_pct": 100.0
+          }
+        },
+        "files_expired": 0,
+        "write_errors": 0,
+        "rotations": 3,
+        "completed": true,
+        "row_counts_match": true,
+        "eligible": true
+      },
+      {
+        "run_id": "20261026T224404993045Z",
+        "market": "io:SNDK|lighter-rh:SNDK",
+        "record_only": true,
+        "preserve_raw": true,
+        "started_utc": "2026-10-26T22:44:04.993488+00:00",
+        "ended_utc": "2026-10-26T23:44:05.731350+00:00",
+        "duration_sec": 3600.737862,
+        "files": 8,
+        "bytes": 32676055,
+        "sha256_mismatch_count": 0,
+        "parse_error_count": 0,
+        "dropped_updates": 0,
+        "dropped_lifecycle": 0,
+        "source_timestamp_counts": {
+          "present": 39291,
+          "missing": 0,
+          "invalid": 0
+        },
+        "rows": {
+          "quotes": {
+            "written": 39291,
+            "retained": 39291,
+            "match": true,
+            "retention_pct": 100.0
+          },
+          "signals": {
+            "written": 48,
+            "retained": 48,
+            "match": true,
+            "retention_pct": 100.0
+          },
+          "decay": {
+            "written": 240,
+            "retained": 240,
+            "match": true,
+            "retention_pct": 100.0
+          },
+          "lifecycle": {
+            "written": 6,
+            "retained": 6,
+            "match": true,
+            "retention_pct": 100.0
+          }
+        },
+        "files_expired": 0,
+        "write_errors": 0,
+        "rotations": 3,
+        "completed": true,
+        "row_counts_match": true,
+        "eligible": true
+      },
+      {
+        "run_id": "20261026T234406360245Z",
+        "market": "io:SNDK|lighter-rh:SNDK",
+        "record_only": true,
+        "preserve_raw": true,
+        "started_utc": "2026-10-26T23:44:06.360847+00:00",
+        "ended_utc": "2026-10-27T00:44:07.379179+00:00",
+        "duration_sec": 3601.018332,
+        "files": 10,
+        "bytes": 46402936,
+        "sha256_mismatch_count": 0,
+        "parse_error_count": 0,
+        "dropped_updates": 0,
+        "dropped_lifecycle": 0,
+        "source_timestamp_counts": {
+          "present": 54961,
+          "missing": 0,
+          "invalid": 0
+        },
+        "rows": {
+          "quotes": {
+            "written": 54961,
+            "retained": 54961,
+            "match": true,
+            "retention_pct": 100.0
+          },
+          "signals": {
+            "written": 245,
+            "retained": 245,
+            "match": true,
+            "retention_pct": 100.0
+          },
+          "decay": {
+            "written": 1225,
+            "retained": 1225,
+            "match": true,
+            "retention_pct": 100.0
+          },
+          "lifecycle": {
+            "written": 3,
+            "retained": 3,
+            "match": true,
+            "retention_pct": 100.0
+          }
+        },
+        "files_expired": 0,
+        "write_errors": 0,
+        "rotations": 5,
+        "completed": true,
+        "row_counts_match": true,
+        "eligible": true
+      },
+      {
+        "run_id": "20261027T004408519907Z",
+        "market": "io:SNDK|lighter-rh:SNDK",
+        "record_only": true,
+        "preserve_raw": true,
+        "started_utc": "2026-10-27T00:44:08.520395+00:00",
+        "ended_utc": "2026-10-27T01:44:09.284530+00:00",
+        "duration_sec": 3600.764135,
+        "files": 10,
+        "bytes": 44411637,
+        "sha256_mismatch_count": 0,
+        "parse_error_count": 0,
+        "dropped_updates": 0,
+        "dropped_lifecycle": 0,
+        "source_timestamp_counts": {
+          "present": 52958,
+          "missing": 0,
+          "invalid": 0
+        },
+        "rows": {
+          "quotes": {
+            "written": 52958,
+            "retained": 52958,
+            "match": true,
+            "retention_pct": 100.0
+          },
+          "signals": {
+            "written": 167,
+            "retained": 167,
+            "match": true,
+            "retention_pct": 100.0
+          },
+          "decay": {
+            "written": 835,
+            "retained": 835,
+            "match": true,
+            "retention_pct": 100.0
+          },
+          "lifecycle": {
+            "written": 3,
+            "retained": 3,
+            "match": true,
+            "retention_pct": 100.0
+          }
+        },
+        "files_expired": 0,
+        "write_errors": 0,
+        "rotations": 5,
+        "completed": true,
+        "row_counts_match": true,
+        "eligible": true
+      }
+    ],
+    "excluded_runs": []
+  },
+  "event_count": 61352,
+  "summary": [
+    {
+      "direction": "all",
+      "wait_ms": 0,
+      "raw_candidate_count": 15338,
+      "complete_observed_count": 15338,
+      "right_censored_count": 0,
+      "continuous_survivor_count": 15338,
+      "continuous_survival_rate_pct": 100.0,
+      "signal_retained_count": 15338,
+      "signal_retention_pct": 100.0,
+      "first_failure_count": 0,
+      "first_failure_rate_of_complete_pct": 0.0,
+      "recovered_after_failure_count": 0,
+      "recovery_rate_of_first_failures_pct": null,
+      "horizon_qualifying_count": 15338,
+      "horizon_valid_edge_count": 15338,
+      "edge_loss_p50_bps": 0.0,
+      "edge_loss_p90_bps": 0.0,
+      "remaining_edge_p50_bps": 1.3467479996842613,
+      "first_failure_after_p50_ms": null,
+      "first_failure_after_p90_ms": null,
+      "continuous_valid_duration_p50_ms": 0.0,
+      "continuous_valid_duration_p90_ms": 0.0,
+      "max_pair_observation_gap_p50_ms": 0.0,
+      "max_pair_observation_gap_p95_ms": 0.0,
+      "opportunity_lost_count": 0,
+      "opportunity_lost_pct": 0.0
+    },
+    {
+      "direction": "all",
+      "wait_ms": 100,
+      "raw_candidate_count": 15338,
+      "complete_observed_count": 15337,
+      "right_censored_count": 1,
+      "continuous_survivor_count": 13104,
+      "continuous_survival_rate_pct": 85.44043815609311,
+      "signal_retained_count": 13173,
+      "signal_retention_pct": 85.8847307341244,
+      "first_failure_count": 2233,
+      "first_failure_rate_of_complete_pct": 14.559561843906891,
+      "recovered_after_failure_count": 75,
+      "recovery_rate_of_first_failures_pct": 3.3587102552619794,
+      "horizon_qualifying_count": 13173,
+      "horizon_valid_edge_count": 15337,
+      "edge_loss_p50_bps": 0.0,
+      "edge_loss_p90_bps": 0.5630540084204938,
+      "remaining_edge_p50_bps": 1.418886962005761,
+      "first_failure_after_p50_ms": 99.661,
+      "first_failure_after_p90_ms": 287.76579999999996,
+      "continuous_valid_duration_p50_ms": 127.883,
+      "continuous_valid_duration_p90_ms": 176.956,
+      "max_pair_observation_gap_p50_ms": 55.948,
+      "max_pair_observation_gap_p95_ms": 155.72579999999996,
+      "opportunity_lost_count": 2165,
+      "opportunity_lost_pct": 14.115269265875604
+    },
+    {
+      "direction": "all",
+      "wait_ms": 250,
+      "raw_candidate_count": 15338,
+      "complete_observed_count": 15337,
+      "right_censored_count": 1,
+      "continuous_survivor_count": 387,
+      "continuous_survival_rate_pct": 2.523309643346156,
+      "signal_retained_count": 545,
+      "signal_retention_pct": 3.553266397183466,
+      "first_failure_count": 14950,
+      "first_failure_rate_of_complete_pct": 97.47669035665385,
+      "recovered_after_failure_count": 305,
+      "recovery_rate_of_first_failures_pct": 2.040133779264214,
+      "horizon_qualifying_count": 545,
+      "horizon_valid_edge_count": 15337,
+      "edge_loss_p50_bps": 0.0,
+      "edge_loss_p90_bps": 1.1884388684948455,
+      "remaining_edge_p50_bps": 1.4226999683852881,
+      "first_failure_after_p50_ms": 272.6945,
+      "first_failure_after_p90_ms": 320.7056,
+      "continuous_valid_duration_p50_ms": 272.954,
+      "continuous_valid_duration_p90_ms": 321.66519999999997,
+      "max_pair_observation_gap_p50_ms": 71.631,
+      "max_pair_observation_gap_p95_ms": 200.8792,
+      "opportunity_lost_count": 14793,
+      "opportunity_lost_pct": 96.44673360281654
+    },
+    {
+      "direction": "all",
+      "wait_ms": 500,
+      "raw_candidate_count": 15338,
+      "complete_observed_count": 15337,
+      "right_censored_count": 1,
+      "continuous_survivor_count": 47,
+      "continuous_survival_rate_pct": 0.3064484579774402,
+      "signal_retained_count": 5138,
+      "signal_retention_pct": 33.49850045638284,
+      "first_failure_count": 15290,
+      "first_failure_rate_of_complete_pct": 99.69355154202256,
+      "recovered_after_failure_count": 5642,
+      "recovery_rate_of_first_failures_pct": 36.89993459777632,
+      "horizon_qualifying_count": 5138,
+      "horizon_valid_edge_count": 15337,
+      "edge_loss_p50_bps": 0.0,
+      "edge_loss_p90_bps": 2.3756655233251323,
+      "remaining_edge_p50_bps": 1.195695496214455,
+      "first_failure_after_p50_ms": 273.6565,
+      "first_failure_after_p90_ms": 331.2323,
+      "continuous_valid_duration_p50_ms": 273.777,
+      "continuous_valid_duration_p90_ms": 333.2238,
+      "max_pair_observation_gap_p50_ms": 99.524,
+      "max_pair_observation_gap_p95_ms": 223.61159999999995,
+      "opportunity_lost_count": 10200,
+      "opportunity_lost_pct": 66.50149954361716
+    },
+    {
+      "direction": "sell_entropy",
+      "wait_ms": 0,
+      "raw_candidate_count": 401,
+      "complete_observed_count": 401,
+      "right_censored_count": 0,
+      "continuous_survivor_count": 401,
+      "continuous_survival_rate_pct": 100.0,
+      "signal_retained_count": 401,
+      "signal_retention_pct": 100.0,
+      "first_failure_count": 0,
+      "first_failure_rate_of_complete_pct": 0.0,
+      "recovered_after_failure_count": 0,
+      "recovery_rate_of_first_failures_pct": null,
+      "horizon_qualifying_count": 401,
+      "horizon_valid_edge_count": 401,
+      "edge_loss_p50_bps": 0.0,
+      "edge_loss_p90_bps": 0.0,
+      "remaining_edge_p50_bps": 2.180821234967212,
+      "first_failure_after_p50_ms": null,
+      "first_failure_after_p90_ms": null,
+      "continuous_valid_duration_p50_ms": 0.0,
+      "continuous_valid_duration_p90_ms": 0.0,
+      "max_pair_observation_gap_p50_ms": 0.0,
+      "max_pair_observation_gap_p95_ms": 0.0,
+      "opportunity_lost_count": 0,
+      "opportunity_lost_pct": 0.0
+    },
+    {
+      "direction": "sell_entropy",
+      "wait_ms": 100,
+      "raw_candidate_count": 401,
+      "complete_observed_count": 401,
+      "right_censored_count": 0,
+      "continuous_survivor_count": 259,
+      "continuous_survival_rate_pct": 64.58852867830424,
+      "signal_retained_count": 262,
+      "signal_retention_pct": 65.33665835411472,
+      "first_failure_count": 142,
+      "first_failure_rate_of_complete_pct": 35.411471321695764,
+      "recovered_after_failure_count": 3,
+      "recovery_rate_of_first_failures_pct": 2.112676056338028,
+      "horizon_qualifying_count": 262,
+      "horizon_valid_edge_count": 401,
+      "edge_loss_p50_bps": 0.0,
+      "edge_loss_p90_bps": 1.3655821854108297,
+      "remaining_edge_p50_bps": 2.3724792408064133,
+      "first_failure_after_p50_ms": 85.04849999999999,
+      "first_failure_after_p90_ms": 147.4115,
+      "continuous_valid_duration_p50_ms": 118.497,
+      "continuous_valid_duration_p90_ms": 152.861,
+      "max_pair_observation_gap_p50_ms": 55.278,
+      "max_pair_observation_gap_p95_ms": 109.862,
+      "opportunity_lost_count": 139,
+      "opportunity_lost_pct": 34.66334164588529
+    },
+    {
+      "direction": "sell_entropy",
+      "wait_ms": 250,
+      "raw_candidate_count": 401,
+      "complete_observed_count": 401,
+      "right_censored_count": 0,
+      "continuous_survivor_count": 7,
+      "continuous_survival_rate_pct": 1.745635910224439,
+      "signal_retained_count": 17,
+      "signal_retention_pct": 4.239401496259352,
+      "first_failure_count": 394,
+      "first_failure_rate_of_complete_pct": 98.25436408977556,
+      "recovered_after_failure_count": 15,
+      "recovery_rate_of_first_failures_pct": 3.8071065989847717,
+      "horizon_qualifying_count": 17,
+      "horizon_valid_edge_count": 401,
+      "edge_loss_p50_bps": 0.0,
+      "edge_loss_p90_bps": 2.2699452345853466,
+      "remaining_edge_p50_bps": 2.3627628573685833,
+      "first_failure_after_p50_ms": 244.0565,
+      "first_failure_after_p90_ms": 295.8554,
+      "continuous_valid_duration_p50_ms": 245.533,
+      "continuous_valid_duration_p90_ms": 296.054,
+      "max_pair_observation_gap_p50_ms": 63.661,
+      "max_pair_observation_gap_p95_ms": 151.394,
+      "opportunity_lost_count": 384,
+      "opportunity_lost_pct": 95.76059850374065
+    },
+    {
+      "direction": "sell_entropy",
+      "wait_ms": 500,
+      "raw_candidate_count": 401,
+      "complete_observed_count": 401,
+      "right_censored_count": 0,
+      "continuous_survivor_count": 1,
+      "continuous_survival_rate_pct": 0.24937655860349128,
+      "signal_retained_count": 56,
+      "signal_retention_pct": 13.965087281795512,
+      "first_failure_count": 400,
+      "first_failure_rate_of_complete_pct": 99.75062344139651,
+      "recovered_after_failure_count": 77,
+      "recovery_rate_of_first_failures_pct": 19.25,
+      "horizon_qualifying_count": 56,
+      "horizon_valid_edge_count": 401,
+      "edge_loss_p50_bps": 1.1764244539436142,
+      "edge_loss_p90_bps": 6.16357923367894,
+      "remaining_edge_p50_bps": 1.2511338400433836,
+      "first_failure_after_p50_ms": 245.4845,
+      "first_failure_after_p90_ms": 297.80219999999997,
+      "continuous_valid_duration_p50_ms": 245.533,
+      "continuous_valid_duration_p90_ms": 297.876,
+      "max_pair_observation_gap_p50_ms": 95.907,
+      "max_pair_observation_gap_p95_ms": 198.164,
+      "opportunity_lost_count": 345,
+      "opportunity_lost_pct": 86.0349127182045
+    },
+    {
+      "direction": "buy_entropy",
+      "wait_ms": 0,
+      "raw_candidate_count": 14937,
+      "complete_observed_count": 14937,
+      "right_censored_count": 0,
+      "continuous_survivor_count": 14937,
+      "continuous_survival_rate_pct": 100.0,
+      "signal_retained_count": 14937,
+      "signal_retention_pct": 100.0,
+      "first_failure_count": 0,
+      "first_failure_rate_of_complete_pct": 0.0,
+      "recovered_after_failure_count": 0,
+      "recovery_rate_of_first_failures_pct": null,
+      "horizon_qualifying_count": 14937,
+      "horizon_valid_edge_count": 14937,
+      "edge_loss_p50_bps": 0.0,
+      "edge_loss_p90_bps": 0.0,
+      "remaining_edge_p50_bps": 1.3395319517783832,
+      "first_failure_after_p50_ms": null,
+      "first_failure_after_p90_ms": null,
+      "continuous_valid_duration_p50_ms": 0.0,
+      "continuous_valid_duration_p90_ms": 0.0,
+      "max_pair_observation_gap_p50_ms": 0.0,
+      "max_pair_observation_gap_p95_ms": 0.0,
+      "opportunity_lost_count": 0,
+      "opportunity_lost_pct": 0.0
+    },
+    {
+      "direction": "buy_entropy",
+      "wait_ms": 100,
+      "raw_candidate_count": 14937,
+      "complete_observed_count": 14936,
+      "right_censored_count": 1,
+      "continuous_survivor_count": 12845,
+      "continuous_survival_rate_pct": 86.00026780931977,
+      "signal_retained_count": 12911,
+      "signal_retention_pct": 86.43636607083083,
+      "first_failure_count": 2091,
+      "first_failure_rate_of_complete_pct": 13.999732190680236,
+      "recovered_after_failure_count": 72,
+      "recovery_rate_of_first_failures_pct": 3.443328550932568,
+      "horizon_qualifying_count": 12911,
+      "horizon_valid_edge_count": 14936,
+      "edge_loss_p50_bps": 0.0,
+      "edge_loss_p90_bps": 0.5559305889724087,
+      "remaining_edge_p50_bps": 1.3554457024378408,
+      "first_failure_after_p50_ms": 100.304,
+      "first_failure_after_p90_ms": 290.513,
+      "continuous_valid_duration_p50_ms": 128.0605,
+      "continuous_valid_duration_p90_ms": 177.865,
+      "max_pair_observation_gap_p50_ms": 55.985,
+      "max_pair_observation_gap_p95_ms": 156.35049999999998,
+      "opportunity_lost_count": 2026,
+      "opportunity_lost_pct": 13.563633929169177
+    },
+    {
+      "direction": "buy_entropy",
+      "wait_ms": 250,
+      "raw_candidate_count": 14937,
+      "complete_observed_count": 14936,
+      "right_censored_count": 1,
+      "continuous_survivor_count": 380,
+      "continuous_survival_rate_pct": 2.544188537761114,
+      "signal_retained_count": 528,
+      "signal_retention_pct": 3.5348463546896967,
+      "first_failure_count": 14556,
+      "first_failure_rate_of_complete_pct": 97.45581146223888,
+      "recovered_after_failure_count": 290,
+      "recovery_rate_of_first_failures_pct": 1.9923055784556196,
+      "horizon_qualifying_count": 528,
+      "horizon_valid_edge_count": 14936,
+      "edge_loss_p50_bps": 0.0,
+      "edge_loss_p90_bps": 1.1793847714786088,
+      "remaining_edge_p50_bps": 1.4176577144220381,
+      "first_failure_after_p50_ms": 273.192,
+      "first_failure_after_p90_ms": 321.704,
+      "continuous_valid_duration_p50_ms": 273.4385,
+      "continuous_valid_duration_p90_ms": 322.852,
+      "max_pair_observation_gap_p50_ms": 72.31649999999999,
+      "max_pair_observation_gap_p95_ms": 201.023,
+      "opportunity_lost_count": 14409,
+      "opportunity_lost_pct": 96.46515364531031
+    },
+    {
+      "direction": "buy_entropy",
+      "wait_ms": 500,
+      "raw_candidate_count": 14937,
+      "complete_observed_count": 14936,
+      "right_censored_count": 1,
+      "continuous_survivor_count": 46,
+      "continuous_survival_rate_pct": 0.30798071772897695,
+      "signal_retained_count": 5082,
+      "signal_retention_pct": 34.02289616388833,
+      "first_failure_count": 14890,
+      "first_failure_rate_of_complete_pct": 99.69201928227102,
+      "recovered_after_failure_count": 5565,
+      "recovery_rate_of_first_failures_pct": 37.374076561450636,
+      "horizon_qualifying_count": 5082,
+      "horizon_valid_edge_count": 14936,
+      "edge_loss_p50_bps": 0.0,
+      "edge_loss_p90_bps": 2.305657208285794,
+      "remaining_edge_p50_bps": 1.194838298548273,
+      "first_failure_after_p50_ms": 274.073,
+      "first_failure_after_p90_ms": 332.3189,
+      "continuous_valid_duration_p50_ms": 274.1735,
+      "continuous_valid_duration_p90_ms": 334.057,
+      "max_pair_observation_gap_p50_ms": 99.5935,
+      "max_pair_observation_gap_p95_ms": 225.96699999999998,
+      "opportunity_lost_count": 9855,
+      "opportunity_lost_pct": 65.97710383611167
+    }
+  ],
+  "charts": [
+    "persistence_summary.svg"
+  ]
+}

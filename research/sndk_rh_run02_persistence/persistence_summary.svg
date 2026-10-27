@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="470" viewBox="0 0 1000 470">
+<style>.title{font:600 16px sans-serif}.legend,.axis{font:12px sans-serif}.plot{fill:#fafafa;stroke:#bbb}.note{font:12px sans-serif}</style>
+<text x="60" y="25" class="note">Run02 persistence (observed pair events; not execution PnL)</text>
+<text x="60" y="35" class="title">Retention / sampled survival (%)</text>
+<rect x="60" y="55" width="400" height="330" class="plot"/>
+<polyline points="60.0,55.0 193.3,103.0 326.7,376.7 460.0,384.0" fill="none" stroke="#1464a0" stroke-width="2"/>
+<circle cx="60.0" cy="55.0" r="3" fill="#1464a0"/>
+<circle cx="193.3" cy="103.0" r="3" fill="#1464a0"/>
+<circle cx="326.7" cy="376.7" r="3" fill="#1464a0"/>
+<circle cx="460.0" cy="384.0" r="3" fill="#1464a0"/>
+<line x1="72" y1="73" x2="92" y2="73" stroke="#1464a0" stroke-width="2"/>
+<text x="98" y="77" class="legend">sampled continuous survival</text>
+<polyline points="60.0,55.0 193.3,101.6 326.7,373.3 460.0,274.5" fill="none" stroke="#d97706" stroke-width="2"/>
+<circle cx="60.0" cy="55.0" r="3" fill="#d97706"/>
+<circle cx="193.3" cy="101.6" r="3" fill="#d97706"/>
+<circle cx="326.7" cy="373.3" r="3" fill="#d97706"/>
+<circle cx="460.0" cy="274.5" r="3" fill="#d97706"/>
+<line x1="72" y1="91" x2="92" y2="91" stroke="#d97706" stroke-width="2"/>
+<text x="98" y="99" class="legend">qualifies at horizon</text>
+<text x="60.0" y="405" text-anchor="middle" class="axis">0ms</text>
+<text x="193.3" y="405" text-anchor="middle" class="axis">100ms</text>
+<text x="326.7" y="405" text-anchor="middle" class="axis">250ms</text>
+<text x="460.0" y="405" text-anchor="middle" class="axis">500ms</text>
+<text x="550" y="35" class="title">Edge loss / remaining edge (bps)</text>
+<rect x="550" y="55" width="400" height="330" class="plot"/>
+<polyline points="550.0,385.0 683.3,306.8 816.7,219.9 950.0,55.0" fill="none" stroke="#b91c1c" stroke-width="2"/>
+<circle cx="550.0" cy="385.0" r="3" fill="#b91c1c"/>
+<circle cx="683.3" cy="306.8" r="3" fill="#b91c1c"/>
+<circle cx="816.7" cy="219.9" r="3" fill="#b91c1c"/>
+<circle cx="950.0" cy="55.0" r="3" fill="#b91c1c"/>
+<line x1="562" y1="73" x2="582" y2="73" stroke="#b91c1c" stroke-width="2"/>
+<text x="588" y="77" class="legend">edge loss P90</text>
+<polyline points="550.0,72.6 683.3,55.9 816.7,55.0 950.0,107.7" fill="none" stroke="#15803d" stroke-width="2"/>
+<circle cx="550.0" cy="72.6" r="3" fill="#15803d"/>
+<circle cx="683.3" cy="55.9" r="3" fill="#15803d"/>
+<circle cx="816.7" cy="55.0" r="3" fill="#15803d"/>
+<circle cx="950.0" cy="107.7" r="3" fill="#15803d"/>
+<line x1="562" y1="91" x2="582" y2="91" stroke="#15803d" stroke-width="2"/>
+<text x="588" y="99" class="legend">remaining edge P50</text>
+<text x="550.0" y="405" text-anchor="middle" class="axis">0ms</text>
+<text x="683.3" y="405" text-anchor="middle" class="axis">100ms</text>
+<text x="816.7" y="405" text-anchor="middle" class="axis">250ms</text>
+<text x="950.0" y="405" text-anchor="middle" class="axis">500ms</text>
+</svg>
