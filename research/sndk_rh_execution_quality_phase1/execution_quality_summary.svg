@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="520">
+<style>.title{font:600 16px sans-serif}.axis,.legend,.note{font:12px sans-serif}.plot{fill:#fafafa;stroke:#bbb}</style>
+<text x="60" y="28" class="note">Run02 execution quality; fee scenario: entropy_raw_4_5bps; observed VWAP, not fills</text>
+<text x="60" y="55" class="title">Positive net edge (%)</text>
+<rect x="60" y="75" width="410" height="330" class="plot"/>
+<polyline points="60.0,92.9 87.3,75.0 114.7,386.2 142.0,321.9 169.3,135.1 196.7,116.3 224.0,389.4 251.3,332.9 278.7,181.9 306.0,153.9 333.3,389.9 360.7,348.1 388.0,226.9 415.3,206.3 442.7,393.5 470.0,356.8" fill="none" stroke="#166534" stroke-width="2"/>
+<circle cx="60.0" cy="92.9" r="3" fill="#166534"/>
+<text x="60.0" y="425" text-anchor="middle" class="axis">$100@0</text>
+<circle cx="87.3" cy="75.0" r="3" fill="#166534"/>
+<text x="87.3" y="425" text-anchor="middle" class="axis">$100@100</text>
+<circle cx="114.7" cy="386.2" r="3" fill="#166534"/>
+<text x="114.7" y="425" text-anchor="middle" class="axis">$100@250</text>
+<circle cx="142.0" cy="321.9" r="3" fill="#166534"/>
+<text x="142.0" y="425" text-anchor="middle" class="axis">$100@500</text>
+<circle cx="169.3" cy="135.1" r="3" fill="#166534"/>
+<text x="169.3" y="425" text-anchor="middle" class="axis">$250@0</text>
+<circle cx="196.7" cy="116.3" r="3" fill="#166534"/>
+<text x="196.7" y="425" text-anchor="middle" class="axis">$250@100</text>
+<circle cx="224.0" cy="389.4" r="3" fill="#166534"/>
+<text x="224.0" y="425" text-anchor="middle" class="axis">$250@250</text>
+<circle cx="251.3" cy="332.9" r="3" fill="#166534"/>
+<text x="251.3" y="425" text-anchor="middle" class="axis">$250@500</text>
+<circle cx="278.7" cy="181.9" r="3" fill="#166534"/>
+<text x="278.7" y="425" text-anchor="middle" class="axis">$500@0</text>
+<circle cx="306.0" cy="153.9" r="3" fill="#166534"/>
+<text x="306.0" y="425" text-anchor="middle" class="axis">$500@100</text>
+<circle cx="333.3" cy="389.9" r="3" fill="#166534"/>
+<text x="333.3" y="425" text-anchor="middle" class="axis">$500@250</text>
+<circle cx="360.7" cy="348.1" r="3" fill="#166534"/>
+<text x="360.7" y="425" text-anchor="middle" class="axis">$500@500</text>
+<circle cx="388.0" cy="226.9" r="3" fill="#166534"/>
+<text x="388.0" y="425" text-anchor="middle" class="axis">$1000@0</text>
+<circle cx="415.3" cy="206.3" r="3" fill="#166534"/>
+<text x="415.3" y="425" text-anchor="middle" class="axis">$1000@100</text>
+<circle cx="442.7" cy="393.5" r="3" fill="#166534"/>
+<text x="442.7" y="425" text-anchor="middle" class="axis">$1000@250</text>
+<circle cx="470.0" cy="356.8" r="3" fill="#166534"/>
+<text x="470.0" y="425" text-anchor="middle" class="axis">$1000@500</text>
+<text x="550" y="55" class="title">Gross VWAP edge P50 (bps)</text>
+<rect x="550" y="75" width="410" height="330" class="plot"/>
+<polyline points="550.0,92.0 577.3,75.0 604.7,149.4 632.0,171.8 659.3,111.9 686.7,104.5 714.0,169.5 741.3,191.6 768.7,150.1 796.0,139.9 823.3,207.5 850.7,230.3 878.0,214.3 905.3,207.4 932.7,269.7 960.0,305.1" fill="none" stroke="#1d4ed8" stroke-width="2"/>
+<circle cx="550.0" cy="92.0" r="3" fill="#1d4ed8"/>
+<text x="550.0" y="425" text-anchor="middle" class="axis">$100@0</text>
+<circle cx="577.3" cy="75.0" r="3" fill="#1d4ed8"/>
+<text x="577.3" y="425" text-anchor="middle" class="axis">$100@100</text>
+<circle cx="604.7" cy="149.4" r="3" fill="#1d4ed8"/>
+<text x="604.7" y="425" text-anchor="middle" class="axis">$100@250</text>
+<circle cx="632.0" cy="171.8" r="3" fill="#1d4ed8"/>
+<text x="632.0" y="425" text-anchor="middle" class="axis">$100@500</text>
+<circle cx="659.3" cy="111.9" r="3" fill="#1d4ed8"/>
+<text x="659.3" y="425" text-anchor="middle" class="axis">$250@0</text>
+<circle cx="686.7" cy="104.5" r="3" fill="#1d4ed8"/>
+<text x="686.7" y="425" text-anchor="middle" class="axis">$250@100</text>
+<circle cx="714.0" cy="169.5" r="3" fill="#1d4ed8"/>
+<text x="714.0" y="425" text-anchor="middle" class="axis">$250@250</text>
+<circle cx="741.3" cy="191.6" r="3" fill="#1d4ed8"/>
+<text x="741.3" y="425" text-anchor="middle" class="axis">$250@500</text>
+<circle cx="768.7" cy="150.1" r="3" fill="#1d4ed8"/>
+<text x="768.7" y="425" text-anchor="middle" class="axis">$500@0</text>
+<circle cx="796.0" cy="139.9" r="3" fill="#1d4ed8"/>
+<text x="796.0" y="425" text-anchor="middle" class="axis">$500@100</text>
+<circle cx="823.3" cy="207.5" r="3" fill="#1d4ed8"/>
+<text x="823.3" y="425" text-anchor="middle" class="axis">$500@250</text>
+<circle cx="850.7" cy="230.3" r="3" fill="#1d4ed8"/>
+<text x="850.7" y="425" text-anchor="middle" class="axis">$500@500</text>
+<circle cx="878.0" cy="214.3" r="3" fill="#1d4ed8"/>
+<text x="878.0" y="425" text-anchor="middle" class="axis">$1000@0</text>
+<circle cx="905.3" cy="207.4" r="3" fill="#1d4ed8"/>
+<text x="905.3" y="425" text-anchor="middle" class="axis">$1000@100</text>
+<circle cx="932.7" cy="269.7" r="3" fill="#1d4ed8"/>
+<text x="932.7" y="425" text-anchor="middle" class="axis">$1000@250</text>
+<circle cx="960.0" cy="305.1" r="3" fill="#1d4ed8"/>
+<text x="960.0" y="425" text-anchor="middle" class="axis">$1000@500</text>
+</svg>
